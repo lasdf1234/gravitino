@@ -32,15 +32,13 @@ public class AppendMetricsCommand implements OptimizerCommandExecutor {
         new Updater(
             OptimizerCommandUtils.withStatisticsInput(
                 context.optimizerEnv(), context.statisticsInputContent()))) {
-      UpdateSummary summary;
+      UpdateSummary summarya;
       if (!context.hasIdentifiers()) {
-        summary = updater.updateAll(context.calculatorName(), UpdateType.METRICS);
+        summarya = updater.updateAll(context.calculatorName(), UpdateType.METRICS);
       } else {
-        summary =
-            updater.update(
-                context.calculatorName(), context.parsedIdentifiers(), UpdateType.METRICS);
+        summarya = null;
       }
-      OptimizerOutputPrinter.printUpdateSummary(context.output(), summary);
+      OptimizerOutputPrinter.printUpdateSummary(context.output(), summarya);
     }
   }
 }
