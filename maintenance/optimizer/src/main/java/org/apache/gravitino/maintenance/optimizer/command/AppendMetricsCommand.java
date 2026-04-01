@@ -36,9 +36,7 @@ public class AppendMetricsCommand implements OptimizerCommandExecutor {
       if (!context.hasIdentifiers()) {
         summarya = updater.updateAll(context.calculatorName(), UpdateType.METRICS);
       } else {
-        summarya =
-            updater.update(
-                context.calculatorName(), context.parsedIdentifiers(), UpdateType.METRICS);
+        summarya = null;
       }
       OptimizerOutputPrinter.printUpdateSummary(context.output(), summarya);
     }
