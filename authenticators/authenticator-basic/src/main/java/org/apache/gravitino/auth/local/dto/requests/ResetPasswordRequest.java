@@ -17,22 +17,32 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local.dto.requests;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.rest.RESTRequest;
 
-  /** Simple authentication. */
-  SIMPLE,
+/** Request for resetting a built-in authentication user password. */
+public class ResetPasswordRequest implements RESTRequest {
 
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
+  @JsonProperty("password")
+  private String password;
 
-  /** Authentication that uses OAuth. */
-  OAUTH,
+  public ResetPasswordRequest() {}
 
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  public ResetPasswordRequest(String password) {
+    this.password = password;
+  }
+
+  public String password() {
+    return password;
+  }
+
+  @Override
+  public void validate() throws IllegalArgumentException {
+    Preconditions.checkArgument(
+        StringUtils.isNotBlank(password), "\"password\" field is required and cannot be empty");
+  }
 }

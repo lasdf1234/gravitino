@@ -17,22 +17,25 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-  /** Simple authentication. */
-  SIMPLE,
+import java.nio.charset.StandardCharsets;
+import org.apache.gravitino.auth.AuthConstants;
+import org.junit.jupiter.api.Test;
 
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
+public class TestBasicAuthenticator {
 
-  /** Authentication that uses OAuth. */
-  OAUTH,
-
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  @Test
+  public void testSupportsBasicToken() {
+    BasicAuthenticator authenticator = new BasicAuthenticator();
+    assertTrue(authenticator.supportsToken(null));
+    assertTrue(
+        authenticator.supportsToken(
+            (AuthConstants.AUTHORIZATION_BASIC_HEADER + "dGVzdDp0ZXN0")
+                .getBytes(StandardCharsets.UTF_8)));
+    assertFalse(authenticator.supportsToken("Bearer token".getBytes(StandardCharsets.UTF_8)));
+  }
 }

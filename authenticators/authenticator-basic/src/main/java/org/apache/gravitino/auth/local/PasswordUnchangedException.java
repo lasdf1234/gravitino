@@ -17,22 +17,12 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+/** Raised when a password reset does not actually change the password. */
+public class PasswordUnchangedException extends IllegalArgumentException {
 
-  /** Simple authentication. */
-  SIMPLE,
-
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
-
-  /** Authentication that uses OAuth. */
-  OAUTH,
-
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  public PasswordUnchangedException(String message) {
+    super(message);
+  }
 }

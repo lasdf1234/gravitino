@@ -27,6 +27,7 @@ import javax.inject.Singleton;
 import javax.servlet.Servlet;
 import org.apache.gravitino.Configs;
 import org.apache.gravitino.GravitinoEnv;
+import org.apache.gravitino.auth.AuthenticatorType;
 import org.apache.gravitino.catalog.CatalogDispatcher;
 import org.apache.gravitino.catalog.FilesetDispatcher;
 import org.apache.gravitino.catalog.FunctionDispatcher;
@@ -124,6 +125,11 @@ public class GravitinoServer extends ResourceConfig {
   private void initializeRestApi() {
     HashSet<String> restApiPackagesSet = new HashSet<>();
     restApiPackagesSet.add("org.apache.gravitino.server.web.rest");
+    if (serverConfig
+        .get(Configs.AUTHENTICATORS)
+        .contains(AuthenticatorType.BASIC.name().toLowerCase())) {
+      restApiPackagesSet.add("org.apache.gravitino.auth.local.web");
+    }
     restApiPackagesSet.addAll(serverConfig.get(Configs.REST_API_EXTENSION_PACKAGES));
     restApiPackagesSet.addAll(lineageService.getRESTPackages());
     packages(restApiPackagesSet.toArray(new String[0]));

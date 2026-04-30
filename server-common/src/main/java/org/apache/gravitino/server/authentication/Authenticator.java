@@ -20,6 +20,7 @@
 package org.apache.gravitino.server.authentication;
 
 import java.security.Principal;
+import javax.servlet.http.HttpServletRequest;
 import org.apache.gravitino.Config;
 
 /** The interface provides authentication mechanism. */
@@ -43,6 +44,20 @@ public interface Authenticator {
   default Principal authenticateToken(byte[] tokenData) {
     throw new UnsupportedOperationException(
         "Authenticator doesn't support to authenticate the data from the token");
+  }
+
+  /**
+   * Use the request context and token data to authenticate.
+   *
+   * <p>Implementations that need request metadata such as path or method can override this method.
+   * The default implementation delegates to {@link #authenticateToken(byte[])}.
+   *
+   * @param request The current HTTP request.
+   * @param tokenData The data used for authentication.
+   * @return The identifier of user
+   */
+  default Principal authenticate(HttpServletRequest request, byte[] tokenData) {
+    return authenticateToken(tokenData);
   }
 
   /**

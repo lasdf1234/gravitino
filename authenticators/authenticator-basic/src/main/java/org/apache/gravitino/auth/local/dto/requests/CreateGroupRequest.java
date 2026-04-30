@@ -17,22 +17,32 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local.dto.requests;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.rest.RESTRequest;
 
-  /** Simple authentication. */
-  SIMPLE,
+/** Request for creating a built-in authentication group. */
+public class CreateGroupRequest implements RESTRequest {
 
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
+  @JsonProperty("group")
+  private String group;
 
-  /** Authentication that uses OAuth. */
-  OAUTH,
+  public CreateGroupRequest() {}
 
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  public CreateGroupRequest(String group) {
+    this.group = group;
+  }
+
+  public String group() {
+    return group;
+  }
+
+  @Override
+  public void validate() throws IllegalArgumentException {
+    Preconditions.checkArgument(
+        StringUtils.isNotBlank(group), "\"group\" field is required and cannot be empty");
+  }
 }

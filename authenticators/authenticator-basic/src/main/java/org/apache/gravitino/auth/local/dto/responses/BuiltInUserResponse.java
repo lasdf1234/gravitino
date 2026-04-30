@@ -17,22 +17,36 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local.dto.responses;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
+import org.apache.gravitino.auth.local.dto.BuiltInUserDTO;
+import org.apache.gravitino.dto.responses.BaseResponse;
 
-  /** Simple authentication. */
-  SIMPLE,
+/** Response containing one built-in authentication user. */
+public class BuiltInUserResponse extends BaseResponse {
 
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
+  @JsonProperty("user")
+  private final BuiltInUserDTO user;
 
-  /** Authentication that uses OAuth. */
-  OAUTH,
+  public BuiltInUserResponse() {
+    super();
+    this.user = null;
+  }
 
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  public BuiltInUserResponse(BuiltInUserDTO user) {
+    super(0);
+    this.user = user;
+  }
+
+  public BuiltInUserDTO user() {
+    return user;
+  }
+
+  @Override
+  public void validate() {
+    super.validate();
+    Preconditions.checkArgument(user != null, "'user' field is required");
+  }
 }

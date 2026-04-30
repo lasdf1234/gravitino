@@ -711,7 +711,8 @@ curl -X PUT -H "Accept: application/vnd.gravitino.v1+json" \
 #### 9.1.9 Remove users from a local group
 
 You can remove users from a local group by providing the group name in the path and the target
-user names in the request body.
+user names in the request body. If the request would remove all current users from the group, the
+caller must explicitly set `force=true`.
 
 The request path for REST API is `/api/idp/groups/{group}/remove`.
 
@@ -719,7 +720,7 @@ The request path for REST API is `/api/idp/groups/{group}/remove`.
 curl -X PUT -H "Accept: application/vnd.gravitino.v1+json" \
 -H "Content-Type: application/json" -d '{
   "users": ["alice"]
-}' http://localhost:8090/api/idp/groups/engineering/remove
+}' 'http://localhost:8090/api/idp/groups/engineering/remove?force=true'
 ```
 
 **Response:**

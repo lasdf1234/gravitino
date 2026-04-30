@@ -17,22 +17,32 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local.dto;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.List;
 
-  /** Simple authentication. */
-  SIMPLE,
+/** Built-in authentication user DTO. */
+public class BuiltInUserDTO {
 
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
+  @JsonProperty("name")
+  private String name;
 
-  /** Authentication that uses OAuth. */
-  OAUTH,
+  @JsonProperty("groups")
+  private List<String> groups;
 
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  public BuiltInUserDTO() {}
+
+  public BuiltInUserDTO(String name, List<String> groups) {
+    this.name = name;
+    this.groups = groups;
+  }
+
+  public String name() {
+    return name;
+  }
+
+  public List<String> groups() {
+    return groups;
+  }
 }

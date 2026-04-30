@@ -17,22 +17,17 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.auth.local.store;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+import com.google.common.collect.ImmutableList;
+import java.util.List;
+import org.apache.gravitino.storage.relational.mapper.provider.MapperPackageProvider;
 
-  /** Simple authentication. */
-  SIMPLE,
+/** Registers built-in authentication MyBatis mappers. */
+public class IdpAuthenticationMapperPackageProvider implements MapperPackageProvider {
 
-  /** Authentication that uses built-in username and password verification. */
-  BASIC,
-
-  /** Authentication that uses OAuth. */
-  OAUTH,
-
-  /** Authentication that uses Kerberos. */
-  KERBEROS
+  @Override
+  public List<Class<?>> getMapperClasses() {
+    return ImmutableList.of(IdpAuthenticationMapper.class);
+  }
 }
