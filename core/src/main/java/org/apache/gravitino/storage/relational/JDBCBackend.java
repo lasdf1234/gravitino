@@ -67,6 +67,8 @@ import org.apache.gravitino.storage.relational.service.CatalogMetaService;
 import org.apache.gravitino.storage.relational.service.FilesetMetaService;
 import org.apache.gravitino.storage.relational.service.FunctionMetaService;
 import org.apache.gravitino.storage.relational.service.GroupMetaService;
+import org.apache.gravitino.storage.relational.service.IdpGroupMetaService;
+import org.apache.gravitino.storage.relational.service.IdpUserMetaService;
 import org.apache.gravitino.storage.relational.service.JobMetaService;
 import org.apache.gravitino.storage.relational.service.JobTemplateMetaService;
 import org.apache.gravitino.storage.relational.service.MetalakeMetaService;
@@ -351,7 +353,7 @@ public class JDBCBackend implements RelationalBackend {
         return (List<E>)
             JobTemplateMetaService.getInstance().batchGetJobTemplateByIdentifier(identifiers);
       case USER:
-        // TODO: Add true batch SQL operations for users, groups, roles, and views
+        // TODO: Add true batch SQL operations for users, roles, and views
         List<E> users = Lists.newArrayList();
         for (NameIdentifier identifier : identifiers) {
           try {
@@ -362,15 +364,7 @@ public class JDBCBackend implements RelationalBackend {
         }
         return users;
       case GROUP:
-        List<E> groups = Lists.newArrayList();
-        for (NameIdentifier identifier : identifiers) {
-          try {
-            groups.add((E) GroupMetaService.getInstance().getGroupByIdentifier(identifier));
-          } catch (NoSuchEntityException e) {
-            LOG.debug("Skipping missing group during batch get: {}", identifier.name());
-          }
-        }
-        return groups;
+        return (List<E>) GroupMetaService.getInstance().batchGetGroupByIdentifier(identifiers);
       case ROLE:
         List<E> roles = Lists.newArrayList();
         for (NameIdentifier identifier : identifiers) {
@@ -473,8 +467,16 @@ public class JDBCBackend implements RelationalBackend {
         return UserMetaService.getInstance()
             .deleteUserMetasByLegacyTimeline(
                 legacyTimeline, GARBAGE_COLLECTOR_SINGLE_DELETION_LIMIT);
+      case IDP_USER:
+        return IdpUserMetaService.getInstance()
+            .deleteUserMetasByLegacyTimeline(
+                legacyTimeline, GARBAGE_COLLECTOR_SINGLE_DELETION_LIMIT);
       case GROUP:
         return GroupMetaService.getInstance()
+            .deleteGroupMetasByLegacyTimeline(
+                legacyTimeline, GARBAGE_COLLECTOR_SINGLE_DELETION_LIMIT);
+      case IDP_GROUP:
+        return IdpGroupMetaService.getInstance()
             .deleteGroupMetasByLegacyTimeline(
                 legacyTimeline, GARBAGE_COLLECTOR_SINGLE_DELETION_LIMIT);
       case ROLE:
@@ -540,7 +542,9 @@ public class JDBCBackend implements RelationalBackend {
       case COLUMN:
       case TOPIC:
       case USER:
+      case IDP_USER:
       case GROUP:
+      case IDP_GROUP:
       case AUDIT:
       case ROLE:
       case TAG:
