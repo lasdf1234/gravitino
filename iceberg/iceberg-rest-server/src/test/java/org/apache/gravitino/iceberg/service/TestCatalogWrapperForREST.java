@@ -27,20 +27,29 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableMap;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergConstants;
+import org.apache.gravitino.credential.S3TokenCredential;
 import org.apache.gravitino.iceberg.common.IcebergConfig;
+import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.rest.PlanStatus;
 import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.rest.requests.CreateTableRequest;
+import org.apache.iceberg.rest.requests.PlanTableScanRequest;
 import org.apache.iceberg.rest.responses.LoadTableResponse;
+import org.apache.iceberg.rest.responses.PlanTableScanResponse;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -120,6 +129,8 @@ public class TestCatalogWrapperForREST {
                 "http://localhost:9000",
                 IcebergConstants.ICEBERG_ACCESS_DELEGATION,
                 "vended-credentials",
+                "client.credentials-provider.credentials.uri",
+                "http://localhost:8181/v1/credentials",
                 IcebergConstants.WAREHOUSE,
                 "/remote/warehouse"));
 
@@ -132,6 +143,9 @@ public class TestCatalogWrapperForREST {
         "http://localhost:9000", configToClients.get(IcebergConstants.ICEBERG_S3_ENDPOINT));
     Assertions.assertEquals(
         "vended-credentials", configToClients.get(IcebergConstants.ICEBERG_ACCESS_DELEGATION));
+    Assertions.assertEquals(
+        "http://localhost:8181/v1/credentials",
+        configToClients.get("client.credentials-provider.credentials.uri"));
   }
 
   @Test
@@ -284,6 +298,77 @@ public class TestCatalogWrapperForREST {
     verify(tableBuilder, never()).withLocation(any());
   }
 
+  @Test
+  void testPlanTableScanIncludesPlanIdAndCredentials() {
+    Catalog catalog = mock(Catalog.class);
+    Table table = mock(Table.class);
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.snapshotId()).thenReturn(1L);
+    when(table.currentSnapshot()).thenReturn(snapshot);
+    when(table.name()).thenReturn("tbl");
+    when(catalog.loadTable(any(TableIdentifier.class))).thenReturn(table);
+
+    IcebergConfig config =
+        new IcebergConfig(
+            ImmutableMap.of(
+                IcebergConstants.CATALOG_BACKEND,
+                "memory",
+                IcebergConstants.WAREHOUSE,
+                "/tmp/warehouse"));
+
+    CatalogWrapperForREST wrapper = new ScanPlanCatalogWrapperForREST("test", config, catalog);
+    PlanTableScanResponse response =
+        wrapper.planTableScan(
+            TableIdentifier.of(Namespace.of("db"), "tbl"), PlanTableScanRequest.builder().build());
+
+    Assertions.assertEquals(PlanStatus.COMPLETED, response.planStatus());
+    Assertions.assertEquals("plan-test-id", response.planId());
+    Assertions.assertEquals(1, response.credentials().size());
+    Assertions.assertEquals("test-token", response.credentials().get(0).config().get("token"));
+  }
+
+  @Test
+  void testCredentialConfigForClientIncludesRefreshEndpointAndExpiry() {
+    IcebergConfig config =
+        new IcebergConfig(
+            ImmutableMap.of(
+                IcebergConstants.CATALOG_BACKEND,
+                "memory",
+                IcebergConstants.WAREHOUSE,
+                "/tmp/warehouse"));
+    CatalogWrapperForREST wrapper =
+        new StaticCatalogWrapperForREST("aws_remote", config, mock(Catalog.class));
+
+    Map<String, String> credentialConfig =
+        wrapper.credentialConfigForClient(
+            TableIdentifier.of(Namespace.of("test"), "tbl"),
+            new S3TokenCredential("key", "secret", "token", 1234L));
+
+    Assertions.assertEquals("key", credentialConfig.get(IcebergConstants.ICEBERG_S3_ACCESS_KEY_ID));
+    Assertions.assertEquals(
+        "secret", credentialConfig.get(IcebergConstants.ICEBERG_S3_SECRET_ACCESS_KEY));
+    Assertions.assertEquals("token", credentialConfig.get(IcebergConstants.ICEBERG_S3_TOKEN));
+    Assertions.assertEquals(
+        "1234", credentialConfig.get(IcebergConstants.ICEBERG_S3_TOKEN_EXPIRES_AT_MS));
+    Assertions.assertEquals(
+        "/v1/aws_remote/namespaces/test/tables/tbl/credentials",
+        credentialConfig.get(IcebergConstants.AWS_REFRESH_CREDENTIALS_ENDPOINT));
+  }
+
+  @Test
+  void testToIcebergCredentialUsesTableLocationAsPrefix() {
+    TableMetadata metadata = mock(TableMetadata.class);
+    when(metadata.location()).thenReturn("s3://bucket/path/to/table");
+
+    org.apache.iceberg.rest.credentials.Credential credential =
+        CatalogWrapperForREST.toIcebergCredential(
+            new S3TokenCredential("key", "secret", "token", 1234L), metadata);
+
+    Assertions.assertEquals("s3://bucket/path/to/table/", credential.prefix());
+    Assertions.assertEquals(
+        "1234", credential.config().get(IcebergConstants.ICEBERG_S3_TOKEN_EXPIRES_AT_MS));
+  }
+
   private static class LazyCheckCatalogWrapperForREST extends CatalogWrapperForREST {
 
     LazyCheckCatalogWrapperForREST(String catalogName, IcebergConfig config) {
@@ -310,6 +395,51 @@ public class TestCatalogWrapperForREST {
     @Override
     public Catalog getCatalog() {
       return catalog;
+    }
+  }
+
+  private static class ScanPlanCatalogWrapperForREST extends CatalogWrapperForREST {
+    private final Catalog catalog;
+
+    ScanPlanCatalogWrapperForREST(String catalogName, IcebergConfig config, Catalog catalog) {
+      super(catalogName, config);
+      this.catalog = catalog;
+    }
+
+    @Override
+    public Catalog getCatalog() {
+      return catalog;
+    }
+
+    @Override
+    protected CloseableIterable<FileScanTask> createFilePlanScanTasks(
+        Table table, TableIdentifier tableIdentifier, PlanTableScanRequest scanRequest) {
+      return CloseableIterable.empty();
+    }
+
+    @Override
+    protected String newPlanId() {
+      return "plan-test-id";
+    }
+
+    @Override
+    protected java.util.List<org.apache.iceberg.rest.credentials.Credential>
+        planTableScanCredentials(Table table) {
+      return Collections.singletonList(
+          new org.apache.iceberg.rest.credentials.Credential() {
+            @Override
+            public String prefix() {
+              return "s3://bucket";
+            }
+
+            @Override
+            public Map<String, String> config() {
+              return ImmutableMap.of("token", "test-token");
+            }
+
+            @Override
+            public void validate() {}
+          });
     }
   }
 }

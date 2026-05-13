@@ -35,6 +35,10 @@ public class CredentialPropertyUtils {
   @VisibleForTesting static final String ICEBERG_S3_ACCESS_KEY_ID = "s3.access-key-id";
   @VisibleForTesting static final String ICEBERG_S3_SECRET_ACCESS_KEY = "s3.secret-access-key";
   @VisibleForTesting static final String ICEBERG_S3_TOKEN = "s3.session-token";
+
+  @VisibleForTesting
+  static final String ICEBERG_S3_TOKEN_EXPIRES_AT_MS = "s3.session-token-expires-at-ms";
+
   @VisibleForTesting static final String ICEBERG_GCS_TOKEN = "gcs.oauth2.token";
 
   @VisibleForTesting static final String ICEBERG_OSS_ACCESS_KEY_ID = "client.access-key-id";
@@ -82,8 +86,15 @@ public class CredentialPropertyUtils {
    * @return a map of Iceberg properties derived from the credential
    */
   public static Map<String, String> toIcebergProperties(Credential credential) {
-    if (credential instanceof S3TokenCredential
-        || credential instanceof S3SecretKeyCredential
+    if (credential instanceof S3TokenCredential) {
+      Map<String, String> icebergS3TokenCredentialProperties =
+          transformProperties(credential.credentialInfo(), icebergCredentialPropertyMap);
+      icebergS3TokenCredentialProperties.put(
+          ICEBERG_S3_TOKEN_EXPIRES_AT_MS, String.valueOf(credential.expireTimeInMs()));
+      return icebergS3TokenCredentialProperties;
+    }
+
+    if (credential instanceof S3SecretKeyCredential
         || credential instanceof OSSTokenCredential
         || credential instanceof OSSSecretKeyCredential
         || credential instanceof AzureAccountKeyCredential
@@ -126,6 +137,7 @@ public class CredentialPropertyUtils {
    */
   public static Map<String, String> filterCredentialProperties(Map<String, String> properties) {
     Set<String> credentialPropertyKeys = Sets.newHashSet(icebergCredentialPropertyMap.values());
+    credentialPropertyKeys.add(ICEBERG_S3_TOKEN_EXPIRES_AT_MS);
     credentialPropertyKeys.add(GCS_OAUTH_2_TOKEN_EXPIRES_AT);
     Map<String, String> filteredProperties = Maps.newHashMap(properties);
     filteredProperties

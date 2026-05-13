@@ -38,7 +38,9 @@ public class TestCredentialPropertiesUtils {
             CredentialPropertyUtils.ICEBERG_S3_SECRET_ACCESS_KEY,
             "secret",
             CredentialPropertyUtils.ICEBERG_S3_TOKEN,
-            "token");
+            "token",
+            CredentialPropertyUtils.ICEBERG_S3_TOKEN_EXPIRES_AT_MS,
+            "100");
     Assertions.assertEquals(expectedProperties, icebergProperties);
 
     S3SecretKeyCredential secretKeyCredential = new S3SecretKeyCredential("key", "secret");
