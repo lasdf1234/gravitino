@@ -351,7 +351,7 @@ public class CatalogWrapperForREST extends IcebergCatalogWrapper {
   @VisibleForTesting
   String credentialsRefreshEndpoint(TableIdentifier tableIdentifier) {
     return String.format(
-        "/v1/%s/namespaces/%s/tables/%s/credentials",
+        "v1/%s/namespaces/%s/tables/%s/credentials",
         RESTUtil.encodeString(catalogName),
         RESTUtil.encodeNamespace(tableIdentifier.namespace()),
         RESTUtil.encodeString(tableIdentifier.name()));
