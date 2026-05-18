@@ -135,14 +135,22 @@ public class PostgreSQLContainer extends BaseContainer {
     return PASSWORD;
   }
 
+  protected String getJdbcHost() {
+    return container.getHost();
+  }
+
+  protected int getJdbcPort() {
+    return getMappedPort(PG_PORT);
+  }
+
   /** getJdbcUrl without database name. */
   public String getJdbcUrl() {
-    return format("jdbc:postgresql://%s:%d/", getContainerIpAddress(), PG_PORT);
+    return format("jdbc:postgresql://%s:%d/", getJdbcHost(), getJdbcPort());
   }
 
   /** getJdbcUrl with database name. */
   public String getJdbcUrl(TestDatabaseName testDatabaseName) {
-    return format("jdbc:postgresql://%s:%d/%s", getContainerIpAddress(), PG_PORT, testDatabaseName);
+    return format("jdbc:postgresql://%s:%d/%s", getJdbcHost(), getJdbcPort(), testDatabaseName);
   }
 
   public String getDriverClassName(TestDatabaseName testDatabaseName) throws SQLException {

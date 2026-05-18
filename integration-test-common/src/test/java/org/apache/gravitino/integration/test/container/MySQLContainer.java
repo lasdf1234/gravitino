@@ -167,12 +167,20 @@ public class MySQLContainer extends BaseContainer {
     return PASSWORD;
   }
 
+  protected String getJdbcHost() {
+    return container.getHost();
+  }
+
+  protected int getJdbcPort() {
+    return getMappedPort(MYSQL_PORT);
+  }
+
   public String getJdbcUrl() {
-    return format("jdbc:mysql://%s:%d", getContainerIpAddress(), MYSQL_PORT);
+    return format("jdbc:mysql://%s:%d", getJdbcHost(), getJdbcPort());
   }
 
   public String getJdbcUrl(TestDatabaseName testDatabaseName) {
-    return format("jdbc:mysql://%s:%d/%s", getContainerIpAddress(), MYSQL_PORT, testDatabaseName);
+    return format("jdbc:mysql://%s:%d/%s", getJdbcHost(), getJdbcPort(), testDatabaseName);
   }
 
   public String getDriverClassName(TestDatabaseName testDatabaseName) throws SQLException {
