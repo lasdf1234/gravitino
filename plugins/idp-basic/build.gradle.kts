@@ -26,6 +26,7 @@ plugins {
 dependencies {
   annotationProcessor(libs.lombok)
 
+  implementation(project(":common"))
   implementation(project(":core"))
 
   implementation(libs.bcprov.jdk18on)
@@ -34,6 +35,7 @@ dependencies {
   implementation(libs.mybatis)
 
   compileOnly(libs.lombok)
+  compileOnly(libs.slf4j.api)
 
   testImplementation(project(":common"))
   testImplementation(project(":core"))
@@ -53,6 +55,33 @@ dependencies {
 }
 
 tasks {
+  val copyDepends by registering(Copy::class) {
+    from(configurations.runtimeClasspath)
+    into("build/libs")
+  }
+
+  jar {
+    finalizedBy(copyDepends)
+  }
+
+  val copyLibs by registering(Copy::class) {
+    dependsOn("jar", copyDepends)
+    from("build/libs") {
+      exclude("guava-*.jar")
+      exclude("log4j-*.jar")
+      exclude("slf4j-*.jar")
+      exclude("error_prone_annotations-*.jar")
+    }
+    into("$rootDir/distribution/package/libs")
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+  }
+
+  register("copyLibAndConfigs", Copy::class) {
+    group = "gravitino distribution"
+    description = "Copy idp-basic plugin libs into distribution package libs classpath"
+    dependsOn(copyLibs)
+  }
+
   test {
     environment("GRAVITINO_HOME", rootDir.path)
     environment("GRAVITINO_TEST", "true")
