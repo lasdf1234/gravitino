@@ -483,21 +483,8 @@ public class CatalogWrapperForREST extends IcebergCatalogWrapper {
             tableIdentifier);
       }
 
-      PlanTableScanResponse.Builder responseBuilder =
-          PlanTableScanResponse.builder()
-              .withPlanStatus(PlanStatus.COMPLETED)
-              .withPlanTasks(planTasks)
-              .withSpecsById(specsById);
-
-      if (!uniqueDeleteFiles.isEmpty()) {
-        responseBuilder.withDeleteFiles(uniqueDeleteFiles);
-        LOG.debug(
-            "Included {} delete files in scan plan for table: {}",
-            uniqueDeleteFiles.size(),
-            tableIdentifier);
-      }
-
-      PlanTableScanResponse response = responseBuilder.build();
+      PlanTableScanResponse response =
+          buildCompletedPlanTableScanResponse(planTasks, specsById, uniqueDeleteFiles);
 
       // Cache the scan plan response
       scanPlanCache.put(ScanPlanCacheKey.create(tableIdentifier, table, scanRequest), response);
@@ -514,6 +501,17 @@ public class CatalogWrapperForREST extends IcebergCatalogWrapper {
       throw new RuntimeException(
           "Scan planning failed for table " + tableIdentifier + ": " + e.getMessage(), e);
     }
+  }
+
+  @SuppressWarnings("deprecation")
+  private static PlanTableScanResponse buildCompletedPlanTableScanResponse(
+      List<String> planTasks, Map<Integer, PartitionSpec> specsById, List<DeleteFile> deleteFiles) {
+    return PlanTableScanResponse.builder()
+        .withPlanStatus(PlanStatus.COMPLETED)
+        .withPlanTasks(planTasks)
+        .withSpecsById(specsById)
+        .withDeleteFiles(deleteFiles)
+        .build();
   }
 
   /**

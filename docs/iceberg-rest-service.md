@@ -19,7 +19,7 @@ There are some key difference between Gravitino Iceberg REST server and Gravitin
 
 ### Capabilities
 
-- Supports the Apache Iceberg REST API defined in Iceberg 1.10, and supports most namespace, table and view interfaces. The following interfaces are not implemented yet:
+- Supports the Apache Iceberg REST API defined in Iceberg 1.11, and supports most namespace, table and view interfaces. The following interfaces are not implemented yet:
   - multi table transaction
   - pagination
   - register view
@@ -479,7 +479,7 @@ View operations are supported when using the JDBC catalog backend with schema ve
 
 ### Other Apache Iceberg catalog properties
 
-You can add other properties defined in [Iceberg catalog properties](https://iceberg.apache.org/docs/1.10.0/configuration/#catalog-properties).
+You can add other properties defined in [Iceberg catalog properties](https://iceberg.apache.org/docs/1.11.0/configuration/#catalog-properties).
 The `clients` property for example:
 
 | Configuration item               | Description                          | Default value | Required |
