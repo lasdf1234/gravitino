@@ -54,6 +54,11 @@ public class IdpUserGroupRelSQLProviderFactory {
     return currentProvider().selectUsernamesByGroupName(groupName);
   }
 
+  public static String selectRelatedUserIds(
+      @Param("groupId") Long groupId, @Param("userIds") List<Long> userIds) {
+    return currentProvider().selectRelatedUserIds(groupId, userIds);
+  }
+
   public static String batchInsertRelations(@Param("relations") List<IdpUserGroupRelPO> relations) {
     return currentProvider().batchInsertRelations(relations);
   }
@@ -61,6 +66,13 @@ public class IdpUserGroupRelSQLProviderFactory {
   public static String softDeleteRelations(
       @Param("groupName") String groupName, @Param("usernames") List<String> usernames) {
     return currentProvider().softDeleteRelations(groupName, usernames);
+  }
+
+  public static String softDeleteRelationsByGroupIdAndUserIds(
+      @Param("groupId") Long groupId,
+      @Param("userIds") List<Long> userIds,
+      @Param("deletedAt") Long deletedAt) {
+    return currentProvider().softDeleteRelationsByGroupIdAndUserIds(groupId, userIds, deletedAt);
   }
 
   public static String softDeleteRelationsByUsername(@Param("username") String username) {

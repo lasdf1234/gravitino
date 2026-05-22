@@ -40,6 +40,9 @@ public interface IdpGroupMetaMapper {
   @SelectProvider(type = IdpGroupMetaSQLProviderFactory.class, method = "selectIdpGroup")
   IdpGroupPO selectIdpGroup(@Param("groupName") String groupName);
 
+  @SelectProvider(type = IdpGroupMetaSQLProviderFactory.class, method = "selectIdpGroupByGroupId")
+  IdpGroupPO selectIdpGroupByGroupId(@Param("groupId") Long groupId);
+
   @InsertProvider(type = IdpGroupMetaSQLProviderFactory.class, method = "insertIdpGroup")
   void insertIdpGroup(@Param("groupMeta") IdpGroupPO groupPO);
 

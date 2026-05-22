@@ -34,6 +34,15 @@ public class IdpGroupMetaBaseSQLProvider {
         + " WHERE group_name = #{groupName} AND deleted_at = 0";
   }
 
+  public String selectIdpGroupByGroupId(@Param("groupId") Long groupId) {
+    return "SELECT group_id as groupId, group_name as groupName,"
+        + " current_version as currentVersion,"
+        + " last_version as lastVersion, deleted_at as deletedAt"
+        + " FROM "
+        + IdpGroupMetaMapper.IDP_GROUP_TABLE_NAME
+        + " WHERE group_id = #{groupId} AND deleted_at = 0";
+  }
+
   public String insertIdpGroup(@Param("groupMeta") IdpGroupPO groupPO) {
     return "INSERT INTO "
         + IdpGroupMetaMapper.IDP_GROUP_TABLE_NAME

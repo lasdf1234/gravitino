@@ -49,6 +49,10 @@ public class IdpGroupMetaSQLProviderFactory {
     return currentProvider().selectIdpGroup(groupName);
   }
 
+  public static String selectIdpGroupByGroupId(@Param("groupId") Long groupId) {
+    return currentProvider().selectIdpGroupByGroupId(groupId);
+  }
+
   public static String insertIdpGroup(@Param("groupMeta") IdpGroupPO groupPO) {
     return currentProvider().insertIdpGroup(groupPO);
   }

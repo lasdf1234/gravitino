@@ -117,6 +117,44 @@ public class IdpUserGroupRelBaseSQLProvider {
         + " AND r.deleted_at = 0";
   }
 
+  public String selectRelatedUserIds(
+      @Param("groupId") Long groupId, @Param("userIds") List<Long> userIds) {
+    return "<script>"
+        + "SELECT user_id"
+        + " FROM "
+        + IdpUserGroupRelMapper.IDP_USER_GROUP_REL_TABLE_NAME
+        + " WHERE group_id = #{groupId} AND deleted_at = 0 "
+        + "<choose>"
+        + "<when test='userIds != null and userIds.size() > 0'>"
+        + "AND user_id IN ("
+        + "<foreach collection='userIds' item='userId' separator=','>"
+        + "#{userId}"
+        + "</foreach>"
+        + ") "
+        + "</when>"
+        + "<otherwise>"
+        + "AND 1 = 0 "
+        + "</otherwise>"
+        + "</choose>"
+        + "</script>";
+  }
+
+  public String softDeleteRelationsByGroupIdAndUserIds(
+      @Param("groupId") Long groupId,
+      @Param("userIds") List<Long> userIds,
+      @Param("deletedAt") Long deletedAt) {
+    return "<script>"
+        + "UPDATE "
+        + IdpUserGroupRelMapper.IDP_USER_GROUP_REL_TABLE_NAME
+        + " SET deleted_at = #{deletedAt}"
+        + " WHERE group_id = #{groupId} AND deleted_at = 0 "
+        + "<foreach collection='userIds' item='userId'"
+        + " open='AND user_id IN (' separator=',' close=')'>"
+        + "#{userId}"
+        + "</foreach>"
+        + "</script>";
+  }
+
   public String deleteIdpUserGroupRelMetasByLegacyTimeline(
       @Param("legacyTimeline") Long legacyTimeline, @Param("limit") int limit) {
     return "DELETE FROM "
