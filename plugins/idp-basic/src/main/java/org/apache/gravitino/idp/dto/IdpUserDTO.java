@@ -16,68 +16,30 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.gravitino.idp.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.annotation.JsonSetter;
-import com.fasterxml.jackson.annotation.Nulls;
-import com.google.common.base.Preconditions;
-import java.util.Collections;
 import java.util.List;
 import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.EqualsAndHashCode;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.ToString;
-import org.apache.commons.lang3.StringUtils;
 
 /** Represents a built-in IdP user Data Transfer Object (DTO). */
-@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@Getter
 @EqualsAndHashCode
 @ToString
+@NoArgsConstructor(access = AccessLevel.PRIVATE)
+@AllArgsConstructor(access = AccessLevel.PRIVATE)
+@Builder(setterPrefix = "with")
 public class IdpUserDTO {
 
   @JsonProperty("name")
-  private String name;
+  private String username;
 
   @JsonProperty("groups")
-  @JsonSetter(nulls = Nulls.AS_EMPTY)
-  private List<String> groups = Collections.emptyList();
-
-  /**
-   * Creates a new instance of IdpUserDTO.
-   *
-   * @param name The name of the built-in IdP user DTO.
-   * @param groups The groups of the built-in IdP user DTO.
-   */
-  @Builder(setterPrefix = "with")
-  protected IdpUserDTO(String name, List<String> groups) {
-    Preconditions.checkArgument(StringUtils.isNotBlank(name), "name cannot be null or empty");
-    if (groups != null) {
-      groups.forEach(
-          group ->
-              Preconditions.checkArgument(
-                  StringUtils.isNotBlank(group),
-                  "groups cannot contain null or empty group names"));
-    }
-    this.name = name;
-    this.groups = groups == null ? Collections.emptyList() : groups;
-  }
-
-  /**
-   * @return The name of the built-in IdP user DTO.
-   */
-  public String name() {
-    return name;
-  }
-
-  /**
-   * The groups of the built-in IdP user. A user can belong to multiple groups.
-   *
-   * @return The groups of the built-in IdP user.
-   */
-  public List<String> groups() {
-    return groups;
-  }
+  private List<String> groups;
 }

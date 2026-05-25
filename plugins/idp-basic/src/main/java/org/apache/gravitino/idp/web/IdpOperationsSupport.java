@@ -47,10 +47,10 @@ public final class IdpOperationsSupport {
   }
 
   public static IdpUserDTO toUserDTO(IdpUser user) {
-    return IdpUserDTO.builder().withName(user.name()).withGroups(user.groupNames()).build();
+    return IdpUserDTO.builder().withUsername(user.name()).withGroups(user.groupNames()).build();
   }
 
   public static IdpGroupDTO toGroupDTO(IdpGroup group) {
-    return IdpGroupDTO.builder().withName(group.name()).withUsers(group.usernames()).build();
+    return IdpGroupDTO.builder().withGroupName(group.name()).withUsers(group.usernames()).build();
   }
 }

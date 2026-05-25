@@ -65,8 +65,8 @@ public class IdpGroupResponse extends BaseResponse {
 
     Preconditions.checkArgument(group != null, "group must not be null");
     Preconditions.checkArgument(
-        StringUtils.isNotBlank(group.name()), "group 'name' must not be null or empty");
-    validateNames(group.users(), "group 'users' must not contain null or empty user names");
+        StringUtils.isNotBlank(group.getGroupName()), "group 'name' must not be null or empty");
+    validateNames(group.getUsers(), "group 'users' must not contain null or empty user names");
   }
 
   private void validateNames(List<String> names, String errorMessage) {

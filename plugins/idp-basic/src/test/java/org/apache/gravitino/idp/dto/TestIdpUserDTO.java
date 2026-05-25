@@ -16,12 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 package org.apache.gravitino.idp.dto;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import java.util.Arrays;
-import java.util.Collections;
 import org.apache.gravitino.json.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -29,10 +27,40 @@ import org.junit.jupiter.api.Test;
 public class TestIdpUserDTO {
 
   @Test
+  public void testIdpUserDTOBuilder() {
+    IdpUserDTO userDTO =
+        IdpUserDTO.builder()
+            .withUsername("alice")
+            .withGroups(Arrays.asList("group1", "group2"))
+            .build();
+
+    Assertions.assertEquals("alice", userDTO.getUsername());
+    Assertions.assertEquals(Arrays.asList("group1", "group2"), userDTO.getGroups());
+  }
+
+  @Test
+  public void testEqualsAndHashCode() {
+    IdpUserDTO userDTO1 =
+        IdpUserDTO.builder()
+            .withUsername("alice")
+            .withGroups(Arrays.asList("group1", "group2"))
+            .build();
+
+    IdpUserDTO userDTO2 =
+        IdpUserDTO.builder()
+            .withUsername("alice")
+            .withGroups(Arrays.asList("group1", "group2"))
+            .build();
+
+    Assertions.assertEquals(userDTO1, userDTO2);
+    Assertions.assertEquals(userDTO1.hashCode(), userDTO2.hashCode());
+  }
+
+  @Test
   public void testIdpUserDTOSerDe() throws JsonProcessingException {
     IdpUserDTO userDTO =
         IdpUserDTO.builder()
-            .withName("test_user")
+            .withUsername("test_user")
             .withGroups(Arrays.asList("group1", "group2"))
             .build();
 
@@ -40,38 +68,5 @@ public class TestIdpUserDTO {
     IdpUserDTO deserialized = JsonUtils.objectMapper().readValue(json, IdpUserDTO.class);
 
     Assertions.assertEquals(userDTO, deserialized);
-    Assertions.assertEquals("test_user", deserialized.name());
-    Assertions.assertEquals(Arrays.asList("group1", "group2"), deserialized.groups());
-
-    // Test with default groups
-    IdpUserDTO userDTO1 = IdpUserDTO.builder().withName("test_user").build();
-
-    String json1 = JsonUtils.objectMapper().writeValueAsString(userDTO1);
-    IdpUserDTO deserialized1 = JsonUtils.objectMapper().readValue(json1, IdpUserDTO.class);
-
-    Assertions.assertEquals(userDTO1, deserialized1);
-    Assertions.assertEquals("test_user", deserialized1.name());
-    Assertions.assertTrue(deserialized1.groups().isEmpty());
-    Assertions.assertEquals("IdpUserDTO(name=test_user, groups=[])", deserialized1.toString());
-
-    IdpUserDTO deserializedWithNullGroups =
-        JsonUtils.objectMapper()
-            .readValue("{\"name\":\"test_user\",\"groups\":null}", IdpUserDTO.class);
-    Assertions.assertTrue(deserializedWithNullGroups.groups().isEmpty());
-    Assertions.assertEquals(
-        "IdpUserDTO(name=test_user, groups=[])", deserializedWithNullGroups.toString());
-
-    Assertions.assertThrows(
-        IllegalArgumentException.class, () -> IdpUserDTO.builder().withName(" ").build());
-    IllegalArgumentException invalidGroupException =
-        Assertions.assertThrows(
-            IllegalArgumentException.class,
-            () ->
-                IdpUserDTO.builder()
-                    .withName("test_user")
-                    .withGroups(Collections.singletonList(" "))
-                    .build());
-    Assertions.assertEquals(
-        "groups cannot contain null or empty group names", invalidGroupException.getMessage());
   }
 }

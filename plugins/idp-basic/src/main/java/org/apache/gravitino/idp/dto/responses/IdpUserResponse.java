@@ -65,8 +65,8 @@ public class IdpUserResponse extends BaseResponse {
 
     Preconditions.checkArgument(user != null, "user must not be null");
     Preconditions.checkArgument(
-        StringUtils.isNotBlank(user.name()), "user 'name' must not be null or empty");
-    validateNames(user.groups(), "user 'groups' must not contain null or empty group names");
+        StringUtils.isNotBlank(user.getUsername()), "user 'name' must not be null or empty");
+    validateNames(user.getGroups(), "user 'groups' must not contain null or empty group names");
   }
 
   private void validateNames(List<String> names, String errorMessage) {
