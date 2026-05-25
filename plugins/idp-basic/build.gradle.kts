@@ -48,7 +48,14 @@ dependencies {
 
   testImplementation(libs.awaitility)
   testImplementation(libs.commons.io)
+  testImplementation(libs.jersey.test.framework.core) {
+    exclude(group = "org.junit.jupiter")
+  }
+  testImplementation(libs.jersey.test.framework.provider.jetty) {
+    exclude(group = "org.junit.jupiter")
+  }
   testImplementation(libs.junit.jupiter.api)
+  testImplementation(libs.mockito.inline)
   testImplementation(libs.junit.jupiter.params)
   testImplementation(libs.mysql.driver)
   testImplementation(libs.postgresql.driver)
