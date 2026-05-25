@@ -30,11 +30,14 @@ dependencies {
   implementation(project(":core"))
 
   implementation(libs.bcprov.jdk18on)
+  implementation(libs.bundles.jersey)
   implementation(libs.commons.lang3)
   implementation(libs.guava)
   implementation(libs.jackson.annotations)
   implementation(libs.jackson.databind)
+  implementation(libs.metrics.jersey2)
   implementation(libs.mybatis)
+  implementation(libs.servlet)
 
   compileOnly(libs.lombok)
   compileOnly(libs.slf4j.api)
