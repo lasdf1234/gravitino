@@ -17,22 +17,24 @@
  * under the License.
  */
 
-package org.apache.gravitino.auth;
+package org.apache.gravitino.idp.auth;
 
-/** The type of authenticator for http/https request. */
-public enum AuthenticatorType {
-  /** No authentication. */
-  NONE,
+/** The manager used by the service admin initializer. */
+public interface ServiceAdminManager {
 
-  /** Simple authentication. */
-  SIMPLE,
+  /**
+   * Check whether the service admin already exists.
+   *
+   * @param userName The service admin name.
+   * @return True if the service admin exists, otherwise false.
+   */
+  boolean serviceAdminExists(String userName);
 
-  /** Authentication that uses OAuth. */
-  OAUTH,
-
-  /** Authentication that uses Kerberos. */
-  KERBEROS,
-
-  /** Authentication that uses built-in IdP username and password. */
-  BASIC
+  /**
+   * Initialize the service admin with the specified password.
+   *
+   * @param userName The service admin name.
+   * @param password The plain text password.
+   */
+  void initializeServiceAdmin(String userName, String password);
 }
