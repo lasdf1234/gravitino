@@ -21,9 +21,11 @@ package org.apache.gravitino.idp.dto.requests;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import lombok.Builder;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
+import lombok.extern.jackson.Jacksonized;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.rest.RESTRequest;
 
@@ -31,6 +33,8 @@ import org.apache.gravitino.rest.RESTRequest;
 @Getter
 @EqualsAndHashCode
 @ToString
+@Builder
+@Jacksonized
 public class GroupMembershipChangeRequest implements RESTRequest {
 
   @JsonProperty("additions")
@@ -38,6 +42,11 @@ public class GroupMembershipChangeRequest implements RESTRequest {
 
   @JsonProperty("removals")
   private final String[] removals;
+
+  /** Default constructor for GroupMembershipChangeRequest. (Used for Jackson deserialization.) */
+  public GroupMembershipChangeRequest() {
+    this(null, null);
+  }
 
   /**
    * Creates a new GroupMembershipChangeRequest.
@@ -50,11 +59,6 @@ public class GroupMembershipChangeRequest implements RESTRequest {
     this.removals = removals;
   }
 
-  /** Default constructor for GroupMembershipChangeRequest. (Used for Jackson deserialization.) */
-  public GroupMembershipChangeRequest() {
-    this(null, null);
-  }
-
   /**
    * Validates the {@link GroupMembershipChangeRequest} request.
    *
@@ -62,8 +66,10 @@ public class GroupMembershipChangeRequest implements RESTRequest {
    */
   @Override
   public void validate() throws IllegalArgumentException {
+    boolean hasAdditions = additions != null && additions.length > 0;
+    boolean hasRemovals = removals != null && removals.length > 0;
     Preconditions.checkArgument(
-        additions != null || removals != null, "additions and removals cannot both be null");
+        hasAdditions || hasRemovals, "At least one of additions or removals must be non-empty");
 
     if (additions != null) {
       for (String user : additions) {

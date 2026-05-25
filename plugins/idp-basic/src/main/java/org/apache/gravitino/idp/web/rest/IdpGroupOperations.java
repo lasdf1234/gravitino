@@ -20,6 +20,7 @@ package org.apache.gravitino.idp.web.rest;
 
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
+import java.util.Arrays;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -35,8 +36,9 @@ import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.RemoveResponse;
 import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.requests.AddGroupRequest;
-import org.apache.gravitino.idp.dto.requests.UpdateGroupUsersRequest;
+import org.apache.gravitino.idp.dto.requests.GroupMembershipChangeRequest;
 import org.apache.gravitino.idp.dto.responses.IdpGroupResponse;
+import org.apache.gravitino.idp.model.IdpGroup;
 import org.apache.gravitino.idp.web.IdpOperationType;
 import org.apache.gravitino.idp.web.IdpOperationsSupport;
 import org.apache.gravitino.idp.web.IdpRestExceptionHandlers;
@@ -141,21 +143,22 @@ public class IdpGroupOperations {
   }
 
   /**
-   * Adds users to a built-in IdP group.
+   * Changes user membership of a built-in IdP group.
    *
    * @param group the group name
    * @param request the request body
    * @return the REST response
    */
   @PUT
-  @Path("{group}/add")
+  @Path("{group}/membership")
   @Produces("application/vnd.gravitino.v1+json")
-  @Timed(name = "add-idp-group-user." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
-  @ResponseMetered(name = "add-idp-group-user", absolute = true)
-  public Response addUsers(@PathParam("group") String group, UpdateGroupUsersRequest request) {
+  @Timed(name = "change-idp-group-membership." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
+  @ResponseMetered(name = "change-idp-group-membership", absolute = true)
+  public Response changeMembership(
+      @PathParam("group") String group, GroupMembershipChangeRequest request) {
     if (request == null) {
       return IdpRestExceptionHandlers.handleGroupException(
-          IdpOperationType.ADD, group, new IllegalArgumentException(NULL_REQUEST_BODY_ERROR));
+          IdpOperationType.UPDATE, group, new IllegalArgumentException(NULL_REQUEST_BODY_ERROR));
     }
 
     try {
@@ -163,46 +166,24 @@ public class IdpGroupOperations {
           httpRequest,
           () -> {
             request.validate();
+            IdpGroup groupEntity = applyMembershipChanges(group, request);
             return IdpRestUtils.ok(
-                new IdpGroupResponse(
-                    IdpOperationsSupport.toGroupDTO(
-                        userGroupManager.addUsersToGroup(group, request.getUsers()))));
+                new IdpGroupResponse(IdpOperationsSupport.toGroupDTO(groupEntity)));
           });
     } catch (Exception e) {
-      return IdpRestExceptionHandlers.handleGroupException(IdpOperationType.ADD, group, e);
+      return IdpRestExceptionHandlers.handleGroupException(IdpOperationType.UPDATE, group, e);
     }
   }
 
-  /**
-   * Removes users from a built-in IdP group.
-   *
-   * @param group the group name
-   * @param request the request body
-   * @return the REST response
-   */
-  @PUT
-  @Path("{group}/remove")
-  @Produces("application/vnd.gravitino.v1+json")
-  @Timed(name = "remove-idp-group-user." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
-  @ResponseMetered(name = "remove-idp-group-user", absolute = true)
-  public Response removeUsers(@PathParam("group") String group, UpdateGroupUsersRequest request) {
-    if (request == null) {
-      return IdpRestExceptionHandlers.handleGroupException(
-          IdpOperationType.REMOVE, group, new IllegalArgumentException(NULL_REQUEST_BODY_ERROR));
+  private IdpGroup applyMembershipChanges(String group, GroupMembershipChangeRequest request) {
+    IdpGroup groupEntity = null;
+    if (request.getAdditions() != null && request.getAdditions().length > 0) {
+      groupEntity = userGroupManager.addUsersToGroup(group, Arrays.asList(request.getAdditions()));
     }
-
-    try {
-      return IdpRestUtils.doAs(
-          httpRequest,
-          () -> {
-            request.validate();
-            return IdpRestUtils.ok(
-                new IdpGroupResponse(
-                    IdpOperationsSupport.toGroupDTO(
-                        userGroupManager.removeUsersFromGroup(group, request.getUsers()))));
-          });
-    } catch (Exception e) {
-      return IdpRestExceptionHandlers.handleGroupException(IdpOperationType.REMOVE, group, e);
+    if (request.getRemovals() != null && request.getRemovals().length > 0) {
+      groupEntity =
+          userGroupManager.removeUsersFromGroup(group, Arrays.asList(request.getRemovals()));
     }
+    return groupEntity;
   }
 }

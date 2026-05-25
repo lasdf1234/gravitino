@@ -79,7 +79,11 @@ public class IdpEntityStore implements IdpStore {
 
   @Override
   public void close() throws IOException {
-    garbageCollector.close();
-    backend.close();
+    if (garbageCollector != null) {
+      garbageCollector.close();
+    }
+    if (backend != null) {
+      backend.close();
+    }
   }
 }

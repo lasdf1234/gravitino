@@ -37,7 +37,7 @@ import org.apache.gravitino.dto.responses.ErrorResponse;
 import org.apache.gravitino.dto.responses.RemoveResponse;
 import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.requests.AddGroupRequest;
-import org.apache.gravitino.idp.dto.requests.UpdateGroupUsersRequest;
+import org.apache.gravitino.idp.dto.requests.GroupMembershipChangeRequest;
 import org.apache.gravitino.idp.dto.responses.IdpGroupResponse;
 import org.apache.gravitino.idp.exception.AlreadyExistsException;
 import org.apache.gravitino.idp.exception.NotFoundException;
@@ -130,25 +130,29 @@ class TestIdpGroupOperations extends BaseIdpOperationsTest {
   }
 
   @Test
-  void testAddAndRemoveUsers() {
-    UpdateGroupUsersRequest req = new UpdateGroupUsersRequest(Arrays.asList("user1", "user2"));
+  void testChangeMembership() {
+    GroupMembershipChangeRequest addReq =
+        new GroupMembershipChangeRequest(new String[] {"user1", "user2"}, null);
     when(MANAGER.addUsersToGroup("group1", Arrays.asList("user1", "user2")))
         .thenReturn(buildGroup("group1", Arrays.asList("user1", "user2")));
+
+    Response addResp =
+        target("/idp/groups/group1/membership")
+            .request(MediaType.APPLICATION_JSON_TYPE)
+            .accept("application/vnd.gravitino.v1+json")
+            .put(Entity.entity(addReq, MediaType.APPLICATION_JSON_TYPE));
+    Assertions.assertEquals(Response.Status.OK.getStatusCode(), addResp.getStatus());
+
+    GroupMembershipChangeRequest removeReq =
+        new GroupMembershipChangeRequest(null, new String[] {"user1", "user2"});
     when(MANAGER.removeUsersFromGroup("group1", Arrays.asList("user1", "user2")))
         .thenReturn(buildGroup("group1"));
 
-    Response addResp =
-        target("/idp/groups/group1/add")
-            .request(MediaType.APPLICATION_JSON_TYPE)
-            .accept("application/vnd.gravitino.v1+json")
-            .put(Entity.entity(req, MediaType.APPLICATION_JSON_TYPE));
-    Assertions.assertEquals(Response.Status.OK.getStatusCode(), addResp.getStatus());
-
     Response removeResp =
-        target("/idp/groups/group1/remove")
+        target("/idp/groups/group1/membership")
             .request(MediaType.APPLICATION_JSON_TYPE)
             .accept("application/vnd.gravitino.v1+json")
-            .put(Entity.entity(req, MediaType.APPLICATION_JSON_TYPE));
+            .put(Entity.entity(removeReq, MediaType.APPLICATION_JSON_TYPE));
     Assertions.assertEquals(Response.Status.OK.getStatusCode(), removeResp.getStatus());
   }
 
