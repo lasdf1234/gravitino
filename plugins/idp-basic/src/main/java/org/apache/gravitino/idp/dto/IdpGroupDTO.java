@@ -27,6 +27,7 @@ import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.ToString;
+import org.apache.gravitino.idp.model.IdpGroup;
 
 /** Represents a built-in IdP group Data Transfer Object (DTO). */
 @Getter
@@ -42,4 +43,14 @@ public class IdpGroupDTO {
 
   @JsonProperty("users")
   private List<String> users;
+
+  /**
+   * Creates a DTO from a built-in IdP group.
+   *
+   * @param group The built-in IdP group.
+   * @return The group DTO.
+   */
+  public static IdpGroupDTO from(IdpGroup group) {
+    return builder().withGroupName(group.name()).withUsers(group.usernames()).build();
+  }
 }

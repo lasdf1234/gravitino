@@ -25,6 +25,7 @@ import java.util.Collections;
 import java.util.List;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
+import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.idp.basic.password.PasswordHasher;
 import org.apache.gravitino.idp.basic.password.PasswordHasherFactory;
 import org.apache.gravitino.idp.model.IdpGroup;
@@ -47,6 +48,8 @@ public class IdpUserGroupManager implements Closeable {
   private static final IdpUserMetaService USER_SERVICE = IdpUserMetaService.getInstance();
   private static final IdpGroupMetaService GROUP_SERVICE = IdpGroupMetaService.getInstance();
 
+  private static volatile IdpUserGroupManager defaultInstance;
+
   private final IdpRelationalStorage relationalStorage;
   private final IdGenerator idGenerator;
   private final PasswordHasher passwordHasher;
@@ -64,6 +67,24 @@ public class IdpUserGroupManager implements Closeable {
     this.passwordHasher = PasswordHasherFactory.create();
     this.garbageCollector = new IdpGarbageCollector(config);
     garbageCollector.start();
+  }
+
+  /**
+   * Returns the default built-in IdP user and group manager for REST resources.
+   *
+   * @return The shared manager instance.
+   */
+  public static IdpUserGroupManager getDefault() {
+    if (defaultInstance == null) {
+      synchronized (IdpUserGroupManager.class) {
+        if (defaultInstance == null) {
+          defaultInstance =
+              new IdpUserGroupManager(
+                  GravitinoEnv.getInstance().config(), GravitinoEnv.getInstance().idGenerator());
+        }
+      }
+    }
+    return defaultInstance;
   }
 
   /**

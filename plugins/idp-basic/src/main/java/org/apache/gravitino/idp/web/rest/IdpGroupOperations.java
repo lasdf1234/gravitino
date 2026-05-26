@@ -35,12 +35,12 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.RemoveResponse;
 import org.apache.gravitino.idp.IdpUserGroupManager;
+import org.apache.gravitino.idp.dto.IdpGroupDTO;
 import org.apache.gravitino.idp.dto.requests.AddGroupRequest;
 import org.apache.gravitino.idp.dto.requests.GroupMembershipChangeRequest;
 import org.apache.gravitino.idp.dto.responses.IdpGroupResponse;
 import org.apache.gravitino.idp.model.IdpGroup;
 import org.apache.gravitino.idp.web.IdpOperationType;
-import org.apache.gravitino.idp.web.IdpOperationsSupport;
 import org.apache.gravitino.idp.web.IdpRestExceptionHandlers;
 import org.apache.gravitino.idp.web.IdpRestUtils;
 import org.apache.gravitino.metrics.MetricNames;
@@ -56,7 +56,7 @@ public class IdpGroupOperations {
 
   /** Creates a REST resource backed by the default built-in IdP manager. */
   public IdpGroupOperations() {
-    this(IdpOperationsSupport.manager());
+    this(IdpUserGroupManager.getDefault());
   }
 
   IdpGroupOperations(IdpUserGroupManager userGroupManager) {
@@ -80,8 +80,7 @@ public class IdpGroupOperations {
           httpRequest,
           () ->
               IdpRestUtils.ok(
-                  new IdpGroupResponse(
-                      IdpOperationsSupport.toGroupDTO(userGroupManager.getGroup(group)))));
+                  new IdpGroupResponse(IdpGroupDTO.from(userGroupManager.getGroup(group)))));
     } catch (Exception e) {
       return IdpRestExceptionHandlers.handleGroupException(IdpOperationType.GET, group, e);
     }
@@ -111,8 +110,7 @@ public class IdpGroupOperations {
             request.validate();
             return IdpRestUtils.ok(
                 new IdpGroupResponse(
-                    IdpOperationsSupport.toGroupDTO(
-                        userGroupManager.addGroup(request.getGroup()))));
+                    IdpGroupDTO.from(userGroupManager.addGroup(request.getGroup()))));
           });
     } catch (Exception e) {
       return IdpRestExceptionHandlers.handleGroupException(IdpOperationType.ADD, group, e);
@@ -167,8 +165,7 @@ public class IdpGroupOperations {
           () -> {
             request.validate();
             IdpGroup groupEntity = applyMembershipChanges(group, request);
-            return IdpRestUtils.ok(
-                new IdpGroupResponse(IdpOperationsSupport.toGroupDTO(groupEntity)));
+            return IdpRestUtils.ok(new IdpGroupResponse(IdpGroupDTO.from(groupEntity)));
           });
     } catch (Exception e) {
       return IdpRestExceptionHandlers.handleGroupException(IdpOperationType.UPDATE, group, e);

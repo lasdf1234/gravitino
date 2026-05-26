@@ -32,12 +32,12 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.RemoveResponse;
 import org.apache.gravitino.idp.IdpUserGroupManager;
+import org.apache.gravitino.idp.dto.IdpUserDTO;
 import org.apache.gravitino.idp.dto.requests.AddUserRequest;
 import org.apache.gravitino.idp.dto.requests.ResetPasswordRequest;
 import org.apache.gravitino.idp.dto.responses.IdpUserResponse;
 import org.apache.gravitino.idp.exception.NotFoundException;
 import org.apache.gravitino.idp.web.IdpOperationType;
-import org.apache.gravitino.idp.web.IdpOperationsSupport;
 import org.apache.gravitino.idp.web.IdpRestExceptionHandlers;
 import org.apache.gravitino.idp.web.IdpRestUtils;
 import org.apache.gravitino.metrics.MetricNames;
@@ -53,7 +53,7 @@ public class IdpUserOperations {
 
   /** Creates a REST resource backed by the default built-in IdP manager. */
   public IdpUserOperations() {
-    this(IdpOperationsSupport.manager());
+    this(IdpUserGroupManager.getDefault());
   }
 
   IdpUserOperations(IdpUserGroupManager userGroupManager) {
@@ -77,8 +77,7 @@ public class IdpUserOperations {
           httpRequest,
           () ->
               IdpRestUtils.ok(
-                  new IdpUserResponse(
-                      IdpOperationsSupport.toUserDTO(userGroupManager.getUser(user)))));
+                  new IdpUserResponse(IdpUserDTO.from(userGroupManager.getUser(user)))));
     } catch (Exception e) {
       return IdpRestExceptionHandlers.handleUserException(IdpOperationType.GET, user, e);
     }
@@ -108,7 +107,7 @@ public class IdpUserOperations {
             request.validate();
             return IdpRestUtils.ok(
                 new IdpUserResponse(
-                    IdpOperationsSupport.toUserDTO(
+                    IdpUserDTO.from(
                         userGroupManager.addUser(request.getUser(), request.getPassword()))));
           });
     } catch (Exception e) {
@@ -143,8 +142,7 @@ public class IdpUserOperations {
               throw new NotFoundException("IdP user %s does not exist", user);
             }
             return IdpRestUtils.ok(
-                new IdpUserResponse(
-                    IdpOperationsSupport.toUserDTO(userGroupManager.getUser(user))));
+                new IdpUserResponse(IdpUserDTO.from(userGroupManager.getUser(user))));
           });
     } catch (Exception e) {
       return IdpRestExceptionHandlers.handleUserException(IdpOperationType.UPDATE, user, e);
