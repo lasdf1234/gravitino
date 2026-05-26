@@ -19,12 +19,11 @@
 package org.apache.gravitino.idp.web;
 
 import org.apache.gravitino.GravitinoEnv;
-import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
+import org.apache.gravitino.idp.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.IdpGroupDTO;
 import org.apache.gravitino.idp.dto.IdpUserDTO;
 import org.apache.gravitino.idp.model.IdpGroup;
 import org.apache.gravitino.idp.model.IdpUser;
-import org.apache.gravitino.idp.storage.relational.IdpEntityStore;
 
 /** Shared helpers for built-in IdP REST resources in the {@code idp-basic} plugin. */
 public final class IdpOperationsSupport {
@@ -37,9 +36,9 @@ public final class IdpOperationsSupport {
     if (manager == null) {
       synchronized (IdpOperationsSupport.class) {
         if (manager == null) {
-          IdpEntityStore store = new IdpEntityStore();
-          store.initialize(GravitinoEnv.getInstance().config());
-          manager = new IdpUserGroupManager(store, GravitinoEnv.getInstance().idGenerator());
+          manager =
+              new IdpUserGroupManager(
+                  GravitinoEnv.getInstance().config(), GravitinoEnv.getInstance().idGenerator());
         }
       }
     }

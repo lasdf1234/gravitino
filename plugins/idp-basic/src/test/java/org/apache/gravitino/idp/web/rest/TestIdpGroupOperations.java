@@ -18,6 +18,7 @@
  */
 package org.apache.gravitino.idp.web.rest;
 
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
@@ -35,13 +36,13 @@ import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.ErrorConstants;
 import org.apache.gravitino.dto.responses.ErrorResponse;
 import org.apache.gravitino.dto.responses.RemoveResponse;
-import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
+import org.apache.gravitino.idp.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.requests.AddGroupRequest;
 import org.apache.gravitino.idp.dto.requests.GroupMembershipChangeRequest;
 import org.apache.gravitino.idp.dto.responses.IdpGroupResponse;
 import org.apache.gravitino.idp.exception.AlreadyExistsException;
 import org.apache.gravitino.idp.exception.NotFoundException;
-import org.apache.gravitino.idp.meta.IdpGroupEntity;
+import org.apache.gravitino.idp.model.IdpGroup;
 import org.apache.gravitino.rest.RESTUtils;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
 import org.glassfish.jersey.server.ResourceConfig;
@@ -83,9 +84,9 @@ class TestIdpGroupOperations extends BaseIdpOperationsTest {
   }
 
   @Test
-  void testAddAndGetGroup() {
+  void testAddAndGetGroup() throws Exception {
     AddGroupRequest req = new AddGroupRequest("group1");
-    when(MANAGER.addGroup("group1")).thenReturn(buildGroup("group1"));
+    doReturn(buildGroup("group1")).when(MANAGER).addGroup("group1");
     when(MANAGER.getGroup("group1")).thenReturn(buildGroup("group1"));
 
     Response addResp =
@@ -133,7 +134,7 @@ class TestIdpGroupOperations extends BaseIdpOperationsTest {
   void testChangeMembership() {
     GroupMembershipChangeRequest addReq =
         new GroupMembershipChangeRequest(new String[] {"user1", "user2"}, null);
-    when(MANAGER.addUsersToGroup("group1", Arrays.asList("user1", "user2")))
+    when(MANAGER.changeGroupMembership("group1", Arrays.asList("user1", "user2"), null))
         .thenReturn(buildGroup("group1", Arrays.asList("user1", "user2")));
 
     Response addResp =
@@ -145,7 +146,7 @@ class TestIdpGroupOperations extends BaseIdpOperationsTest {
 
     GroupMembershipChangeRequest removeReq =
         new GroupMembershipChangeRequest(null, new String[] {"user1", "user2"});
-    when(MANAGER.removeUsersFromGroup("group1", Arrays.asList("user1", "user2")))
+    when(MANAGER.changeGroupMembership("group1", null, Arrays.asList("user1", "user2")))
         .thenReturn(buildGroup("group1"));
 
     Response removeResp =
@@ -172,11 +173,11 @@ class TestIdpGroupOperations extends BaseIdpOperationsTest {
     Assertions.assertTrue(removeResponse.removed());
   }
 
-  private IdpGroupEntity buildGroup(String group) {
+  private IdpGroup buildGroup(String group) {
     return buildGroup(group, Collections.emptyList());
   }
 
-  private IdpGroupEntity buildGroup(String group, List<String> users) {
-    return IdpGroupEntity.builder().withId(1L).withName(group).withUsernames(users).build();
+  private IdpGroup buildGroup(String group, List<String> users) {
+    return new IdpGroup(group, users);
   }
 }

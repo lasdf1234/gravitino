@@ -31,10 +31,11 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.RemoveResponse;
-import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
+import org.apache.gravitino.idp.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.requests.AddUserRequest;
 import org.apache.gravitino.idp.dto.requests.ResetPasswordRequest;
 import org.apache.gravitino.idp.dto.responses.IdpUserResponse;
+import org.apache.gravitino.idp.exception.NotFoundException;
 import org.apache.gravitino.idp.web.IdpOperationType;
 import org.apache.gravitino.idp.web.IdpOperationsSupport;
 import org.apache.gravitino.idp.web.IdpRestExceptionHandlers;
@@ -138,10 +139,12 @@ public class IdpUserOperations {
           httpRequest,
           () -> {
             request.validate();
+            if (!userGroupManager.changePassword(user, request.getPassword())) {
+              throw new NotFoundException("IdP user %s does not exist", user);
+            }
             return IdpRestUtils.ok(
                 new IdpUserResponse(
-                    IdpOperationsSupport.toUserDTO(
-                        userGroupManager.changePassword(user, request.getPassword()))));
+                    IdpOperationsSupport.toUserDTO(userGroupManager.getUser(user))));
           });
     } catch (Exception e) {
       return IdpRestExceptionHandlers.handleUserException(IdpOperationType.UPDATE, user, e);

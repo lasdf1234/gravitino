@@ -16,10 +16,29 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.gravitino.idp.meta;
 
-/** Built-in IdP entity types managed by the idp-basic plugin. */
-public enum IdpEntityType {
-  IDP_USER,
-  IDP_GROUP
+package org.apache.gravitino.listener.api.event.view;
+
+import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.annotation.DeveloperApi;
+import org.apache.gravitino.listener.api.event.OperationType;
+
+/** Successful drop-view event. */
+@DeveloperApi
+public final class DropViewEvent extends ViewEvent {
+  private final boolean isExists;
+
+  public DropViewEvent(String user, NameIdentifier identifier, boolean isExists) {
+    super(user, identifier);
+    this.isExists = isExists;
+  }
+
+  public boolean isExists() {
+    return isExists;
+  }
+
+  @Override
+  public OperationType operationType() {
+    return OperationType.DROP_VIEW;
+  }
 }

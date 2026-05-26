@@ -34,7 +34,7 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.RemoveResponse;
-import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
+import org.apache.gravitino.idp.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.requests.AddGroupRequest;
 import org.apache.gravitino.idp.dto.requests.GroupMembershipChangeRequest;
 import org.apache.gravitino.idp.dto.responses.IdpGroupResponse;
@@ -176,14 +176,11 @@ public class IdpGroupOperations {
   }
 
   private IdpGroup applyMembershipChanges(String group, GroupMembershipChangeRequest request) {
-    IdpGroup groupEntity = null;
-    if (request.getAdditions() != null && request.getAdditions().length > 0) {
-      groupEntity = userGroupManager.addUsersToGroup(group, Arrays.asList(request.getAdditions()));
-    }
-    if (request.getRemovals() != null && request.getRemovals().length > 0) {
-      groupEntity =
-          userGroupManager.removeUsersFromGroup(group, Arrays.asList(request.getRemovals()));
-    }
-    return groupEntity;
+    String[] additions = request.getAdditions();
+    String[] removals = request.getRemovals();
+    return userGroupManager.changeGroupMembership(
+        group,
+        additions == null ? null : Arrays.asList(additions),
+        removals == null ? null : Arrays.asList(removals));
   }
 }

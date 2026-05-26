@@ -18,12 +18,14 @@
  */
 package org.apache.gravitino.idp.web.rest;
 
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.util.Collections;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.Application;
@@ -32,13 +34,13 @@ import javax.ws.rs.core.Response;
 import org.apache.gravitino.dto.responses.ErrorConstants;
 import org.apache.gravitino.dto.responses.ErrorResponse;
 import org.apache.gravitino.dto.responses.RemoveResponse;
-import org.apache.gravitino.idp.authorization.IdpUserGroupManager;
+import org.apache.gravitino.idp.IdpUserGroupManager;
 import org.apache.gravitino.idp.dto.requests.AddUserRequest;
 import org.apache.gravitino.idp.dto.requests.ResetPasswordRequest;
 import org.apache.gravitino.idp.dto.responses.IdpUserResponse;
 import org.apache.gravitino.idp.exception.AlreadyExistsException;
 import org.apache.gravitino.idp.exception.NotFoundException;
-import org.apache.gravitino.idp.meta.IdpUserEntity;
+import org.apache.gravitino.idp.model.IdpUser;
 import org.apache.gravitino.rest.RESTUtils;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
 import org.glassfish.jersey.server.ResourceConfig;
@@ -80,10 +82,10 @@ class TestIdpUserOperations extends BaseIdpOperationsTest {
   }
 
   @Test
-  void testAddUser() {
+  void testAddUser() throws Exception {
     AddUserRequest req = new AddUserRequest("user1", "Passw0rd-For-User");
-    IdpUserEntity user = buildUser("user1");
-    when(MANAGER.addUser("user1", "Passw0rd-For-User")).thenReturn(user);
+    IdpUser user = buildUser("user1");
+    doReturn(user).when(MANAGER).addUser("user1", "Passw0rd-For-User");
 
     AddUserRequest illegalReq = new AddUserRequest("", "Passw0rd-For-User");
     Response illegalResp =
@@ -157,7 +159,8 @@ class TestIdpUserOperations extends BaseIdpOperationsTest {
   @Test
   void testResetPasswordAndRemoveUser() {
     ResetPasswordRequest req = new ResetPasswordRequest("Passw0rd-For-User");
-    when(MANAGER.changePassword("user1", "Passw0rd-For-User")).thenReturn(buildUser("user1"));
+    when(MANAGER.changePassword("user1", "Passw0rd-For-User")).thenReturn(true);
+    when(MANAGER.getUser("user1")).thenReturn(buildUser("user1"));
     when(MANAGER.removeUser("user1")).thenReturn(true);
 
     Response resetResp =
@@ -178,7 +181,7 @@ class TestIdpUserOperations extends BaseIdpOperationsTest {
     Assertions.assertTrue(removeResponse.removed());
   }
 
-  private IdpUserEntity buildUser(String user) {
-    return IdpUserEntity.builder().withId(1L).withName(user).build();
+  private IdpUser buildUser(String user) {
+    return new IdpUser(user, Collections.emptyList());
   }
 }
