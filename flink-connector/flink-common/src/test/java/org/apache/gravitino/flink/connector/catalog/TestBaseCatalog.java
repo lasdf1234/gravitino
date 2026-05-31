@@ -33,6 +33,7 @@ import org.apache.flink.table.catalog.CatalogDatabase;
 import org.apache.flink.table.catalog.CatalogDatabaseImpl;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.Column;
+import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.ResolvedCatalogView;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.TableChange;
@@ -46,6 +47,7 @@ import org.apache.gravitino.flink.connector.utils.DefaultCatalogCompat;
 import org.apache.gravitino.rel.Dialects;
 import org.apache.gravitino.rel.Representation;
 import org.apache.gravitino.rel.SQLRepresentation;
+import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.ViewCatalog;
 import org.apache.gravitino.rel.ViewChange;
 import org.apache.gravitino.rel.expressions.distributions.Distributions;
@@ -311,6 +313,12 @@ public class TestBaseCatalog {
     @Override
     protected Catalog catalog() {
       return gravitinoCatalog;
+    }
+
+    @Override
+    protected CatalogBaseTable createFlinkTable(
+        ObjectPath tablePath, Table gravitinoTable, CatalogBaseTable flinkNativeTable) {
+      return flinkNativeTable;
     }
   }
 }

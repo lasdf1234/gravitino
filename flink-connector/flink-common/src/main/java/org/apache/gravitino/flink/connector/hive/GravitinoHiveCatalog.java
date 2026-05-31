@@ -99,6 +99,17 @@ public class GravitinoHiveCatalog extends BaseCatalog {
   }
 
   @Override
+  protected CatalogBaseTable createFlinkTable(
+      ObjectPath tablePath, Table gravitinoTable, CatalogBaseTable flinkNativeTable) {
+    Preconditions.checkState(
+        flinkNativeTable instanceof CatalogTable,
+        "Expected native CatalogTable but got %s.",
+        flinkNativeTable.getClass().getName());
+    return new FlinkHiveTable(
+        toFlinkTable(gravitinoTable, tablePath), (CatalogTable) flinkNativeTable);
+  }
+
+  @Override
   public void createTable(ObjectPath tablePath, CatalogBaseTable table, boolean ignoreIfExists)
       throws TableAlreadyExistException, DatabaseNotExistException, CatalogException {
     Preconditions.checkArgument(
@@ -150,14 +161,12 @@ public class GravitinoHiveCatalog extends BaseCatalog {
   public CatalogBaseTable getTable(ObjectPath tablePath)
       throws TableNotExistException, CatalogException {
     try {
-      Table table =
-          catalog()
-              .asTableCatalog()
-              .loadTable(NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName()));
-      if (FlinkGenericTableUtil.isGenericTableWhenLoad(table.properties())) {
-        return toFlinkGenericTable(table);
+      Table gravitinoTable = loadGravitinoTable(tablePath);
+      if (FlinkGenericTableUtil.isGenericTableWhenLoad(gravitinoTable.properties())) {
+        return toFlinkGenericTable(gravitinoTable);
       }
-      return super.toFlinkTable(table, tablePath);
+      CatalogBaseTable flinkNativeTable = loadFlinkTable(tablePath);
+      return createFlinkTable(tablePath, gravitinoTable, flinkNativeTable);
     } catch (NoSuchTableException e) {
       // Fall through to check views.
     } catch (Exception e) {
@@ -175,7 +184,7 @@ public class GravitinoHiveCatalog extends BaseCatalog {
       super.alterTable(tablePath, newTable, ignoreIfNotExists);
       return;
     }
-    Table table = loadGravitinoTable(tablePath, ignoreIfNotExists);
+    Table table = loadGravitinoTableOrNull(tablePath, ignoreIfNotExists);
     if (table == null) {
       return;
     }
@@ -203,7 +212,7 @@ public class GravitinoHiveCatalog extends BaseCatalog {
       super.alterTable(tablePath, newTable, tableChanges, ignoreIfNotExists);
       return;
     }
-    Table table = loadGravitinoTable(tablePath, ignoreIfNotExists);
+    Table table = loadGravitinoTableOrNull(tablePath, ignoreIfNotExists);
     if (table == null) {
       return;
     }
@@ -217,7 +226,7 @@ public class GravitinoHiveCatalog extends BaseCatalog {
     applyGenericTableAlter(tablePath, table, (ResolvedCatalogTable) newTable);
   }
 
-  private Table loadGravitinoTable(ObjectPath tablePath, boolean ignoreIfNotExists)
+  private Table loadGravitinoTableOrNull(ObjectPath tablePath, boolean ignoreIfNotExists)
       throws TableNotExistException, CatalogException {
     try {
       return catalog()

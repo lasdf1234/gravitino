@@ -18,19 +18,31 @@
  */
 package org.apache.gravitino.flink.connector.iceberg;
 
+import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.flink.table.catalog.AbstractCatalog;
 import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.CatalogBaseTable;
+import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.factories.Factory;
 import org.apache.flink.util.Preconditions;
 import org.apache.gravitino.flink.connector.PartitionConverter;
 import org.apache.gravitino.flink.connector.SchemaAndTablePropertiesConverter;
 import org.apache.gravitino.flink.connector.catalog.BaseCatalog;
+import org.apache.gravitino.rel.Table;
+import org.apache.iceberg.catalog.Namespace;
+import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.flink.FlinkCatalog;
 import org.apache.iceberg.flink.FlinkCatalogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Gravitino Iceberg Catalog. */
 public class GravitinoIcebergCatalog extends BaseCatalog {
+
+  private static final Logger LOG = LoggerFactory.getLogger(GravitinoIcebergCatalog.class);
 
   private final AbstractCatalog icebergCatalog;
 
@@ -78,11 +90,47 @@ public class GravitinoIcebergCatalog extends BaseCatalog {
     return icebergCatalog;
   }
 
+  @Override
+  protected void invalidateNativeTableCache(ObjectPath tablePath) {
+    FlinkCatalog flinkCatalog = (FlinkCatalog) realCatalog();
+    flinkCatalog.catalog().invalidateTable(toIcebergTableIdentifier(flinkCatalog, tablePath));
+  }
+
+  @Override
+  protected CatalogBaseTable createFlinkTable(
+      ObjectPath tablePath, Table gravitinoTable, CatalogBaseTable flinkNativeTable) {
+    Preconditions.checkState(
+        flinkNativeTable instanceof CatalogTable,
+        "Expected native CatalogTable but got %s.",
+        flinkNativeTable.getClass().getName());
+    return new FlinkIcebergTable(
+        toFlinkTable(gravitinoTable, tablePath), (CatalogTable) flinkNativeTable);
+  }
+
   protected static AbstractCatalog asAbstractCatalog(Catalog catalog) {
     Preconditions.checkState(
         catalog instanceof AbstractCatalog,
         "Expected AbstractCatalog from FlinkCatalogFactory but got %s.",
         catalog.getClass().getName());
     return (AbstractCatalog) catalog;
+  }
+
+  private static TableIdentifier toIcebergTableIdentifier(
+      FlinkCatalog flinkCatalog, ObjectPath tablePath) {
+    try {
+      Method toIdentifier = FlinkCatalog.class.getDeclaredMethod("toIdentifier", ObjectPath.class);
+      toIdentifier.setAccessible(true);
+      TableIdentifier identifier = (TableIdentifier) toIdentifier.invoke(flinkCatalog, tablePath);
+      if (identifier != null) {
+        return identifier;
+      }
+    } catch (ReflectiveOperationException e) {
+      LOG.debug(
+          "Failed to resolve Iceberg table identifier via FlinkCatalog.toIdentifier for {}; "
+              + "falling back to database/table namespace",
+          tablePath,
+          e);
+    }
+    return TableIdentifier.of(Namespace.of(tablePath.getDatabaseName()), tablePath.getObjectName());
   }
 }

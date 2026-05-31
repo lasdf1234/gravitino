@@ -126,6 +126,76 @@ public abstract class BaseCatalog extends AbstractCatalog {
 
   protected abstract AbstractCatalog realCatalog();
 
+  /**
+   * Loads table metadata from Gravitino.
+   *
+   * @param tablePath Flink table path
+   * @return Gravitino table metadata
+   * @throws NoSuchTableException if the table does not exist in Gravitino
+   */
+  protected Table loadGravitinoTable(ObjectPath tablePath) throws NoSuchTableException {
+    return catalog()
+        .asTableCatalog()
+        .loadTable(NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName()));
+  }
+
+  /**
+   * Loads the native Flink table for runtime operations. Mirrors Spark connector {@code
+   * loadSparkTable}.
+   *
+   * @param tablePath Flink table path
+   * @return native catalog table loaded from {@link #realCatalog()}
+   */
+  protected CatalogBaseTable loadFlinkTable(ObjectPath tablePath) {
+    try {
+      return realCatalog().getTable(tablePath);
+    } catch (TableNotExistException e) {
+      throw new CatalogException(
+          String.format(
+              "Table %s exists in Gravitino but not in the native catalog. "
+                  + "The two stores may be out of sync.",
+              tablePath),
+          e);
+    }
+  }
+
+  /**
+   * Creates a Flink catalog table from Gravitino metadata and the native Flink table. Mirrors Spark
+   * connector {@code createSparkTable}.
+   *
+   * @param tablePath Flink table path
+   * @param gravitinoTable Gravitino table metadata for DDL operations
+   * @param flinkNativeTable native Flink catalog table for IO operations
+   * @return Flink catalog table for planner and runtime
+   */
+  protected abstract CatalogBaseTable createFlinkTable(
+      ObjectPath tablePath, Table gravitinoTable, CatalogBaseTable flinkNativeTable);
+
+  /**
+   * Invalidates cached table metadata in the native Flink catalog. Mirrors Spark {@code
+   * sparkCatalog.invalidateTable}.
+   *
+   * @param tablePath Flink table path whose cached metadata should be dropped
+   */
+  public void invalidateTable(ObjectPath tablePath) {
+    try {
+      invalidateNativeTableCache(tablePath);
+    } catch (Exception e) {
+      LOG.debug(
+          "Failed to invalidate native catalog cache for table {} in catalog {}",
+          tablePath,
+          catalogName(),
+          e);
+    }
+  }
+
+  /**
+   * Invalidates native catalog cache for connectors that support it. The default is a no-op.
+   *
+   * @param tablePath Flink table path whose cached metadata should be dropped
+   */
+  protected void invalidateNativeTableCache(ObjectPath tablePath) {}
+
   @Override
   public void open() throws CatalogException {
     realCatalog().open();
@@ -248,15 +318,14 @@ public abstract class BaseCatalog extends AbstractCatalog {
   @Override
   public CatalogBaseTable getTable(ObjectPath tablePath)
       throws TableNotExistException, CatalogException {
-    NameIdentifier ident =
-        NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName());
     try {
-      Table table = catalog().asTableCatalog().loadTable(ident);
-      return toFlinkTable(table, tablePath);
+      Table gravitinoTable = loadGravitinoTable(tablePath);
+      CatalogBaseTable flinkNativeTable = loadFlinkTable(tablePath);
+      return createFlinkTable(tablePath, gravitinoTable, flinkNativeTable);
     } catch (NoSuchTableException e) {
       // Fall through to check views.
     } catch (Exception e) {
-      LOG.warn("Failed to load table {} from catalog {}", ident, catalogName(), e);
+      LOG.warn("Failed to load table {} from catalog {}", tablePath, catalogName(), e);
       throw new CatalogException(e);
     }
 
@@ -301,6 +370,7 @@ public abstract class BaseCatalog extends AbstractCatalog {
     NameIdentifier ident =
         NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName());
 
+    invalidateTable(tablePath);
     try {
       boolean tableDropped = catalog().asTableCatalog().dropTable(ident);
       boolean viewDropped = false;
@@ -326,6 +396,7 @@ public abstract class BaseCatalog extends AbstractCatalog {
         NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName());
     ObjectPath newPath = new ObjectPath(tablePath.getDatabaseName(), newTableName);
 
+    invalidateTable(tablePath);
     try {
       catalog().asTableCatalog().alterTable(srcIdent, TableChange.rename(newTableName));
       return;
@@ -484,6 +555,7 @@ public abstract class BaseCatalog extends AbstractCatalog {
     NameIdentifier identifier =
         NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName());
 
+    invalidateTable(tablePath);
     if (newTable.getTableKind() == CatalogBaseTable.TableKind.VIEW) {
       try {
         catalog()
@@ -532,6 +604,7 @@ public abstract class BaseCatalog extends AbstractCatalog {
     NameIdentifier identifier =
         NameIdentifier.of(tablePath.getDatabaseName(), tablePath.getObjectName());
 
+    invalidateTable(tablePath);
     if (newTable.getTableKind() == CatalogBaseTable.TableKind.VIEW) {
       try {
         catalog()
@@ -706,7 +779,11 @@ public abstract class BaseCatalog extends AbstractCatalog {
     throw new UnsupportedOperationException();
   }
 
-  protected CatalogBaseTable toFlinkTable(Table table, ObjectPath tablePath) {
+  /**
+   * Builds a Flink {@link CatalogTable} from Gravitino table metadata for use in dual-table
+   * wrappers.
+   */
+  protected CatalogTable toFlinkTable(Table table, ObjectPath tablePath) {
     org.apache.flink.table.api.Schema.Builder builder = buildSchemaFromColumns(table.columns());
     Optional<List<String>> flinkPrimaryKey = getFlinkPrimaryKey(table);
     flinkPrimaryKey.ifPresent(builder::primaryKey);

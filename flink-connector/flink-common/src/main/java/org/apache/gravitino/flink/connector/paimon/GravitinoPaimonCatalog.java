@@ -28,6 +28,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.table.catalog.AbstractCatalog;
+import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.exceptions.CatalogException;
 import org.apache.flink.table.catalog.exceptions.TableNotExistException;
@@ -38,11 +39,17 @@ import org.apache.gravitino.catalog.lakehouse.paimon.PaimonConstants;
 import org.apache.gravitino.flink.connector.PartitionConverter;
 import org.apache.gravitino.flink.connector.SchemaAndTablePropertiesConverter;
 import org.apache.gravitino.flink.connector.catalog.BaseCatalog;
+import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.expressions.Expression;
 import org.apache.gravitino.rel.expressions.NamedReference;
 import org.apache.gravitino.rel.expressions.distributions.Distribution;
 import org.apache.gravitino.rel.expressions.distributions.Distributions;
 import org.apache.gravitino.rel.expressions.distributions.Strategy;
+import org.apache.paimon.catalog.CachingCatalog;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.flink.DataCatalogTable;
+import org.apache.paimon.flink.FlinkCatalog;
 import org.apache.paimon.flink.FlinkCatalogFactory;
 import org.apache.paimon.flink.FlinkTableFactory;
 
@@ -65,8 +72,7 @@ public class GravitinoPaimonCatalog extends BaseCatalog {
         defaultDatabase,
         schemaAndTablePropertiesConverter,
         partitionConverter);
-    FlinkCatalogFactory flinkCatalogFactory = new FlinkCatalogFactory();
-    this.paimonCatalog = flinkCatalogFactory.createCatalog(context);
+    this.paimonCatalog = new FlinkCatalogFactory().createCatalog(context);
   }
 
   @Override
@@ -75,8 +81,30 @@ public class GravitinoPaimonCatalog extends BaseCatalog {
   }
 
   @Override
+  protected void invalidateNativeTableCache(ObjectPath tablePath) {
+    Catalog catalog = ((FlinkCatalog) realCatalog()).catalog();
+    if (!(catalog instanceof CachingCatalog)) {
+      return;
+    }
+    Identifier identifier = FlinkCatalog.toIdentifier(tablePath);
+    ((CachingCatalog) catalog).invalidateTable(identifier);
+  }
+
+  @Override
+  protected CatalogBaseTable createFlinkTable(
+      ObjectPath tablePath, Table gravitinoTable, CatalogBaseTable flinkNativeTable) {
+    Preconditions.checkState(
+        flinkNativeTable instanceof DataCatalogTable,
+        "Expected Paimon DataCatalogTable but got %s.",
+        flinkNativeTable.getClass().getName());
+    return new FlinkPaimonTable(
+        toFlinkTable(gravitinoTable, tablePath), (DataCatalogTable) flinkNativeTable);
+  }
+
+  @Override
   public void dropTable(ObjectPath tablePath, boolean ignoreIfNotExists)
       throws TableNotExistException, CatalogException {
+    invalidateTable(tablePath);
     boolean dropped =
         catalog()
             .asTableCatalog()

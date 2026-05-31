@@ -23,11 +23,16 @@ import java.util.Optional;
 import org.apache.flink.connector.jdbc.catalog.factory.JdbcCatalogFactory;
 import org.apache.flink.connector.jdbc.table.JdbcDynamicTableFactory;
 import org.apache.flink.table.catalog.AbstractCatalog;
+import org.apache.flink.table.catalog.CatalogBaseTable;
+import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.factories.CatalogFactory;
 import org.apache.flink.table.factories.Factory;
+import org.apache.flink.util.Preconditions;
 import org.apache.gravitino.flink.connector.PartitionConverter;
 import org.apache.gravitino.flink.connector.SchemaAndTablePropertiesConverter;
 import org.apache.gravitino.flink.connector.catalog.BaseCatalog;
+import org.apache.gravitino.rel.Table;
 
 /**
  * The GravitinoJdbcCatalog class is an implementation of the BaseCatalog class that is used to
@@ -68,6 +73,17 @@ public class GravitinoJdbcCatalog extends BaseCatalog {
   @Override
   protected AbstractCatalog realCatalog() {
     return jdbcCatalog;
+  }
+
+  @Override
+  protected CatalogBaseTable createFlinkTable(
+      ObjectPath tablePath, Table gravitinoTable, CatalogBaseTable flinkNativeTable) {
+    Preconditions.checkState(
+        flinkNativeTable instanceof CatalogTable,
+        "Expected native CatalogTable but got %s.",
+        flinkNativeTable.getClass().getName());
+    return new FlinkJdbcTable(
+        toFlinkTable(gravitinoTable, tablePath), (CatalogTable) flinkNativeTable);
   }
 
   @Override
