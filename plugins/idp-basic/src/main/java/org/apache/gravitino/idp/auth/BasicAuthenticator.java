@@ -20,6 +20,7 @@
 package org.apache.gravitino.idp.auth;
 
 import com.google.common.base.Preconditions;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.Base64;
@@ -35,10 +36,15 @@ import org.apache.gravitino.auth.AuthConstants;
 import org.apache.gravitino.exceptions.UnauthorizedException;
 import org.apache.gravitino.idp.IdpUserGroupManager;
 import org.apache.gravitino.idp.model.IdpUser;
+import org.apache.gravitino.idp.web.rest.feature.IdpRESTFeature;
 import org.apache.gravitino.server.authentication.Authenticator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Authenticates HTTP Basic credentials against built-in IdP user metadata. */
 public class BasicAuthenticator implements Authenticator {
+
+  private static final Logger LOG = LoggerFactory.getLogger(BasicAuthenticator.class);
 
   private static final String BASIC_CHALLENGE = AuthConstants.AUTHORIZATION_BASIC_HEADER.trim();
 
@@ -64,6 +70,20 @@ public class BasicAuthenticator implements Authenticator {
   public void initialize(Config config) {
     GravitinoEnv env = GravitinoEnv.getInstance();
     this.userGroupManager = IdpUserGroupManager.getInstance(config, env.idGenerator());
+    initializeConfiguredServiceAdmins(config);
+  }
+
+  private void initializeConfiguredServiceAdmins(Config config) {
+    String initialAdminPassword = System.getenv(IdpRESTFeature.INITIAL_ADMIN_PASSWORD_ENV);
+    if (StringUtils.isBlank(initialAdminPassword)) {
+      return;
+    }
+    try {
+      userGroupManager.initializeConfiguredServiceAdmins(config, initialAdminPassword);
+      LOG.info("Initialized built-in IdP service admins");
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to initialize built-in IdP service admins", e);
+    }
   }
 
   @Override

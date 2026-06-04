@@ -528,6 +528,8 @@ public class GravitinoEnv {
   }
 
   private void initBaseComponents() {
+    this.idGenerator = new RandomIdGenerator();
+
     this.metricsSystem = new MetricsSystem();
     metricsSystem.register(new JVMMetricsSource());
 
