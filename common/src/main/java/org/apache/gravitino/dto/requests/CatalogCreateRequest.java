@@ -29,6 +29,7 @@ import lombok.ToString;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.CatalogProvider;
+import org.apache.gravitino.dto.secret.SecretReferenceLocatorDTO;
 import org.apache.gravitino.rest.RESTRequest;
 
 /** Represents a request to create a catalog. */
@@ -54,6 +55,14 @@ public class CatalogCreateRequest implements RESTRequest {
   @JsonProperty("properties")
   private final Map<String, String> properties;
 
+  @Nullable
+  @JsonProperty("secretBindings")
+  private final Map<String, String> secretBindings;
+
+  @Nullable
+  @JsonProperty("secretReferences")
+  private final Map<String, SecretReferenceLocatorDTO> secretReferences;
+
   /**
    * Constructor for CatalogCreateRequest.
    *
@@ -62,6 +71,8 @@ public class CatalogCreateRequest implements RESTRequest {
    * @param provider The provider of the catalog.
    * @param comment The comment for the catalog.
    * @param properties The properties for the catalog.
+   * @param secretBindings Property keys mapped to provider names for write-through secrets.
+   * @param secretReferences Property keys mapped to external secret locators.
    */
   @JsonCreator
   public CatalogCreateRequest(
@@ -69,11 +80,16 @@ public class CatalogCreateRequest implements RESTRequest {
       @JsonProperty("type") Catalog.Type type,
       @JsonProperty("provider") String provider,
       @JsonProperty("comment") String comment,
-      @JsonProperty("properties") Map<String, String> properties) {
+      @JsonProperty("properties") Map<String, String> properties,
+      @JsonProperty("secretBindings") @Nullable Map<String, String> secretBindings,
+      @JsonProperty("secretReferences") @Nullable
+          Map<String, SecretReferenceLocatorDTO> secretReferences) {
     this.name = name;
     this.type = type;
     this.comment = comment;
     this.properties = properties;
+    this.secretBindings = secretBindings;
+    this.secretReferences = secretReferences;
 
     if (StringUtils.isNotBlank(provider)) {
       this.provider = provider;
@@ -100,6 +116,24 @@ public class CatalogCreateRequest implements RESTRequest {
   }
 
   /**
+   * Constructor for CatalogCreateRequest without secret fields.
+   *
+   * @param name The name of the catalog.
+   * @param type The type of the catalog.
+   * @param provider The provider of the catalog.
+   * @param comment The comment for the catalog.
+   * @param properties The properties for the catalog.
+   */
+  public CatalogCreateRequest(
+      String name,
+      Catalog.Type type,
+      String provider,
+      String comment,
+      Map<String, String> properties) {
+    this(name, type, provider, comment, properties, null, null);
+  }
+
+  /**
    * Validates the fields of the request.
    *
    * @throws IllegalArgumentException if name or type are not set.
@@ -114,5 +148,7 @@ public class CatalogCreateRequest implements RESTRequest {
         "\"provider\" field is required and cannot be empty for catalog type "
             + type
             + " that doesn't support managed catalog");
+    SecretCreateRequestValidation.validateSecretCreateFields(
+        properties, secretBindings, secretReferences);
   }
 }

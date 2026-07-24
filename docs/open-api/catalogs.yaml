@@ -390,6 +390,20 @@ components:
           default: { }
           additionalProperties:
             type: string
+        secretBindings:
+          type: object
+          description: Property keys mapped to provider names for write-through secrets
+          nullable: true
+          default: { }
+          additionalProperties:
+            type: string
+        secretReferences:
+          type: object
+          description: Property keys mapped to external secret locators
+          nullable: true
+          default: { }
+          additionalProperties:
+            $ref: "./secrets.yaml#/components/schemas/SecretReferenceLocator"
 
     CatalogSetRequest:
       type: object

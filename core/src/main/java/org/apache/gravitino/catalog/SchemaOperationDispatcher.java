@@ -42,6 +42,7 @@ import org.apache.gravitino.lock.LockType;
 import org.apache.gravitino.lock.TreeLockUtils;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.SchemaEntity;
+import org.apache.gravitino.secret.SecretCreateSupport;
 import org.apache.gravitino.storage.IdGenerator;
 import org.apache.gravitino.utils.PrincipalUtils;
 import org.apache.gravitino.utils.SchemaEntityCleaner;
@@ -110,12 +111,14 @@ public class SchemaOperationDispatcher extends OperationDispatcher implements Sc
                 }),
         IllegalArgumentException.class);
     long uid = idGenerator.nextId();
+    Map<String, String> secretAppliedProperties =
+        SecretCreateSupport.applyOnCreateIfContextSet("schema", uid, properties);
     // Add StringIdentifier to the properties, the specific catalog will handle this
     // StringIdentifier to make sure only when the operation is successful, the related
     // SchemaEntity will be visible.
     StringIdentifier stringId = StringIdentifier.fromId(uid);
     Map<String, String> updatedProperties =
-        StringIdentifier.newPropertiesWithId(stringId, properties);
+        StringIdentifier.newPropertiesWithId(stringId, secretAppliedProperties);
 
     return TreeLockUtils.doWithTreeLock(
         catalogIdent,
@@ -326,6 +329,30 @@ public class SchemaOperationDispatcher extends OperationDispatcher implements Sc
         catalogIdent,
         LockType.WRITE,
         () -> {
+          Schema schemaForCleanup = null;
+          long schemaEntityId = -1L;
+          try {
+            schemaForCleanup =
+                doWithCatalog(
+                    catalogIdent,
+                    c -> c.doWithSchemaOps(s -> s.loadSchema(ident)),
+                    NoSuchSchemaException.class);
+            StringIdentifier stringId = getStringIdFromProperties(schemaForCleanup.properties());
+            if (stringId != null) {
+              schemaEntityId = stringId.id();
+            }
+            SchemaEntity schemaEntity = getEntity(ident, SCHEMA, SchemaEntity.class);
+            if (schemaEntity != null) {
+              schemaEntityId = schemaEntity.id();
+            }
+          } catch (NoSuchSchemaException e) {
+            LOG.debug("Schema {} not found in catalog during drop cleanup", ident);
+          }
+          if (schemaForCleanup != null && schemaEntityId > 0) {
+            SecretCreateSupport.cleanupOnDropIfRegistryPresent(
+                "schema", schemaEntityId, schemaForCleanup.properties());
+          }
+
           boolean droppedFromCatalog =
               doWithCatalog(
                   catalogIdent,

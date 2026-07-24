@@ -38,6 +38,7 @@ import org.apache.gravitino.file.Fileset;
 import org.apache.gravitino.file.FilesetChange;
 import org.apache.gravitino.lock.LockType;
 import org.apache.gravitino.lock.TreeLockUtils;
+import org.apache.gravitino.secret.SecretCreateSupport;
 import org.apache.gravitino.storage.IdGenerator;
 
 public class FilesetOperationDispatcher extends OperationDispatcher implements FilesetDispatcher {
@@ -151,9 +152,11 @@ public class FilesetOperationDispatcher extends OperationDispatcher implements F
                 }),
         IllegalArgumentException.class);
     long uid = idGenerator.nextId();
+    Map<String, String> secretAppliedProperties =
+        SecretCreateSupport.applyOnCreateIfContextSet("fileset", uid, properties);
     StringIdentifier stringId = StringIdentifier.fromId(uid);
     Map<String, String> updatedProperties =
-        StringIdentifier.newPropertiesWithId(stringId, properties);
+        StringIdentifier.newPropertiesWithId(stringId, secretAppliedProperties);
 
     Fileset createdFileset =
         TreeLockUtils.doWithTreeLock(
@@ -235,14 +238,35 @@ public class FilesetOperationDispatcher extends OperationDispatcher implements F
    */
   @Override
   public boolean dropFileset(NameIdentifier ident) {
+    NameIdentifier catalogIdent = getCatalogIdentifier(ident);
     return TreeLockUtils.doWithTreeLock(
         NameIdentifier.of(ident.namespace().levels()),
         LockType.WRITE,
-        () ->
-            doWithCatalog(
-                getCatalogIdentifier(ident),
-                c -> c.doWithFilesetOps(f -> f.dropFileset(ident)),
-                NonEmptyEntityException.class));
+        () -> {
+          Fileset filesetForCleanup = null;
+          long filesetEntityId = -1L;
+          try {
+            filesetForCleanup =
+                doWithCatalog(
+                    catalogIdent,
+                    c -> c.doWithFilesetOps(f -> f.loadFileset(ident)),
+                    NoSuchFilesetException.class);
+            StringIdentifier stringId = getStringIdFromProperties(filesetForCleanup.properties());
+            if (stringId != null) {
+              filesetEntityId = stringId.id();
+            }
+          } catch (NoSuchFilesetException e) {
+            // Fileset may already be gone from the catalog.
+          }
+          if (filesetForCleanup != null && filesetEntityId > 0) {
+            SecretCreateSupport.cleanupOnDropIfRegistryPresent(
+                "fileset", filesetEntityId, filesetForCleanup.properties());
+          }
+          return doWithCatalog(
+              catalogIdent,
+              c -> c.doWithFilesetOps(f -> f.dropFileset(ident)),
+              NonEmptyEntityException.class);
+        });
   }
 
   /**

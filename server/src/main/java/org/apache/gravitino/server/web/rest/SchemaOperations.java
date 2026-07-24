@@ -56,6 +56,7 @@ import org.apache.gravitino.server.authorization.annotations.AuthorizationExpres
 import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationRequest;
 import org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants;
+import org.apache.gravitino.server.web.SecretCreateWebSupport;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.utils.HierarchicalSchemaUtil;
 import org.apache.gravitino.utils.NameIdentifierUtil;
@@ -149,8 +150,15 @@ public class SchemaOperations {
             request.validate();
             NameIdentifier ident =
                 NameIdentifierUtil.ofSchema(metalake, catalog, request.getName());
-            Schema schema =
-                dispatcher.createSchema(ident, request.getComment(), request.getProperties());
+            Schema schema;
+            try {
+              SecretCreateWebSupport.setCreateContext(
+                  "schema", request.getSecretBindings(), request.getSecretReferences());
+              schema =
+                  dispatcher.createSchema(ident, request.getComment(), request.getProperties());
+            } finally {
+              SecretCreateWebSupport.clearCreateContext();
+            }
             Response response = Utils.ok(new SchemaResponse(DTOConverters.toDTO(schema)));
             LOG.info("Schema created: {}.{}.{}", metalake, catalog, schema.name());
             return response;

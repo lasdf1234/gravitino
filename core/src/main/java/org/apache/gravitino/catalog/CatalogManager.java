@@ -106,6 +106,7 @@ import org.apache.gravitino.rel.SupportsPartitions;
 import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.TableCatalog;
 import org.apache.gravitino.rel.ViewCatalog;
+import org.apache.gravitino.secret.SecretCreateSupport;
 import org.apache.gravitino.storage.IdGenerator;
 import org.apache.gravitino.storage.relational.SupportsEntityChangeLog;
 import org.apache.gravitino.utils.ClassLoaderKey;
@@ -586,8 +587,10 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
       throws NoSuchMetalakeException, CatalogAlreadyExistsException {
     NameIdentifier metalakeIdent = NameIdentifier.of(ident.namespace().levels());
 
-    Map<String, String> mergedConfig = buildCatalogConf(provider, properties);
     long uid = idGenerator.nextId();
+    final Map<String, String> mergedConfig =
+        SecretCreateSupport.applyOnCreateIfContextSet(
+            "catalog", uid, buildCatalogConf(provider, properties));
     StringIdentifier stringId = StringIdentifier.fromId(uid);
     Instant now = Instant.now();
     String creator = PrincipalUtils.getCurrentPrincipal().getName();
@@ -961,6 +964,10 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
                   });
             }
 
+            CatalogEntity catalogEntity = catalogWrapper.catalog().entity();
+            SecretCreateSupport.cleanupOnDropIfRegistryPresent(
+                "catalog", catalogEntity.id(), catalogEntity.getProperties());
+
             // Finally, delete the catalog entity as well as all its sub-entities from the store.
             // Invalidate after store.delete() to prevent a background thread from repopulating
             // the cache with stale data between invalidate and delete.
@@ -1292,7 +1299,9 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
   private BaseCatalog<?> createBaseCatalog(IsolatedClassLoader classLoader, CatalogEntity entity) {
     // Load Catalog class instance
     BaseCatalog<?> catalog = createCatalogInstance(classLoader, entity.getProvider());
-    catalog.withCatalogConf(entity.getProperties()).withCatalogEntity(entity);
+    Map<String, String> resolved =
+        SecretCreateSupport.resolveSecretsIfRegistryPresent(entity.getProperties());
+    catalog.withCatalogConf(resolved).withCatalogEntity(entity);
     catalog.initAuthorizationPluginInstance(classLoader);
     return catalog;
   }
