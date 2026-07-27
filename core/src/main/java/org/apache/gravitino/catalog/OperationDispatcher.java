@@ -255,9 +255,15 @@ public abstract class OperationDispatcher {
       } else if (item instanceof SchemaChange.SetProperty) {
         SchemaChange.SetProperty setProperty = (SchemaChange.SetProperty) item;
         properties.put(setProperty.getProperty(), setProperty.getValue());
+      } else if (item instanceof SchemaChange.SetSecretBinding) {
+        SchemaChange.SetSecretBinding setSecretBinding = (SchemaChange.SetSecretBinding) item;
+        properties.put(setSecretBinding.getProperty(), setSecretBinding.getValue());
       } else if (item instanceof FilesetChange.SetProperty) {
         FilesetChange.SetProperty setProperty = (FilesetChange.SetProperty) item;
         properties.put(setProperty.getProperty(), setProperty.getValue());
+      } else if (item instanceof FilesetChange.SetSecretBinding) {
+        FilesetChange.SetSecretBinding setSecretBinding = (FilesetChange.SetSecretBinding) item;
+        properties.put(setSecretBinding.getProperty(), setSecretBinding.getValue());
       } else if (item instanceof TopicChange.SetProperty) {
         TopicChange.SetProperty setProperty = (TopicChange.SetProperty) item;
         properties.put(setProperty.getProperty(), setProperty.getValue());

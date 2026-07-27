@@ -48,7 +48,13 @@ import org.apache.gravitino.rest.RESTRequest;
       name = "setProperty"),
   @JsonSubTypes.Type(
       value = FilesetUpdateRequest.RemoveFilesetPropertiesRequest.class,
-      name = "removeProperty")
+      name = "removeProperty"),
+  @JsonSubTypes.Type(
+      value = FilesetUpdateRequest.SetFilesetSecretBindingRequest.class,
+      name = "setSecretBinding"),
+  @JsonSubTypes.Type(
+      value = FilesetUpdateRequest.SetFilesetSecretReferenceRequest.class,
+      name = "setSecretReference")
 })
 public interface FilesetUpdateRequest extends RESTRequest {
 
@@ -204,5 +210,77 @@ public interface FilesetUpdateRequest extends RESTRequest {
      */
     @Override
     public void validate() throws IllegalArgumentException {}
+  }
+
+  /** The fileset update request for setting a write-through secret binding. */
+  @EqualsAndHashCode
+  @NoArgsConstructor(force = true)
+  @AllArgsConstructor
+  @ToString
+  class SetFilesetSecretBindingRequest implements FilesetUpdateRequest {
+
+    @Getter
+    @JsonProperty("property")
+    private final String property;
+
+    @Getter
+    @JsonProperty("provider")
+    private final String provider;
+
+    @Getter
+    @JsonProperty("value")
+    private final String value;
+
+    @Override
+    public FilesetChange filesetChange() {
+      return FilesetChange.setSecretBinding(property, provider, value);
+    }
+
+    @Override
+    public void validate() throws IllegalArgumentException {
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(provider), "\"provider\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(value), "\"value\" field is required and cannot be empty");
+    }
+  }
+
+  /** The fileset update request for setting an external secret reference. */
+  @EqualsAndHashCode
+  @NoArgsConstructor(force = true)
+  @AllArgsConstructor
+  @ToString
+  class SetFilesetSecretReferenceRequest implements FilesetUpdateRequest {
+
+    @Getter
+    @JsonProperty("property")
+    private final String property;
+
+    @Getter
+    @JsonProperty("provider")
+    private final String provider;
+
+    @Getter
+    @JsonProperty("mount")
+    private final String mount;
+
+    @Getter
+    @JsonProperty("path")
+    private final String path;
+
+    @Override
+    public FilesetChange filesetChange() {
+      return FilesetChange.setSecretReference(property, provider, mount, path);
+    }
+
+    @Override
+    public void validate() throws IllegalArgumentException {
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(provider), "\"provider\" field is required and cannot be empty");
+    }
   }
 }

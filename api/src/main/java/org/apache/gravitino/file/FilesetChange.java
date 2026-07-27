@@ -19,6 +19,7 @@
 package org.apache.gravitino.file;
 
 import java.util.Objects;
+import javax.annotation.Nullable;
 import org.apache.gravitino.annotation.Evolving;
 
 /**
@@ -67,6 +68,32 @@ public interface FilesetChange {
    */
   static FilesetChange removeProperty(String property) {
     return new RemoveProperty(property);
+  }
+
+  /**
+   * Creates a fileset change to set a write-through secret binding.
+   *
+   * @param property The secret property name.
+   * @param provider The secret provider name.
+   * @param value The plaintext secret value.
+   * @return The fileset change.
+   */
+  static FilesetChange setSecretBinding(String property, String provider, String value) {
+    return new SetSecretBinding(property, provider, value);
+  }
+
+  /**
+   * Creates a fileset change to set an external secret reference.
+   *
+   * @param property The secret property name.
+   * @param provider The secret provider name.
+   * @param mount The optional mount locator segment.
+   * @param path The optional path locator segment.
+   * @return The fileset change.
+   */
+  static FilesetChange setSecretReference(
+      String property, String provider, @Nullable String mount, @Nullable String path) {
+    return new SetSecretReference(property, provider, mount, path);
   }
 
   /**
@@ -309,6 +336,141 @@ public interface FilesetChange {
     @Override
     public String toString() {
       return "REMOVEPROPERTY " + property;
+    }
+  }
+
+  /** A fileset change to set a write-through secret binding. */
+  final class SetSecretBinding implements FilesetChange {
+    private final String property;
+    private final String provider;
+    private final String value;
+
+    private SetSecretBinding(String property, String provider, String value) {
+      this.property = property;
+      this.provider = provider;
+      this.value = value;
+    }
+
+    /**
+     * Returns the secret property name.
+     *
+     * @return the property name
+     */
+    public String getProperty() {
+      return property;
+    }
+
+    /**
+     * Returns the secret provider name.
+     *
+     * @return the provider name
+     */
+    public String getProvider() {
+      return provider;
+    }
+
+    /**
+     * Returns the plaintext secret value.
+     *
+     * @return the plaintext value
+     */
+    public String getValue() {
+      return value;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      SetSecretBinding that = (SetSecretBinding) o;
+      return Objects.equals(property, that.property)
+          && Objects.equals(provider, that.provider)
+          && Objects.equals(value, that.value);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(property, provider, value);
+    }
+
+    @Override
+    public String toString() {
+      return "SETSECRETBINDING " + property + " " + provider + " " + value;
+    }
+  }
+
+  /** A fileset change to set an external secret reference. */
+  final class SetSecretReference implements FilesetChange {
+    private final String property;
+    private final String provider;
+    private final String mount;
+    private final String path;
+
+    private SetSecretReference(
+        String property, String provider, @Nullable String mount, @Nullable String path) {
+      this.property = property;
+      this.provider = provider;
+      this.mount = mount;
+      this.path = path;
+    }
+
+    /**
+     * Returns the secret property name.
+     *
+     * @return the property name
+     */
+    public String getProperty() {
+      return property;
+    }
+
+    /**
+     * Returns the secret provider name.
+     *
+     * @return the provider name
+     */
+    public String getProvider() {
+      return provider;
+    }
+
+    /**
+     * Returns the optional mount locator segment.
+     *
+     * @return the mount segment, or null if not set
+     */
+    @Nullable
+    public String getMount() {
+      return mount;
+    }
+
+    /**
+     * Returns the optional path locator segment.
+     *
+     * @return the path segment, or null if not set
+     */
+    @Nullable
+    public String getPath() {
+      return path;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      SetSecretReference that = (SetSecretReference) o;
+      return Objects.equals(property, that.property)
+          && Objects.equals(provider, that.provider)
+          && Objects.equals(mount, that.mount)
+          && Objects.equals(path, that.path);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(property, provider, mount, path);
+    }
+
+    @Override
+    public String toString() {
+      return "SETSECRETREFERENCE " + property + " " + provider + " " + mount + " " + path;
     }
   }
 

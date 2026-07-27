@@ -25,6 +25,7 @@ import static org.apache.gravitino.catalog.PropertiesMetadataHelpers.validatePro
 import static org.apache.gravitino.catalog.PropertiesMetadataHelpers.validatePropertyForCreate;
 import static org.apache.gravitino.connector.BaseCatalogPropertiesMetadata.PROPERTY_METALAKE_IN_USE;
 import static org.apache.gravitino.metalake.MetalakeManager.checkMetalake;
+import static org.apache.gravitino.secret.SecretConstants.SECRET_KEYS_PROPERTY;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -73,6 +74,7 @@ import org.apache.gravitino.Entity;
 import org.apache.gravitino.Entity.EntityType;
 import org.apache.gravitino.EntityAlreadyExistsException;
 import org.apache.gravitino.EntityStore;
+import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.Schema;
@@ -106,7 +108,10 @@ import org.apache.gravitino.rel.SupportsPartitions;
 import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.TableCatalog;
 import org.apache.gravitino.rel.ViewCatalog;
+import org.apache.gravitino.secret.SecretAlterSupport;
 import org.apache.gravitino.secret.SecretCreateSupport;
+import org.apache.gravitino.secret.SecretPropertyHelper;
+import org.apache.gravitino.secret.SecretProviderRegistry;
 import org.apache.gravitino.storage.IdGenerator;
 import org.apache.gravitino.storage.relational.SupportsEntityChangeLog;
 import org.apache.gravitino.utils.ClassLoaderKey;
@@ -885,7 +890,8 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
                           catalog.getProperties() == null
                               ? new HashMap<>()
                               : new HashMap<>(catalog.getProperties());
-                      newCatalogBuilder = updateEntity(newCatalogBuilder, newProps, changes);
+                      newCatalogBuilder =
+                          updateEntity(newCatalogBuilder, newProps, catalog.id(), changes);
 
                       return newCatalogBuilder.build();
                     });
@@ -1158,6 +1164,14 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
               } else if (catalogChange instanceof RemoveProperty) {
                 RemoveProperty removeProperty = (RemoveProperty) catalogChange;
                 deletes.put(removeProperty.getProperty(), removeProperty.getProperty());
+              } else if (catalogChange instanceof CatalogChange.SetSecretBinding) {
+                CatalogChange.SetSecretBinding binding =
+                    (CatalogChange.SetSecretBinding) catalogChange;
+                upserts.put(binding.getProperty(), binding.getValue());
+              } else if (catalogChange instanceof CatalogChange.SetSecretReference) {
+                CatalogChange.SetSecretReference reference =
+                    (CatalogChange.SetSecretReference) catalogChange;
+                upserts.put(reference.getProperty(), "_");
               }
             });
 
@@ -1485,7 +1499,17 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
   }
 
   private CatalogEntity.Builder updateEntity(
-      CatalogEntity.Builder builder, Map<String, String> newProps, CatalogChange... changes) {
+      CatalogEntity.Builder builder,
+      Map<String, String> newProps,
+      long entityId,
+      CatalogChange... changes) {
+    SecretProviderRegistry registry = GravitinoEnv.getInstance().secretProviderRegistry();
+    if (SecretAlterSupport.containsSecretChanges(changes) && registry == null) {
+      throw new IllegalStateException(
+          "Secret bindings/references were provided but secret provider registry is not"
+              + " initialized");
+    }
+
     for (CatalogChange change : changes) {
       if (change instanceof CatalogChange.RenameCatalog) {
         CatalogChange.RenameCatalog rename = (CatalogChange.RenameCatalog) change;
@@ -1505,11 +1529,28 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
 
       } else if (change instanceof CatalogChange.SetProperty) {
         CatalogChange.SetProperty setProperty = (CatalogChange.SetProperty) change;
+        SecretPropertyHelper.validatePlainSetProperty(
+            newProps, setProperty.getProperty(), setProperty.getValue());
         newProps.put(setProperty.getProperty(), setProperty.getValue());
 
       } else if (change instanceof CatalogChange.RemoveProperty) {
         CatalogChange.RemoveProperty removeProperty = (CatalogChange.RemoveProperty) change;
-        newProps.remove(removeProperty.getProperty());
+        if (registry != null) {
+          SecretPropertyHelper.applyRemoveProperty(
+              newProps, "catalog", entityId, removeProperty.getProperty(), registry);
+        } else {
+          if (SecretPropertyHelper.secretKeys(newProps).contains(removeProperty.getProperty())
+              || SECRET_KEYS_PROPERTY.equals(removeProperty.getProperty())) {
+            throw new IllegalStateException(
+                "Secret bindings/references were provided but secret provider registry is not"
+                    + " initialized");
+          }
+          newProps.remove(removeProperty.getProperty());
+        }
+
+      } else if (change instanceof CatalogChange.SetSecretBinding
+          || change instanceof CatalogChange.SetSecretReference) {
+        SecretAlterSupport.applyCatalogChangeToProperties(newProps, entityId, change, registry);
 
       } else {
         throw new IllegalArgumentException(

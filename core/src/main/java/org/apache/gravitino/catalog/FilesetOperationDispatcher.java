@@ -24,6 +24,7 @@ import static org.apache.gravitino.utils.NameIdentifierUtil.getCatalogIdentifier
 import java.util.Arrays;
 import java.util.Map;
 import org.apache.gravitino.EntityStore;
+import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.StringIdentifier;
@@ -38,7 +39,9 @@ import org.apache.gravitino.file.Fileset;
 import org.apache.gravitino.file.FilesetChange;
 import org.apache.gravitino.lock.LockType;
 import org.apache.gravitino.lock.TreeLockUtils;
+import org.apache.gravitino.secret.SecretAlterSupport;
 import org.apache.gravitino.secret.SecretCreateSupport;
+import org.apache.gravitino.secret.SecretProviderRegistry;
 import org.apache.gravitino.storage.IdGenerator;
 
 public class FilesetOperationDispatcher extends OperationDispatcher implements FilesetDispatcher {
@@ -200,7 +203,6 @@ public class FilesetOperationDispatcher extends OperationDispatcher implements F
   @Override
   public Fileset alterFileset(NameIdentifier ident, FilesetChange... changes)
       throws NoSuchFilesetException, IllegalArgumentException {
-    validateAlterProperties(ident, HasPropertyMetadata::filesetPropertiesMetadata, changes);
     NameIdentifier catalogIdent = getCatalogIdentifier(ident);
 
     boolean containsRenameFileset =
@@ -212,12 +214,39 @@ public class FilesetOperationDispatcher extends OperationDispatcher implements F
         TreeLockUtils.doWithTreeLock(
             nameIdentifierForLock,
             LockType.WRITE,
-            () ->
-                doWithCatalog(
-                    catalogIdent,
-                    c -> c.doWithFilesetOps(f -> f.alterFileset(ident, changes)),
-                    NoSuchFilesetException.class,
-                    IllegalArgumentException.class));
+            () -> {
+              Fileset currentFileset =
+                  doWithCatalog(
+                      catalogIdent,
+                      c -> c.doWithFilesetOps(f -> f.loadFileset(ident)),
+                      NoSuchFilesetException.class);
+
+              Map<String, String> currentProps = currentFileset.properties();
+              StringIdentifier stringId = getStringIdFromProperties(currentProps);
+              long filesetId = stringId != null ? stringId.id() : -1L;
+
+              FilesetChange[] preparedChanges = changes;
+              if (SecretAlterSupport.requiresSecretAlterPreparation(currentProps, changes)) {
+                if (filesetId <= 0) {
+                  throw new IllegalArgumentException(
+                      "Cannot alter secrets for fileset without Gravitino entity id");
+                }
+                SecretProviderRegistry registry =
+                    GravitinoEnv.getInstance().secretProviderRegistry();
+                preparedChanges =
+                    SecretAlterSupport.prepareFilesetChanges(
+                        currentProps, filesetId, changes, registry);
+              }
+              final FilesetChange[] changesToApply = preparedChanges;
+
+              validateAlterProperties(
+                  ident, HasPropertyMetadata::filesetPropertiesMetadata, changesToApply);
+              return doWithCatalog(
+                  catalogIdent,
+                  c -> c.doWithFilesetOps(f -> f.alterFileset(ident, changesToApply)),
+                  NoSuchFilesetException.class,
+                  IllegalArgumentException.class);
+            });
 
     return EntityCombinedFileset.of(alteredFileset)
         .withHiddenProperties(

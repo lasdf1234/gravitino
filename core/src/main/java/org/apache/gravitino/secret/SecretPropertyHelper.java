@@ -161,6 +161,134 @@ public final class SecretPropertyHelper {
   }
 
   /**
+   * Applies a write-through secret binding during entity alter.
+   *
+   * @param props the mutable properties map
+   * @param entityType the entity type
+   * @param entityId the entity identifier
+   * @param property the secret property key
+   * @param provider the provider name
+   * @param plaintext the plaintext secret value
+   * @param registry the secret provider registry
+   */
+  public static void applySetSecretBinding(
+      Map<String, String> props,
+      String entityType,
+      long entityId,
+      String property,
+      String provider,
+      String plaintext,
+      SecretProviderRegistry registry) {
+    if (MASK.equals(plaintext)) {
+      throw new IllegalArgumentException(
+          String.format("Secret binding key %s has masked placeholder value", property));
+    }
+
+    String existingUrn = props.get(property);
+    if (existingUrn != null && existingUrn.startsWith(URN_PREFIX)) {
+      if (SecretUrn.isWriteThroughForEntity(existingUrn, entityType, entityId)) {
+        SecretUrn.ParsedUrn parsed = SecretUrn.parse(existingUrn);
+        GravitinoSecretProvider existingProvider = registry.get(parsed.providerName());
+        if (existingProvider != null) {
+          existingProvider.deleteSecret(existingUrn);
+        }
+      }
+    }
+
+    GravitinoSecretProvider secretProvider = requireProvider(registry, provider);
+    SecretWriteContext context = new SecretWriteContext(provider, entityType, entityId, property);
+    String urn = secretProvider.writeSecret(plaintext, context);
+    props.put(property, urn);
+    updateSecretKeys(props, property, true);
+  }
+
+  /**
+   * Applies an external secret reference during entity alter.
+   *
+   * @param props the mutable properties map
+   * @param entityType the entity type
+   * @param entityId the entity identifier
+   * @param property the secret property key
+   * @param provider the provider name
+   * @param mount the optional mount locator segment
+   * @param path the optional path locator segment
+   * @param registry the secret provider registry
+   */
+  public static void applySetSecretReference(
+      Map<String, String> props,
+      String entityType,
+      long entityId,
+      String property,
+      String provider,
+      @Nullable String mount,
+      @Nullable String path,
+      SecretProviderRegistry registry) {
+    SecretReferenceLocator locator = new SecretReferenceLocator(provider, mount, path);
+    rejectRawUrnReference(locator);
+    GravitinoSecretProvider secretProvider = requireProvider(registry, provider);
+    try {
+      secretProvider.buildExternalReferenceUrn(property, locator);
+    } catch (UnsupportedOperationException e) {
+      throw new IllegalArgumentException(
+          String.format("Secret provider %s does not support external secret references", provider),
+          e);
+    }
+  }
+
+  /**
+   * Removes a property during entity alter, cleaning up owned write-through secrets when needed.
+   *
+   * @param props the mutable properties map
+   * @param entityType the entity type
+   * @param entityId the entity identifier
+   * @param property the property key to remove
+   * @param registry the secret provider registry
+   */
+  public static void applyRemoveProperty(
+      Map<String, String> props,
+      String entityType,
+      long entityId,
+      String property,
+      SecretProviderRegistry registry) {
+    if (SECRET_KEYS_PROPERTY.equals(property)) {
+      throw new IllegalArgumentException("Client must not manage gravitino.secret.keys");
+    }
+
+    if (secretKeys(props).contains(property)) {
+      String urn = props.get(property);
+      if (urn != null
+          && urn.startsWith(URN_PREFIX)
+          && SecretUrn.isWriteThroughForEntity(urn, entityType, entityId)) {
+        SecretUrn.ParsedUrn parsed = SecretUrn.parse(urn);
+        GravitinoSecretProvider secretProvider = registry.get(parsed.providerName());
+        if (secretProvider != null) {
+          secretProvider.deleteSecret(urn);
+        }
+      }
+      updateSecretKeys(props, property, false);
+    }
+    props.remove(property);
+  }
+
+  /**
+   * Validates a plain property set during entity alter.
+   *
+   * @param props the current properties map
+   * @param property the property key
+   * @param value the property value
+   */
+  public static void validatePlainSetProperty(
+      Map<String, String> props, String property, String value) {
+    if (SECRET_KEYS_PROPERTY.equals(property)) {
+      throw new IllegalArgumentException("Client must not manage gravitino.secret.keys");
+    }
+    if (secretKeys(props).contains(property)) {
+      throw new IllegalArgumentException(
+          String.format("Property %s is a secret key; use setSecretBinding instead", property));
+    }
+  }
+
+  /**
    * Returns a copy of the properties map with secret keys removed.
    *
    * @param properties the stored properties map
@@ -247,6 +375,20 @@ public final class SecretPropertyHelper {
     if (locator.mount() != null && locator.mount().startsWith(URN_PREFIX)) {
       throw new IllegalArgumentException(
           "secretReferences must use locator objects, not raw secret URNs");
+    }
+  }
+
+  private static void updateSecretKeys(Map<String, String> props, String propertyKey, boolean add) {
+    LinkedHashSet<String> keys = new LinkedHashSet<>(secretKeys(props));
+    if (add) {
+      keys.add(propertyKey);
+    } else {
+      keys.remove(propertyKey);
+    }
+    if (keys.isEmpty()) {
+      props.remove(SECRET_KEYS_PROPERTY);
+    } else {
+      props.put(SECRET_KEYS_PROPERTY, SECRET_KEY_JOINER.join(keys));
     }
   }
 }

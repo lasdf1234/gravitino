@@ -215,4 +215,69 @@ public class TestSecretPropertyHelper {
     Assertions.assertEquals(
         java.util.Set.of("password", "token"), SecretPropertyHelper.secretKeys(properties));
   }
+
+  @Test
+  public void testApplySetSecretBindingReplace() {
+    Map<String, String> props = new java.util.HashMap<>();
+    SecretPropertyHelper.applySetSecretBinding(
+        props, "catalog", 1L, "password", "memory", "first", registry);
+    String firstUrn = props.get("password");
+
+    SecretPropertyHelper.applySetSecretBinding(
+        props, "catalog", 1L, "password", "memory", "second", registry);
+    String secondUrn = props.get("password");
+    Assertions.assertEquals(firstUrn, secondUrn);
+    Assertions.assertEquals("second", registry.get("memory").readSecret(secondUrn));
+  }
+
+  @Test
+  public void testApplyRemovePropertyCleansUpSecret() {
+    Map<String, String> props = new java.util.HashMap<>();
+    SecretPropertyHelper.applySetSecretBinding(
+        props, "catalog", 2L, "token", "memory", "secret-value", registry);
+    String urn = props.get("token");
+
+    SecretPropertyHelper.applyRemoveProperty(props, "catalog", 2L, "token", registry);
+    Assertions.assertFalse(props.containsKey("token"));
+    Assertions.assertFalse(props.containsKey(SECRET_KEYS_PROPERTY));
+    Assertions.assertThrows(
+        IllegalArgumentException.class, () -> registry.get("memory").readSecret(urn));
+  }
+
+  @Test
+  public void testRejectPlainSetOnSecretKey() {
+    Map<String, String> props = new java.util.HashMap<>();
+    SecretPropertyHelper.applySetSecretBinding(
+        props, "catalog", 3L, "password", "memory", "value", registry);
+
+    IllegalArgumentException exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> SecretPropertyHelper.validatePlainSetProperty(props, "password", "new"));
+    Assertions.assertTrue(exception.getMessage().contains("setSecretBinding"));
+  }
+
+  @Test
+  public void testRejectMaskedBindingOnAlter() {
+    Map<String, String> props = new java.util.HashMap<>();
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            SecretPropertyHelper.applySetSecretBinding(
+                props, "catalog", 4L, "password", "memory", MASK, registry));
+  }
+
+  @Test
+  public void testRejectSecretKeysManagementOnAlter() {
+    Map<String, String> props = new java.util.HashMap<>();
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            SecretPropertyHelper.validatePlainSetProperty(props, SECRET_KEYS_PROPERTY, "password"));
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            SecretPropertyHelper.applyRemoveProperty(
+                props, "catalog", 5L, SECRET_KEYS_PROPERTY, registry));
+  }
 }

@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.Map;
 import org.apache.gravitino.EntityAlreadyExistsException;
 import org.apache.gravitino.EntityStore;
+import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.Schema;
@@ -42,7 +43,9 @@ import org.apache.gravitino.lock.LockType;
 import org.apache.gravitino.lock.TreeLockUtils;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.SchemaEntity;
+import org.apache.gravitino.secret.SecretAlterSupport;
 import org.apache.gravitino.secret.SecretCreateSupport;
+import org.apache.gravitino.secret.SecretProviderRegistry;
 import org.apache.gravitino.storage.IdGenerator;
 import org.apache.gravitino.utils.PrincipalUtils;
 import org.apache.gravitino.utils.SchemaEntityCleaner;
@@ -239,11 +242,42 @@ public class SchemaOperationDispatcher extends OperationDispatcher implements Sc
         ident,
         LockType.WRITE,
         () -> {
-          validateAlterProperties(ident, HasPropertyMetadata::schemaPropertiesMetadata, changes);
+          Schema currentSchema =
+              doWithCatalog(
+                  catalogIdent,
+                  c -> c.doWithSchemaOps(s -> s.loadSchema(ident)),
+                  NoSuchSchemaException.class);
+
+          Map<String, String> currentProps = currentSchema.properties();
+          StringIdentifier currentStringId = getStringIdFromProperties(currentProps);
+          SchemaEntity currentSchemaEntity = null;
+          if (currentStringId == null) {
+            currentSchemaEntity = getEntity(ident, SCHEMA, SchemaEntity.class);
+          }
+          long currentSchemaId =
+              currentStringId != null
+                  ? currentStringId.id()
+                  : currentSchemaEntity != null ? currentSchemaEntity.id() : -1L;
+
+          SchemaChange[] preparedChanges = changes;
+          if (SecretAlterSupport.requiresSecretAlterPreparation(currentProps, changes)) {
+            if (currentSchemaId <= 0) {
+              throw new IllegalArgumentException(
+                  "Cannot alter secrets for schema without Gravitino entity id");
+            }
+            SecretProviderRegistry registry = GravitinoEnv.getInstance().secretProviderRegistry();
+            preparedChanges =
+                SecretAlterSupport.prepareSchemaChanges(
+                    currentProps, currentSchemaId, changes, registry);
+          }
+          final SchemaChange[] changesToApply = preparedChanges;
+
+          validateAlterProperties(
+              ident, HasPropertyMetadata::schemaPropertiesMetadata, changesToApply);
           Schema alteredSchema =
               doWithCatalog(
                   catalogIdent,
-                  c -> c.doWithSchemaOps(s -> s.alterSchema(ident, changes)),
+                  c -> c.doWithSchemaOps(s -> s.alterSchema(ident, changesToApply)),
                   NoSuchSchemaException.class);
 
           // If the Schema is maintained by the Gravitino's store, we don't have to alter again.

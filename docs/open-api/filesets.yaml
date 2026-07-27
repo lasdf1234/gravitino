@@ -377,6 +377,8 @@ components:
         - $ref: "#/components/schemas/SetFilesetPropertyRequest"
         - $ref: "#/components/schemas/UpdateFilesetCommentRequest"
         - $ref: "#/components/schemas/RemoveFilesetPropertyRequest"
+        - $ref: "#/components/schemas/SetFilesetSecretBindingRequest"
+        - $ref: "#/components/schemas/SetFilesetSecretReferenceRequest"
       discriminator:
         propertyName: "@type"
         mapping:
@@ -384,6 +386,8 @@ components:
           setProperty: "#/components/schemas/SetFilesetPropertyRequest"
           updateComment: "#/components/schemas/UpdateFilesetCommentRequest"
           removeProperty: "#/components/schemas/RemoveFilesetPropertyRequest"
+          setSecretBinding: "#/components/schemas/SetFilesetSecretBindingRequest"
+          setSecretReference: "#/components/schemas/SetFilesetSecretReferenceRequest"
 
     RenameFilesetRequest:
       type: object
@@ -478,6 +482,67 @@ components:
             - removeComment
       example: {
         "@type": "removeComment"
+      }
+
+    SetFilesetSecretBindingRequest:
+      type: object
+      required:
+        - "@type"
+        - property
+        - provider
+        - value
+      properties:
+        "@type":
+          type: string
+          enum:
+            - setSecretBinding
+        property:
+          type: string
+          description: The secret property key
+        provider:
+          type: string
+          description: The secret provider name
+        value:
+          type: string
+          description: The plaintext secret value
+      example: {
+        "@type": "setSecretBinding",
+        "property": "jdbc-password",
+        "provider": "memory",
+        "value": "plain-text"
+      }
+
+    SetFilesetSecretReferenceRequest:
+      type: object
+      required:
+        - "@type"
+        - property
+        - provider
+      properties:
+        "@type":
+          type: string
+          enum:
+            - setSecretReference
+        property:
+          type: string
+          description: The secret property key
+        provider:
+          type: string
+          description: The secret provider name
+        mount:
+          type: string
+          description: The optional mount locator segment
+          nullable: true
+        path:
+          type: string
+          description: The optional path locator segment
+          nullable: true
+      example: {
+        "@type": "setSecretReference",
+        "property": "jdbc-password",
+        "provider": "memory",
+        "mount": "mount",
+        "path": "path"
       }
 
   responses:

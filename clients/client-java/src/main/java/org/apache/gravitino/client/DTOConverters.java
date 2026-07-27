@@ -187,6 +187,19 @@ class DTOConverters {
       return new CatalogUpdateRequest.RemoveCatalogPropertyRequest(
           ((CatalogChange.RemoveProperty) change).getProperty());
 
+    } else if (change instanceof CatalogChange.SetSecretBinding) {
+      CatalogChange.SetSecretBinding binding = (CatalogChange.SetSecretBinding) change;
+      return new CatalogUpdateRequest.SetCatalogSecretBindingRequest(
+          binding.getProperty(), binding.getProvider(), binding.getValue());
+
+    } else if (change instanceof CatalogChange.SetSecretReference) {
+      CatalogChange.SetSecretReference reference = (CatalogChange.SetSecretReference) change;
+      return new CatalogUpdateRequest.SetCatalogSecretReferenceRequest(
+          reference.getProperty(),
+          reference.getProvider(),
+          reference.getMount(),
+          reference.getPath());
+
     } else {
       throw new IllegalArgumentException(
           "Unknown change type: " + change.getClass().getSimpleName());
@@ -202,6 +215,19 @@ class DTOConverters {
     } else if (change instanceof SchemaChange.RemoveProperty) {
       return new SchemaUpdateRequest.RemoveSchemaPropertyRequest(
           ((SchemaChange.RemoveProperty) change).getProperty());
+
+    } else if (change instanceof SchemaChange.SetSecretBinding) {
+      SchemaChange.SetSecretBinding binding = (SchemaChange.SetSecretBinding) change;
+      return new SchemaUpdateRequest.SetSchemaSecretBindingRequest(
+          binding.getProperty(), binding.getProvider(), binding.getValue());
+
+    } else if (change instanceof SchemaChange.SetSecretReference) {
+      SchemaChange.SetSecretReference reference = (SchemaChange.SetSecretReference) change;
+      return new SchemaUpdateRequest.SetSchemaSecretReferenceRequest(
+          reference.getProperty(),
+          reference.getProvider(),
+          reference.getMount(),
+          reference.getPath());
 
     } else {
       throw new IllegalArgumentException(
@@ -263,6 +289,20 @@ class DTOConverters {
     } else if (change instanceof FilesetChange.RemoveProperty) {
       return new FilesetUpdateRequest.RemoveFilesetPropertiesRequest(
           ((FilesetChange.RemoveProperty) change).getProperty());
+
+    } else if (change instanceof FilesetChange.SetSecretBinding) {
+      FilesetChange.SetSecretBinding binding = (FilesetChange.SetSecretBinding) change;
+      return new FilesetUpdateRequest.SetFilesetSecretBindingRequest(
+          binding.getProperty(), binding.getProvider(), binding.getValue());
+
+    } else if (change instanceof FilesetChange.SetSecretReference) {
+      FilesetChange.SetSecretReference reference = (FilesetChange.SetSecretReference) change;
+      return new FilesetUpdateRequest.SetFilesetSecretReferenceRequest(
+          reference.getProperty(),
+          reference.getProvider(),
+          reference.getMount(),
+          reference.getPath());
+
     } else {
       throw new IllegalArgumentException(
           "Unknown change type: " + change.getClass().getSimpleName());
