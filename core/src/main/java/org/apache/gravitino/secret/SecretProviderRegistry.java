@@ -65,9 +65,31 @@ public class SecretProviderRegistry {
         throw new GravitinoRuntimeException(
             "Missing className for secret provider: %s", providerName);
       }
-      builder.put(providerName, loadProvider(className, providerName));
+      builder.put(providerName, loadProvider(className, providerName, providerConfig));
     }
     providers = builder.build();
+  }
+
+  /**
+   * Closes providers that own closable resources (for example a per-provider {@code
+   * KmsClientRegistry}).
+   */
+  public void close() {
+    RuntimeException failure = null;
+    for (GravitinoSecretProvider provider : providers.values()) {
+      try {
+        provider.close();
+      } catch (RuntimeException e) {
+        if (failure == null) {
+          failure = e;
+        } else {
+          failure.addSuppressed(e);
+        }
+      }
+    }
+    if (failure != null) {
+      throw failure;
+    }
   }
 
   /**
@@ -103,7 +125,8 @@ public class SecretProviderRegistry {
     return builder.build();
   }
 
-  private GravitinoSecretProvider loadProvider(String className, String providerName) {
+  private GravitinoSecretProvider loadProvider(
+      String className, String providerName, Map<String, String> providerConfig) {
     try {
       Class<?> providerClass = Class.forName(className);
       Object instance = providerClass.getDeclaredConstructor().newInstance();
@@ -111,7 +134,14 @@ public class SecretProviderRegistry {
         throw new GravitinoRuntimeException(
             "Secret provider class %s does not implement GravitinoSecretProvider", className);
       }
-      return (GravitinoSecretProvider) instance;
+      GravitinoSecretProvider provider = (GravitinoSecretProvider) instance;
+      try {
+        provider.initialize(providerName, providerConfig);
+      } catch (RuntimeException e) {
+        throw new GravitinoRuntimeException(
+            e, "Failed to initialize secret provider %s with class %s", providerName, className);
+      }
+      return provider;
     } catch (ReflectiveOperationException e) {
       throw new GravitinoRuntimeException(
           e, "Failed to load secret provider %s with class %s", providerName, className);

@@ -672,6 +672,14 @@ public class GravitinoEnv {
       kmsClientRegistry.close();
     }
 
+    if (secretProviderRegistry != null) {
+      try {
+        secretProviderRegistry.close();
+      } catch (Exception e) {
+        LOG.warn("Failed to close SecretProviderRegistry", e);
+      }
+    }
+
     LOG.info("Gravitino Environment is shut down.");
   }
 

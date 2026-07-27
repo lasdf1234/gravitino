@@ -19,8 +19,29 @@
 
 package org.apache.gravitino.secret;
 
+import java.util.Map;
+
 /** Service provider interface for Gravitino secret backends. */
 public interface GravitinoSecretProvider {
+
+  /**
+   * Initializes this provider after construction.
+   *
+   * <p>The default implementation is a no-op so providers that need no configuration (for example
+   * in-memory) can keep a no-arg constructor only.
+   *
+   * @param name the configured provider instance name
+   * @param config provider-specific configuration (without the {@code gravitino.secret.provider.
+   *     <name>.} prefix)
+   */
+  default void initialize(String name, Map<String, String> config) {}
+
+  /**
+   * Releases resources owned by this provider.
+   *
+   * <p>The default implementation is a no-op.
+   */
+  default void close() {}
 
   /**
    * Returns the provider type identifier.
