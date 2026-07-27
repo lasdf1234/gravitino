@@ -21,6 +21,9 @@ package org.apache.gravitino.dto.secret;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Objects;
+import com.google.common.collect.ImmutableMap;
+import java.util.Collections;
+import java.util.Map;
 import javax.annotation.Nullable;
 
 /** Data transfer object for an external secret reference locator. */
@@ -29,28 +32,24 @@ public class SecretReferenceLocatorDTO {
   @JsonProperty("provider")
   private final String provider;
 
-  @Nullable
-  @JsonProperty("mount")
-  private final String mount;
-
-  @Nullable
-  @JsonProperty("path")
-  private final String path;
+  @JsonProperty("attributes")
+  private final Map<String, String> attributes;
 
   /**
    * Creates a secret reference locator DTO.
    *
    * @param provider the configured secret provider name
-   * @param mount optional mount or namespace within the external store
-   * @param path optional path to the secret within the external store
+   * @param attributes optional provider-specific locator attributes; never null after construction
    */
   public SecretReferenceLocatorDTO(
       @JsonProperty("provider") String provider,
-      @JsonProperty("mount") @Nullable String mount,
-      @JsonProperty("path") @Nullable String path) {
+      @JsonProperty("attributes") @Nullable Map<String, String> attributes) {
     this.provider = provider;
-    this.mount = mount;
-    this.path = path;
+    if (attributes == null || attributes.isEmpty()) {
+      this.attributes = Collections.emptyMap();
+    } else {
+      this.attributes = ImmutableMap.copyOf(attributes);
+    }
   }
 
   /**
@@ -63,23 +62,12 @@ public class SecretReferenceLocatorDTO {
   }
 
   /**
-   * Returns the optional mount or namespace.
+   * Returns the provider-specific locator attributes.
    *
-   * @return the mount, or {@code null}
+   * @return an unmodifiable map of attributes, never null
    */
-  @Nullable
-  public String mount() {
-    return mount;
-  }
-
-  /**
-   * Returns the optional secret path.
-   *
-   * @return the path, or {@code null}
-   */
-  @Nullable
-  public String path() {
-    return path;
+  public Map<String, String> attributes() {
+    return attributes;
   }
 
   @Override
@@ -91,13 +79,11 @@ public class SecretReferenceLocatorDTO {
       return false;
     }
     SecretReferenceLocatorDTO that = (SecretReferenceLocatorDTO) other;
-    return Objects.equal(provider, that.provider)
-        && Objects.equal(mount, that.mount)
-        && Objects.equal(path, that.path);
+    return Objects.equal(provider, that.provider) && Objects.equal(attributes, that.attributes);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(provider, mount, path);
+    return Objects.hashCode(provider, attributes);
   }
 }

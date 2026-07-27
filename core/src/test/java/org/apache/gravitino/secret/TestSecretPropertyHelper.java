@@ -140,7 +140,7 @@ public class TestSecretPropertyHelper {
                 1L,
                 ImmutableMap.of("password", "x"),
                 ImmutableMap.of("password", "memory"),
-                ImmutableMap.of("password", new SecretReferenceLocator("memory", null, null)),
+                ImmutableMap.of("password", new SecretReferenceLocator("memory", null)),
                 registry));
 
     Assertions.assertThrows(
@@ -151,7 +151,7 @@ public class TestSecretPropertyHelper {
                 1L,
                 ImmutableMap.of("password", "x"),
                 Map.of(),
-                ImmutableMap.of("password", new SecretReferenceLocator("memory", null, null)),
+                ImmutableMap.of("password", new SecretReferenceLocator("memory", null)),
                 registry));
   }
 
@@ -174,7 +174,9 @@ public class TestSecretPropertyHelper {
                     Map.of(),
                     Map.of(),
                     ImmutableMap.of(
-                        "password", new SecretReferenceLocator("memory", "mount", "path")),
+                        "password",
+                        new SecretReferenceLocator(
+                            "memory", Map.of("mount", "mount", "path", "path"))),
                     registry));
     Assertions.assertTrue(externalRefException.getMessage().contains("external secret references"));
 
@@ -190,7 +192,7 @@ public class TestSecretPropertyHelper {
                     ImmutableMap.of(
                         "password",
                         new SecretReferenceLocator(
-                            "memory", null, URN_PREFIX + "memory:catalog:1:password")),
+                            "memory", Map.of("path", URN_PREFIX + "memory:catalog:1:password"))),
                     registry));
     Assertions.assertTrue(rawUrnException.getMessage().contains("locator objects"));
   }
@@ -201,7 +203,7 @@ public class TestSecretPropertyHelper {
         new SecretCreateParams(
             "catalog",
             ImmutableMap.of("password", "memory"),
-            ImmutableMap.of("token", new SecretReferenceLocator("memory", null, "path")));
+            ImmutableMap.of("token", new SecretReferenceLocator("memory", Map.of("path", "path"))));
     SecretCreateContext.set(params);
     Assertions.assertEquals(params, SecretCreateContext.get());
     SecretCreateContext.clear();

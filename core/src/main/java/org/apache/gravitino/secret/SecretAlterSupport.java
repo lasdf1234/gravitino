@@ -170,9 +170,7 @@ public final class SecretAlterSupport {
             "schema",
             entityId,
             reference.getProperty(),
-            reference.getProvider(),
-            reference.getMount(),
-            reference.getPath(),
+            new SecretReferenceLocator(reference.getProvider(), reference.getAttributes()),
             registry);
       } else if (change instanceof SchemaChange.RemoveProperty) {
         SchemaChange.RemoveProperty remove = (SchemaChange.RemoveProperty) change;
@@ -241,9 +239,7 @@ public final class SecretAlterSupport {
             "fileset",
             entityId,
             reference.getProperty(),
-            reference.getProvider(),
-            reference.getMount(),
-            reference.getPath(),
+            new SecretReferenceLocator(reference.getProvider(), reference.getAttributes()),
             registry);
       } else if (change instanceof FilesetChange.RemoveProperty) {
         FilesetChange.RemoveProperty remove = (FilesetChange.RemoveProperty) change;
@@ -301,9 +297,7 @@ public final class SecretAlterSupport {
           "catalog",
           entityId,
           reference.getProperty(),
-          reference.getProvider(),
-          reference.getMount(),
-          reference.getPath(),
+          new SecretReferenceLocator(reference.getProvider(), reference.getAttributes()),
           registry);
     } else if (change instanceof CatalogChange.RemoveProperty) {
       if (registry != null) {

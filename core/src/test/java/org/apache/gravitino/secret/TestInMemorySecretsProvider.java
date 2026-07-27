@@ -19,6 +19,7 @@
 
 package org.apache.gravitino.secret;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.gravitino.secret.memory.InMemorySecretsProvider;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -42,7 +43,8 @@ public class TestInMemorySecretsProvider {
   @Test
   public void testExternalReferenceUnsupported() {
     InMemorySecretsProvider provider = new InMemorySecretsProvider();
-    SecretReferenceLocator locator = new SecretReferenceLocator("memory", "mount", "path");
+    SecretReferenceLocator locator =
+        new SecretReferenceLocator("memory", ImmutableMap.of("mount", "mount", "path", "path"));
     UnsupportedOperationException exception =
         Assertions.assertThrows(
             UnsupportedOperationException.class,

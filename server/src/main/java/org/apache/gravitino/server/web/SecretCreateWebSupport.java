@@ -65,7 +65,7 @@ public final class SecretCreateWebSupport {
     Map<String, SecretReferenceLocator> refs = new HashMap<>();
     for (Map.Entry<String, SecretReferenceLocatorDTO> entry : secretReferences.entrySet()) {
       SecretReferenceLocatorDTO dto = entry.getValue();
-      refs.put(entry.getKey(), new SecretReferenceLocator(dto.provider(), dto.mount(), dto.path()));
+      refs.put(entry.getKey(), new SecretReferenceLocator(dto.provider(), dto.attributes()));
     }
     return refs;
   }

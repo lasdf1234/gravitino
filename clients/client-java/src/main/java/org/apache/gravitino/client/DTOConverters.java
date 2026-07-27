@@ -195,10 +195,7 @@ class DTOConverters {
     } else if (change instanceof CatalogChange.SetSecretReference) {
       CatalogChange.SetSecretReference reference = (CatalogChange.SetSecretReference) change;
       return new CatalogUpdateRequest.SetCatalogSecretReferenceRequest(
-          reference.getProperty(),
-          reference.getProvider(),
-          reference.getMount(),
-          reference.getPath());
+          reference.getProperty(), reference.getProvider(), reference.getAttributes());
 
     } else {
       throw new IllegalArgumentException(
@@ -224,10 +221,7 @@ class DTOConverters {
     } else if (change instanceof SchemaChange.SetSecretReference) {
       SchemaChange.SetSecretReference reference = (SchemaChange.SetSecretReference) change;
       return new SchemaUpdateRequest.SetSchemaSecretReferenceRequest(
-          reference.getProperty(),
-          reference.getProvider(),
-          reference.getMount(),
-          reference.getPath());
+          reference.getProperty(), reference.getProvider(), reference.getAttributes());
 
     } else {
       throw new IllegalArgumentException(
@@ -298,10 +292,7 @@ class DTOConverters {
     } else if (change instanceof FilesetChange.SetSecretReference) {
       FilesetChange.SetSecretReference reference = (FilesetChange.SetSecretReference) change;
       return new FilesetUpdateRequest.SetFilesetSecretReferenceRequest(
-          reference.getProperty(),
-          reference.getProvider(),
-          reference.getMount(),
-          reference.getPath());
+          reference.getProperty(), reference.getProvider(), reference.getAttributes());
 
     } else {
       throw new IllegalArgumentException(

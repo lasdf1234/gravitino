@@ -342,20 +342,16 @@ components:
         provider:
           type: string
           description: The secret provider name
-        mount:
-          type: string
-          description: The optional mount locator segment
-          nullable: true
-        path:
-          type: string
-          description: The optional path locator segment
-          nullable: true
+        attributes:
+          type: object
+          description: Optional provider-specific locator attributes
+          additionalProperties:
+            type: string
       example: {
         "@type": "setSecretReference",
         "property": "jdbc-password",
-        "provider": "memory",
-        "mount": "mount",
-        "path": "path"
+        "provider": "vault",
+        "attributes": { "mount": "secret", "path": "jdbc/prod" }
       }
 
   responses:

@@ -209,9 +209,7 @@ public final class SecretPropertyHelper {
    * @param entityType the entity type
    * @param entityId the entity identifier
    * @param property the secret property key
-   * @param provider the provider name
-   * @param mount the optional mount locator segment
-   * @param path the optional path locator segment
+   * @param locator the external secret reference locator
    * @param registry the secret provider registry
    */
   public static void applySetSecretReference(
@@ -219,18 +217,16 @@ public final class SecretPropertyHelper {
       String entityType,
       long entityId,
       String property,
-      String provider,
-      @Nullable String mount,
-      @Nullable String path,
+      SecretReferenceLocator locator,
       SecretProviderRegistry registry) {
-    SecretReferenceLocator locator = new SecretReferenceLocator(provider, mount, path);
     rejectRawUrnReference(locator);
-    GravitinoSecretProvider secretProvider = requireProvider(registry, provider);
+    GravitinoSecretProvider secretProvider = requireProvider(registry, locator.provider());
     try {
       secretProvider.buildExternalReferenceUrn(property, locator);
     } catch (UnsupportedOperationException e) {
       throw new IllegalArgumentException(
-          String.format("Secret provider %s does not support external secret references", provider),
+          String.format(
+              "Secret provider %s does not support external secret references", locator.provider()),
           e);
     }
   }
@@ -368,13 +364,11 @@ public final class SecretPropertyHelper {
   }
 
   private static void rejectRawUrnReference(SecretReferenceLocator locator) {
-    if (locator.path() != null && locator.path().startsWith(URN_PREFIX)) {
-      throw new IllegalArgumentException(
-          "secretReferences must use locator objects, not raw secret URNs");
-    }
-    if (locator.mount() != null && locator.mount().startsWith(URN_PREFIX)) {
-      throw new IllegalArgumentException(
-          "secretReferences must use locator objects, not raw secret URNs");
+    for (String value : locator.attributes().values()) {
+      if (value != null && value.startsWith(URN_PREFIX)) {
+        throw new IllegalArgumentException(
+            "secretReferences must use locator objects, not raw secret URNs");
+      }
     }
   }
 

@@ -18,6 +18,9 @@
  */
 package org.apache.gravitino;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import javax.annotation.Nullable;
 import org.apache.gravitino.annotation.Evolving;
@@ -87,13 +90,12 @@ public interface CatalogChange {
    *
    * @param property The secret property name.
    * @param provider The secret provider name.
-   * @param mount The optional mount locator segment.
-   * @param path The optional path locator segment.
+   * @param attributes Optional provider-specific locator attributes.
    * @return The catalog change.
    */
   static CatalogChange setSecretReference(
-      String property, String provider, @Nullable String mount, @Nullable String path) {
-    return new SetSecretReference(property, provider, mount, path);
+      String property, String provider, @Nullable Map<String, String> attributes) {
+    return new SetSecretReference(property, provider, attributes);
   }
 
   /** A catalog change to rename the catalog. */
@@ -392,15 +394,17 @@ public interface CatalogChange {
   final class SetSecretReference implements CatalogChange {
     private final String property;
     private final String provider;
-    private final String mount;
-    private final String path;
+    private final Map<String, String> attributes;
 
     private SetSecretReference(
-        String property, String provider, @Nullable String mount, @Nullable String path) {
+        String property, String provider, @Nullable Map<String, String> attributes) {
       this.property = property;
       this.provider = provider;
-      this.mount = mount;
-      this.path = path;
+      if (attributes == null || attributes.isEmpty()) {
+        this.attributes = Collections.emptyMap();
+      } else {
+        this.attributes = Collections.unmodifiableMap(new HashMap<>(attributes));
+      }
     }
 
     /**
@@ -422,23 +426,12 @@ public interface CatalogChange {
     }
 
     /**
-     * Returns the optional mount locator segment.
+     * Returns the provider-specific locator attributes.
      *
-     * @return the mount segment, or null if not set
+     * @return an unmodifiable map of attributes, never null
      */
-    @Nullable
-    public String getMount() {
-      return mount;
-    }
-
-    /**
-     * Returns the optional path locator segment.
-     *
-     * @return the path segment, or null if not set
-     */
-    @Nullable
-    public String getPath() {
-      return path;
+    public Map<String, String> getAttributes() {
+      return attributes;
     }
 
     @Override
@@ -448,18 +441,17 @@ public interface CatalogChange {
       SetSecretReference that = (SetSecretReference) o;
       return Objects.equals(property, that.property)
           && Objects.equals(provider, that.provider)
-          && Objects.equals(mount, that.mount)
-          && Objects.equals(path, that.path);
+          && Objects.equals(attributes, that.attributes);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(property, provider, mount, path);
+      return Objects.hash(property, provider, attributes);
     }
 
     @Override
     public String toString() {
-      return "SETSECRETREFERENCE " + property + " " + provider + " " + mount + " " + path;
+      return "SETSECRETREFERENCE " + property + " " + provider + " " + attributes;
     }
   }
 }

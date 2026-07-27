@@ -23,6 +23,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import java.util.Collections;
+import java.util.Map;
 import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
@@ -249,8 +252,6 @@ public interface FilesetUpdateRequest extends RESTRequest {
 
   /** The fileset update request for setting an external secret reference. */
   @EqualsAndHashCode
-  @NoArgsConstructor(force = true)
-  @AllArgsConstructor
   @ToString
   class SetFilesetSecretReferenceRequest implements FilesetUpdateRequest {
 
@@ -263,16 +264,34 @@ public interface FilesetUpdateRequest extends RESTRequest {
     private final String provider;
 
     @Getter
-    @JsonProperty("mount")
-    private final String mount;
+    @JsonProperty("attributes")
+    private final Map<String, String> attributes;
 
-    @Getter
-    @JsonProperty("path")
-    private final String path;
+    /**
+     * Creates a new SetFilesetSecretReferenceRequest.
+     *
+     * @param property The secret property key.
+     * @param provider The secret provider name.
+     * @param attributes Optional provider-specific locator attributes.
+     */
+    public SetFilesetSecretReferenceRequest(
+        String property, String provider, Map<String, String> attributes) {
+      this.property = property;
+      this.provider = provider;
+      this.attributes =
+          attributes == null || attributes.isEmpty()
+              ? Collections.emptyMap()
+              : ImmutableMap.copyOf(attributes);
+    }
+
+    /** Default constructor for Jackson deserialization. */
+    public SetFilesetSecretReferenceRequest() {
+      this(null, null, Collections.emptyMap());
+    }
 
     @Override
     public FilesetChange filesetChange() {
-      return FilesetChange.setSecretReference(property, provider, mount, path);
+      return FilesetChange.setSecretReference(property, provider, attributes);
     }
 
     @Override

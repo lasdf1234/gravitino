@@ -19,6 +19,7 @@
 
 package org.apache.gravitino.secret;
 
+import java.util.Map;
 import java.util.Objects;
 import javax.annotation.Nullable;
 
@@ -26,20 +27,21 @@ import javax.annotation.Nullable;
 public final class SecretReferenceLocator {
 
   private final String provider;
-  @Nullable private final String mount;
-  @Nullable private final String path;
+  private final Map<String, String> attributes;
 
   /**
    * Creates a secret reference locator.
    *
    * @param provider the configured secret provider name
-   * @param mount optional mount or namespace within the external store
-   * @param path optional path to the secret within the external store
+   * @param attributes optional provider-specific locator attributes; never null after construction
    */
-  public SecretReferenceLocator(String provider, @Nullable String mount, @Nullable String path) {
+  public SecretReferenceLocator(String provider, @Nullable Map<String, String> attributes) {
     this.provider = provider;
-    this.mount = mount;
-    this.path = path;
+    if (attributes == null || attributes.isEmpty()) {
+      this.attributes = Map.of();
+    } else {
+      this.attributes = Map.copyOf(attributes);
+    }
   }
 
   /**
@@ -52,23 +54,12 @@ public final class SecretReferenceLocator {
   }
 
   /**
-   * Returns the optional mount or namespace.
+   * Returns the provider-specific locator attributes.
    *
-   * @return the mount, or {@code null}
+   * @return an unmodifiable map of attributes, never null
    */
-  @Nullable
-  public String mount() {
-    return mount;
-  }
-
-  /**
-   * Returns the optional secret path.
-   *
-   * @return the path, or {@code null}
-   */
-  @Nullable
-  public String path() {
-    return path;
+  public Map<String, String> attributes() {
+    return attributes;
   }
 
   @Override
@@ -80,13 +71,11 @@ public final class SecretReferenceLocator {
       return false;
     }
     SecretReferenceLocator that = (SecretReferenceLocator) other;
-    return Objects.equals(provider, that.provider)
-        && Objects.equals(mount, that.mount)
-        && Objects.equals(path, that.path);
+    return Objects.equals(provider, that.provider) && Objects.equals(attributes, that.attributes);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(provider, mount, path);
+    return Objects.hash(provider, attributes);
   }
 }

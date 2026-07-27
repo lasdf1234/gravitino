@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.google.common.collect.ImmutableMap;
 import java.util.Locale;
+import java.util.Map;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.dto.secret.SecretReferenceLocatorDTO;
 import org.apache.gravitino.json.JsonUtils;
@@ -122,7 +123,7 @@ public class TestCatalogCreateRequest {
                         ImmutableMap.of("key", "value"),
                         ImmutableMap.of("key", "memory"),
                         ImmutableMap.of(
-                            "key", new SecretReferenceLocatorDTO("memory", null, "path")))
+                            "key", new SecretReferenceLocatorDTO("memory", Map.of("path", "path"))))
                     .validate());
     Assertions.assertTrue(exception.getMessage().contains("secretBindings and secretReferences"));
   }

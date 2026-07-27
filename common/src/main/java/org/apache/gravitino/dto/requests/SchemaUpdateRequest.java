@@ -23,6 +23,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import java.util.Collections;
+import java.util.Map;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
@@ -219,32 +222,29 @@ public interface SchemaUpdateRequest extends RESTRequest {
     private final String provider;
 
     @Getter
-    @JsonProperty("mount")
-    private final String mount;
-
-    @Getter
-    @JsonProperty("path")
-    private final String path;
+    @JsonProperty("attributes")
+    private final Map<String, String> attributes;
 
     /**
      * Creates a new SetSchemaSecretReferenceRequest.
      *
      * @param property The secret property key.
      * @param provider The secret provider name.
-     * @param mount The optional mount locator segment.
-     * @param path The optional path locator segment.
+     * @param attributes Optional provider-specific locator attributes.
      */
     public SetSchemaSecretReferenceRequest(
-        String property, String provider, String mount, String path) {
+        String property, String provider, Map<String, String> attributes) {
       this.property = property;
       this.provider = provider;
-      this.mount = mount;
-      this.path = path;
+      this.attributes =
+          attributes == null || attributes.isEmpty()
+              ? Collections.emptyMap()
+              : ImmutableMap.copyOf(attributes);
     }
 
     /** Default constructor for Jackson deserialization. */
     public SetSchemaSecretReferenceRequest() {
-      this(null, null, null, null);
+      this(null, null, Collections.emptyMap());
     }
 
     @Override
@@ -257,7 +257,7 @@ public interface SchemaUpdateRequest extends RESTRequest {
 
     @Override
     public SchemaChange schemaChange() {
-      return SchemaChange.setSecretReference(property, provider, mount, path);
+      return SchemaChange.setSecretReference(property, provider, attributes);
     }
   }
 }
