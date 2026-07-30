@@ -58,6 +58,7 @@ import org.apache.gravitino.server.authorization.MetadataAuthzHelper;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
 import org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants;
+import org.apache.gravitino.server.web.SecretCreateWebSupport;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
@@ -148,13 +149,20 @@ public class CatalogOperations {
           () -> {
             request.validate();
             NameIdentifier ident = NameIdentifierUtil.ofCatalog(metalake, request.getName());
-            Catalog catalog =
-                catalogDispatcher.createCatalog(
-                    ident,
-                    request.getType(),
-                    request.getProvider(),
-                    request.getComment(),
-                    request.getProperties());
+            Catalog catalog;
+            try {
+              SecretCreateWebSupport.setCreateContext(
+                  "catalog", request.getSecretBindings(), request.getSecretReferences());
+              catalog =
+                  catalogDispatcher.createCatalog(
+                      ident,
+                      request.getType(),
+                      request.getProvider(),
+                      request.getComment(),
+                      request.getProperties());
+            } finally {
+              SecretCreateWebSupport.clearCreateContext();
+            }
             Response response = Utils.ok(new CatalogResponse(DTOConverters.toDTO(catalog)));
             LOG.info("Catalog created: {}.{}", metalake, catalog.name());
             return response;

@@ -186,7 +186,29 @@ To leverage the event listener, you must implement the `EventListenerPlugin` int
 |----------------------------------------|--------------------------------------------------------------------------------------------------------|---------------|----------|---------------|
 | `gravitino.eventListener.names`        | The name of the event listener, For multiple listeners, separate names with a comma, like "audit,sync" | (none)        | Yes      | 0.5.0         |
 | `gravitino.eventListener.{name}.class` | The class name of the event listener, replace `{name}` with the actual listener name.                  | (none)        | Yes      | 0.5.0         | 
-| `gravitino.eventListener.{name}.{key}` | Custom properties that will be passed to the event listener plugin.                                    | (none)        | Yes      | 0.5.0         | 
+| `gravitino.eventListener.{name}.{key}` | Custom properties that will be passed to the event listener plugin.                                    | (none)        | Yes      | 0.5.0         |
+
+### Secret Provider Configuration
+
+Gravitino can store selected entity property values (for catalogs, schemas, and filesets) in a secret backend instead of persisting plaintext in the entity store. Configure one or more providers, then pass `secretBindings` (write-through) or `secretReferences` (external locator) when creating entities.
+
+| Property name                                   | Description                                                                                         | Default value | Required | Since Version |
+|-------------------------------------------------|-----------------------------------------------------------------------------------------------------|---------------|----------|---------------|
+| `gravitino.secret.providers`                    | Comma-separated configured provider names. Leave empty to disable secret backends.                  | (none)        | No       | 2.0.0         |
+| `gravitino.secret.provider.{name}.className`    | Implementation class of the provider named `{name}`.                                                | (none)        | Yes*     | 2.0.0         |
+
+\*Required for each name listed in `gravitino.secret.providers`.
+
+OSS ships with `org.apache.gravitino.secret.memory.InMemorySecretsProvider` for local development and tests. Values are kept in process memory and are lost on restart. Production backends (for example Vault) are expected to plug in through the same SPI.
+
+Example:
+
+```properties
+gravitino.secret.providers = memory
+gravitino.secret.provider.memory.className = org.apache.gravitino.secret.memory.InMemorySecretsProvider
+```
+
+List configured providers with `GET /api/secrets/providers`.
 
 #### Event
 

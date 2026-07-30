@@ -90,6 +90,12 @@ gravitino.authorization.enable = false
 gravitino.server.visibleConfigs=gravitino.authorization.serviceAdmins
 gravitino.authorization.serviceAdmins = anonymous
 
+# THE CONFIGURATION FOR secret providers (optional)
+# Comma-separated configured provider names. Leave empty to disable secret backends.
+# gravitino.secret.providers = memory
+# Provider implementation class. Replace {name} with a configured provider name.
+# gravitino.secret.provider.memory.className = org.apache.gravitino.secret.memory.InMemorySecretsProvider
+
 # THE CONFIGURATION FOR AUXILIARY SERVICE
 # Auxiliary service names, separate by ',', currently support iceberg-rest and lance-rest
 gravitino.auxService.names = iceberg-rest,lance-rest

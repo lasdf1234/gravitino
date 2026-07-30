@@ -29,6 +29,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.ToString;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.dto.secret.SecretReferenceLocatorDTO;
 import org.apache.gravitino.file.Fileset;
 import org.apache.gravitino.rest.RESTRequest;
 
@@ -64,6 +65,14 @@ public class FilesetCreateRequest implements RESTRequest {
   @JsonProperty("properties")
   private Map<String, String> properties;
 
+  @Nullable
+  @JsonProperty("secretBindings")
+  private Map<String, String> secretBindings;
+
+  @Nullable
+  @JsonProperty("secretReferences")
+  private Map<String, SecretReferenceLocatorDTO> secretReferences;
+
   /**
    * Validates the request.
    *
@@ -73,5 +82,7 @@ public class FilesetCreateRequest implements RESTRequest {
   public void validate() throws IllegalArgumentException {
     Preconditions.checkArgument(
         StringUtils.isNotBlank(name), "\"name\" field is required and cannot be empty");
+    SecretCreateRequestValidation.validateSecretCreateFields(
+        properties, secretBindings, secretReferences);
   }
 }

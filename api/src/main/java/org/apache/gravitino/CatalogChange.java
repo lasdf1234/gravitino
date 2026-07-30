@@ -18,7 +18,11 @@
  */
 package org.apache.gravitino;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
+import javax.annotation.Nullable;
 import org.apache.gravitino.annotation.Evolving;
 
 /**
@@ -67,6 +71,31 @@ public interface CatalogChange {
    */
   static CatalogChange removeProperty(String property) {
     return new RemoveProperty(property);
+  }
+
+  /**
+   * Creates a catalog change to set a write-through secret binding.
+   *
+   * @param property The secret property name.
+   * @param provider The secret provider name.
+   * @param value The plaintext secret value.
+   * @return The catalog change.
+   */
+  static CatalogChange setSecretBinding(String property, String provider, String value) {
+    return new SetSecretBinding(property, provider, value);
+  }
+
+  /**
+   * Creates a catalog change to set an external secret reference.
+   *
+   * @param property The secret property name.
+   * @param provider The secret provider name.
+   * @param attributes Optional provider-specific locator attributes.
+   * @return The catalog change.
+   */
+  static CatalogChange setSecretReference(
+      String property, String provider, @Nullable Map<String, String> attributes) {
+    return new SetSecretReference(property, provider, attributes);
   }
 
   /** A catalog change to rename the catalog. */
@@ -298,6 +327,131 @@ public interface CatalogChange {
     @Override
     public String toString() {
       return "REMOVEPROPERTY " + property;
+    }
+  }
+
+  /** A catalog change to set a write-through secret binding. */
+  final class SetSecretBinding implements CatalogChange {
+    private final String property;
+    private final String provider;
+    private final String value;
+
+    private SetSecretBinding(String property, String provider, String value) {
+      this.property = property;
+      this.provider = provider;
+      this.value = value;
+    }
+
+    /**
+     * Returns the secret property name.
+     *
+     * @return the property name
+     */
+    public String getProperty() {
+      return property;
+    }
+
+    /**
+     * Returns the secret provider name.
+     *
+     * @return the provider name
+     */
+    public String getProvider() {
+      return provider;
+    }
+
+    /**
+     * Returns the plaintext secret value.
+     *
+     * @return the plaintext value
+     */
+    public String getValue() {
+      return value;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      SetSecretBinding that = (SetSecretBinding) o;
+      return Objects.equals(property, that.property)
+          && Objects.equals(provider, that.provider)
+          && Objects.equals(value, that.value);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(property, provider, value);
+    }
+
+    @Override
+    public String toString() {
+      return "SETSECRETBINDING " + property + " " + provider + " " + value;
+    }
+  }
+
+  /** A catalog change to set an external secret reference. */
+  final class SetSecretReference implements CatalogChange {
+    private final String property;
+    private final String provider;
+    private final Map<String, String> attributes;
+
+    private SetSecretReference(
+        String property, String provider, @Nullable Map<String, String> attributes) {
+      this.property = property;
+      this.provider = provider;
+      if (attributes == null || attributes.isEmpty()) {
+        this.attributes = Collections.emptyMap();
+      } else {
+        this.attributes = Collections.unmodifiableMap(new HashMap<>(attributes));
+      }
+    }
+
+    /**
+     * Returns the secret property name.
+     *
+     * @return the property name
+     */
+    public String getProperty() {
+      return property;
+    }
+
+    /**
+     * Returns the secret provider name.
+     *
+     * @return the provider name
+     */
+    public String getProvider() {
+      return provider;
+    }
+
+    /**
+     * Returns the provider-specific locator attributes.
+     *
+     * @return an unmodifiable map of attributes, never null
+     */
+    public Map<String, String> getAttributes() {
+      return attributes;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      SetSecretReference that = (SetSecretReference) o;
+      return Objects.equals(property, that.property)
+          && Objects.equals(provider, that.provider)
+          && Objects.equals(attributes, that.attributes);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(property, provider, attributes);
+    }
+
+    @Override
+    public String toString() {
+      return "SETSECRETREFERENCE " + property + " " + provider + " " + attributes;
     }
   }
 }

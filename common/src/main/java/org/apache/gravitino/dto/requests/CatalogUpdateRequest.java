@@ -23,6 +23,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import java.util.Collections;
+import java.util.Map;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
@@ -43,7 +46,13 @@ import org.apache.gravitino.rest.RESTRequest;
       name = "setProperty"),
   @JsonSubTypes.Type(
       value = CatalogUpdateRequest.RemoveCatalogPropertyRequest.class,
-      name = "removeProperty")
+      name = "removeProperty"),
+  @JsonSubTypes.Type(
+      value = CatalogUpdateRequest.SetCatalogSecretBindingRequest.class,
+      name = "setSecretBinding"),
+  @JsonSubTypes.Type(
+      value = CatalogUpdateRequest.SetCatalogSecretReferenceRequest.class,
+      name = "setSecretReference")
 })
 public interface CatalogUpdateRequest extends RESTRequest {
 
@@ -212,6 +221,110 @@ public interface CatalogUpdateRequest extends RESTRequest {
     @Override
     public CatalogChange catalogChange() {
       return CatalogChange.removeProperty(property);
+    }
+  }
+
+  /** Request to set a write-through secret binding on a catalog. */
+  @EqualsAndHashCode
+  @ToString
+  class SetCatalogSecretBindingRequest implements CatalogUpdateRequest {
+
+    @Getter
+    @JsonProperty("property")
+    private final String property;
+
+    @Getter
+    @JsonProperty("provider")
+    private final String provider;
+
+    @Getter
+    @JsonProperty("value")
+    private final String value;
+
+    /**
+     * Constructor for SetCatalogSecretBindingRequest.
+     *
+     * @param property The secret property key.
+     * @param provider The secret provider name.
+     * @param value The plaintext secret value.
+     */
+    public SetCatalogSecretBindingRequest(String property, String provider, String value) {
+      this.property = property;
+      this.provider = provider;
+      this.value = value;
+    }
+
+    /** Default constructor for SetCatalogSecretBindingRequest. */
+    public SetCatalogSecretBindingRequest() {
+      this(null, null, null);
+    }
+
+    @Override
+    public void validate() throws IllegalArgumentException {
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(provider), "\"provider\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(value), "\"value\" field is required and cannot be empty");
+    }
+
+    @Override
+    public CatalogChange catalogChange() {
+      return CatalogChange.setSecretBinding(property, provider, value);
+    }
+  }
+
+  /** Request to set an external secret reference on a catalog. */
+  @EqualsAndHashCode
+  @ToString
+  class SetCatalogSecretReferenceRequest implements CatalogUpdateRequest {
+
+    @Getter
+    @JsonProperty("property")
+    private final String property;
+
+    @Getter
+    @JsonProperty("provider")
+    private final String provider;
+
+    @Getter
+    @JsonProperty("attributes")
+    private final Map<String, String> attributes;
+
+    /**
+     * Constructor for SetCatalogSecretReferenceRequest.
+     *
+     * @param property The secret property key.
+     * @param provider The secret provider name.
+     * @param attributes Optional provider-specific locator attributes.
+     */
+    public SetCatalogSecretReferenceRequest(
+        String property, String provider, Map<String, String> attributes) {
+      this.property = property;
+      this.provider = provider;
+      this.attributes =
+          attributes == null || attributes.isEmpty()
+              ? Collections.emptyMap()
+              : ImmutableMap.copyOf(attributes);
+    }
+
+    /** Default constructor for SetCatalogSecretReferenceRequest. */
+    public SetCatalogSecretReferenceRequest() {
+      this(null, null, Collections.emptyMap());
+    }
+
+    @Override
+    public void validate() throws IllegalArgumentException {
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(provider), "\"provider\" field is required and cannot be empty");
+    }
+
+    @Override
+    public CatalogChange catalogChange() {
+      return CatalogChange.setSecretReference(property, provider, attributes);
     }
   }
 }

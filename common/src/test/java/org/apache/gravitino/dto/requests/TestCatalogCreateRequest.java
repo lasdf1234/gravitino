@@ -22,7 +22,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.google.common.collect.ImmutableMap;
 import java.util.Locale;
+import java.util.Map;
 import org.apache.gravitino.Catalog;
+import org.apache.gravitino.dto.secret.SecretReferenceLocatorDTO;
 import org.apache.gravitino.json.JsonUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -90,5 +92,39 @@ public class TestCatalogCreateRequest {
     // Verify the exception message
     Assertions.assertEquals(
         "Catalog type cannot be null when provider is \"hadoop\"", exception.getMessage());
+  }
+
+  @Test
+  public void testCatalogCreateRequestSecretValidation() {
+    IllegalArgumentException exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                new CatalogCreateRequest(
+                        "catalog_test",
+                        Catalog.Type.MODEL,
+                        "provider_test",
+                        null,
+                        ImmutableMap.of("gravitino.secret.keys", "password"),
+                        null,
+                        null)
+                    .validate());
+    Assertions.assertTrue(exception.getMessage().contains("gravitino.secret.keys"));
+
+    exception =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                new CatalogCreateRequest(
+                        "catalog_test",
+                        Catalog.Type.MODEL,
+                        "provider_test",
+                        null,
+                        ImmutableMap.of("key", "value"),
+                        ImmutableMap.of("key", "memory"),
+                        ImmutableMap.of(
+                            "key", new SecretReferenceLocatorDTO("memory", Map.of("path", "path"))))
+                    .validate());
+    Assertions.assertTrue(exception.getMessage().contains("secretBindings and secretReferences"));
   }
 }

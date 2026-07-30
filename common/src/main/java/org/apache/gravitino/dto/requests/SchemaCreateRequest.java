@@ -26,6 +26,7 @@ import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.dto.secret.SecretReferenceLocatorDTO;
 import org.apache.gravitino.rest.RESTRequest;
 
 /** Represents a request to create a schema. */
@@ -45,9 +46,17 @@ public class SchemaCreateRequest implements RESTRequest {
   @JsonProperty("properties")
   private final Map<String, String> properties;
 
+  @Nullable
+  @JsonProperty("secretBindings")
+  private final Map<String, String> secretBindings;
+
+  @Nullable
+  @JsonProperty("secretReferences")
+  private final Map<String, SecretReferenceLocatorDTO> secretReferences;
+
   /** Default constructor for Jackson deserialization. */
   public SchemaCreateRequest() {
-    this(null, null, null);
+    this(null, null, null, null, null);
   }
 
   /**
@@ -56,11 +65,31 @@ public class SchemaCreateRequest implements RESTRequest {
    * @param name The name of the schema.
    * @param comment The comment of the schema.
    * @param properties The properties of the schema.
+   * @param secretBindings Property keys mapped to provider names for write-through secrets.
+   * @param secretReferences Property keys mapped to external secret locators.
    */
-  public SchemaCreateRequest(String name, String comment, Map<String, String> properties) {
+  public SchemaCreateRequest(
+      String name,
+      String comment,
+      Map<String, String> properties,
+      Map<String, String> secretBindings,
+      Map<String, SecretReferenceLocatorDTO> secretReferences) {
     this.name = name;
     this.comment = comment;
     this.properties = properties;
+    this.secretBindings = secretBindings;
+    this.secretReferences = secretReferences;
+  }
+
+  /**
+   * Creates a new SchemaCreateRequest without secret fields.
+   *
+   * @param name The name of the schema.
+   * @param comment The comment of the schema.
+   * @param properties The properties of the schema.
+   */
+  public SchemaCreateRequest(String name, String comment, Map<String, String> properties) {
+    this(name, comment, properties, null, null);
   }
 
   /**
@@ -72,5 +101,7 @@ public class SchemaCreateRequest implements RESTRequest {
   public void validate() throws IllegalArgumentException {
     Preconditions.checkArgument(
         StringUtils.isNotBlank(name), "\"name\" field is required and cannot be empty");
+    SecretCreateRequestValidation.validateSecretCreateFields(
+        properties, secretBindings, secretReferences);
   }
 }

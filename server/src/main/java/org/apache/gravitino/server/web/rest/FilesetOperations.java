@@ -65,6 +65,7 @@ import org.apache.gravitino.server.authorization.MetadataAuthzHelper;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
 import org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants;
+import org.apache.gravitino.server.web.SecretCreateWebSupport;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
@@ -167,13 +168,20 @@ public class FilesetOperations {
                 .ifPresent(loc -> tmpLocations.put(LOCATION_NAME_UNKNOWN, loc));
             Map<String, String> storageLocations = ImmutableMap.copyOf(tmpLocations);
 
-            Fileset fileset =
-                dispatcher.createMultipleLocationFileset(
-                    ident,
-                    request.getComment(),
-                    Optional.ofNullable(request.getType()).orElse(Fileset.Type.MANAGED),
-                    storageLocations,
-                    request.getProperties());
+            Fileset fileset;
+            try {
+              SecretCreateWebSupport.setCreateContext(
+                  "fileset", request.getSecretBindings(), request.getSecretReferences());
+              fileset =
+                  dispatcher.createMultipleLocationFileset(
+                      ident,
+                      request.getComment(),
+                      Optional.ofNullable(request.getType()).orElse(Fileset.Type.MANAGED),
+                      storageLocations,
+                      request.getProperties());
+            } finally {
+              SecretCreateWebSupport.clearCreateContext();
+            }
             Response response = Utils.ok(new FilesetResponse(DTOConverters.toDTO(fileset)));
             LOG.info("Fileset created: {}.{}.{}.{}", metalake, catalog, schema, request.getName());
             return response;

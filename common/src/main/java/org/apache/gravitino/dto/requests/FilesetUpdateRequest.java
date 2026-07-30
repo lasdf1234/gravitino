@@ -23,6 +23,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import java.util.Collections;
+import java.util.Map;
 import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
@@ -48,7 +51,13 @@ import org.apache.gravitino.rest.RESTRequest;
       name = "setProperty"),
   @JsonSubTypes.Type(
       value = FilesetUpdateRequest.RemoveFilesetPropertiesRequest.class,
-      name = "removeProperty")
+      name = "removeProperty"),
+  @JsonSubTypes.Type(
+      value = FilesetUpdateRequest.SetFilesetSecretBindingRequest.class,
+      name = "setSecretBinding"),
+  @JsonSubTypes.Type(
+      value = FilesetUpdateRequest.SetFilesetSecretReferenceRequest.class,
+      name = "setSecretReference")
 })
 public interface FilesetUpdateRequest extends RESTRequest {
 
@@ -204,5 +213,93 @@ public interface FilesetUpdateRequest extends RESTRequest {
      */
     @Override
     public void validate() throws IllegalArgumentException {}
+  }
+
+  /** The fileset update request for setting a write-through secret binding. */
+  @EqualsAndHashCode
+  @NoArgsConstructor(force = true)
+  @AllArgsConstructor
+  @ToString
+  class SetFilesetSecretBindingRequest implements FilesetUpdateRequest {
+
+    @Getter
+    @JsonProperty("property")
+    private final String property;
+
+    @Getter
+    @JsonProperty("provider")
+    private final String provider;
+
+    @Getter
+    @JsonProperty("value")
+    private final String value;
+
+    @Override
+    public FilesetChange filesetChange() {
+      return FilesetChange.setSecretBinding(property, provider, value);
+    }
+
+    @Override
+    public void validate() throws IllegalArgumentException {
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(provider), "\"provider\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(value), "\"value\" field is required and cannot be empty");
+    }
+  }
+
+  /** The fileset update request for setting an external secret reference. */
+  @EqualsAndHashCode
+  @ToString
+  class SetFilesetSecretReferenceRequest implements FilesetUpdateRequest {
+
+    @Getter
+    @JsonProperty("property")
+    private final String property;
+
+    @Getter
+    @JsonProperty("provider")
+    private final String provider;
+
+    @Getter
+    @JsonProperty("attributes")
+    private final Map<String, String> attributes;
+
+    /**
+     * Creates a new SetFilesetSecretReferenceRequest.
+     *
+     * @param property The secret property key.
+     * @param provider The secret provider name.
+     * @param attributes Optional provider-specific locator attributes.
+     */
+    public SetFilesetSecretReferenceRequest(
+        String property, String provider, Map<String, String> attributes) {
+      this.property = property;
+      this.provider = provider;
+      this.attributes =
+          attributes == null || attributes.isEmpty()
+              ? Collections.emptyMap()
+              : ImmutableMap.copyOf(attributes);
+    }
+
+    /** Default constructor for Jackson deserialization. */
+    public SetFilesetSecretReferenceRequest() {
+      this(null, null, Collections.emptyMap());
+    }
+
+    @Override
+    public FilesetChange filesetChange() {
+      return FilesetChange.setSecretReference(property, provider, attributes);
+    }
+
+    @Override
+    public void validate() throws IllegalArgumentException {
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
+      Preconditions.checkArgument(
+          StringUtils.isNotBlank(provider), "\"provider\" field is required and cannot be empty");
+    }
   }
 }

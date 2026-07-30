@@ -48,6 +48,8 @@ import org.apache.gravitino.credential.S3SecretKeyCredential;
 import org.apache.gravitino.exceptions.CatalogNotInUseException;
 import org.apache.gravitino.exceptions.MetalakeNotInUseException;
 import org.apache.gravitino.meta.CatalogEntity;
+import org.apache.gravitino.secret.SecretCreateSupport;
+import org.apache.gravitino.secret.SecretPropertyHelper;
 import org.apache.gravitino.storage.AzureProperties;
 import org.apache.gravitino.storage.GCSProperties;
 import org.apache.gravitino.storage.OSSProperties;
@@ -463,7 +465,7 @@ public abstract class BaseCatalog<T extends BaseCatalog>
               PROPERTY_IN_USE,
               catalogPropertiesMetadata().getDefaultValue(PROPERTY_IN_USE).toString());
 
-          properties = tempProperties;
+          properties = SecretPropertyHelper.omitSecrets(tempProperties);
         }
       }
     }
@@ -472,7 +474,8 @@ public abstract class BaseCatalog<T extends BaseCatalog>
     }
     Map<String, String> result = Maps.newHashMap(properties);
     result.putAll(propertiesWithCredentialProviders());
-    return result;
+    // Credential backfill may reintroduce raw/resolved secret values; omit them from API views.
+    return SecretPropertyHelper.omitSecrets(result);
   }
 
   /**
@@ -484,7 +487,9 @@ public abstract class BaseCatalog<T extends BaseCatalog>
    * @return A map of raw properties with credential providers set.
    */
   public Map<String, String> propertiesWithCredentialProviders() {
-    Map<String, String> props = Maps.newHashMap(entity().getProperties());
+    Map<String, String> props =
+        Maps.newHashMap(
+            SecretCreateSupport.resolveSecretsIfRegistryPresent(entity().getProperties()));
     if (StringUtils.isNotBlank(props.get(CredentialConstants.CREDENTIAL_PROVIDERS))) {
       return props;
     }

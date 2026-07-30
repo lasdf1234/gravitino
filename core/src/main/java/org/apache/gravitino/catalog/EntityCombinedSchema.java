@@ -26,6 +26,7 @@ import org.apache.gravitino.Schema;
 import org.apache.gravitino.StringIdentifier;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.SchemaEntity;
+import org.apache.gravitino.secret.SecretPropertyHelper;
 
 /**
  * A Schema class to represent a schema metadata object that combines the metadata both from {@link
@@ -91,10 +92,12 @@ public final class EntityCombinedSchema implements Schema {
 
   @Override
   public Map<String, String> properties() {
-    return schema.properties().entrySet().stream()
-        .filter(e -> !hiddenProperties.contains(e.getKey()))
-        .filter(entry -> entry.getKey() != null && entry.getValue() != null)
-        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    Map<String, String> filtered =
+        schema.properties().entrySet().stream()
+            .filter(e -> !hiddenProperties.contains(e.getKey()))
+            .filter(entry -> entry.getKey() != null && entry.getValue() != null)
+            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    return SecretPropertyHelper.omitSecrets(filtered);
   }
 
   @Override

@@ -19,6 +19,7 @@
 package org.apache.gravitino;
 
 import com.google.common.base.Preconditions;
+import javax.annotation.Nullable;
 import org.apache.gravitino.audit.AuditLogManager;
 import org.apache.gravitino.authorization.AccessControlDispatcher;
 import org.apache.gravitino.authorization.AccessControlManager;
@@ -98,6 +99,7 @@ import org.apache.gravitino.metrics.MetricsSystem;
 import org.apache.gravitino.metrics.source.JVMMetricsSource;
 import org.apache.gravitino.policy.PolicyDispatcher;
 import org.apache.gravitino.policy.PolicyManager;
+import org.apache.gravitino.secret.SecretProviderRegistry;
 import org.apache.gravitino.stats.StatisticDispatcher;
 import org.apache.gravitino.stats.StatisticManager;
 import org.apache.gravitino.storage.IdGenerator;
@@ -184,6 +186,8 @@ public class GravitinoEnv {
   private FutureGrantManager futureGrantManager;
   private GravitinoAuthorizer gravitinoAuthorizer;
   private StatisticDispatcher statisticDispatcher;
+
+  private SecretProviderRegistry secretProviderRegistry;
 
   protected GravitinoEnv() {}
 
@@ -588,6 +592,17 @@ public class GravitinoEnv {
     return statisticDispatcher;
   }
 
+  /**
+   * Get the secret provider registry associated with the Gravitino environment.
+   *
+   * @return The secret provider registry instance, or {@code null} if base components are not
+   *     initialized.
+   */
+  @Nullable
+  public SecretProviderRegistry secretProviderRegistry() {
+    return secretProviderRegistry;
+  }
+
   public boolean cacheEnabled() {
     return config == null || config.get(Configs.CACHE_ENABLED);
   }
@@ -657,6 +672,14 @@ public class GravitinoEnv {
       kmsClientRegistry.close();
     }
 
+    if (secretProviderRegistry != null) {
+      try {
+        secretProviderRegistry.close();
+      } catch (Exception e) {
+        LOG.warn("Failed to close SecretProviderRegistry", e);
+      }
+    }
+
     LOG.info("Gravitino Environment is shut down.");
   }
 
@@ -673,6 +696,9 @@ public class GravitinoEnv {
 
     this.auditLogManager = new AuditLogManager();
     auditLogManager.init(config, eventListenerManager);
+
+    this.secretProviderRegistry = new SecretProviderRegistry();
+    secretProviderRegistry.init(config.getAllConfig());
   }
 
   private void initGravitinoServerComponents() {
