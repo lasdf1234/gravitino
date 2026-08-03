@@ -50,9 +50,15 @@ import org.apache.gravitino.listener.api.event.CreateRolePreEvent;
 import org.apache.gravitino.listener.api.event.DeleteRoleEvent;
 import org.apache.gravitino.listener.api.event.DeleteRoleFailureEvent;
 import org.apache.gravitino.listener.api.event.DeleteRolePreEvent;
+import org.apache.gravitino.listener.api.event.DisableUserByIdEvent;
+import org.apache.gravitino.listener.api.event.DisableUserByIdFailureEvent;
+import org.apache.gravitino.listener.api.event.DisableUserByIdPreEvent;
 import org.apache.gravitino.listener.api.event.DisableUserEvent;
 import org.apache.gravitino.listener.api.event.DisableUserFailureEvent;
 import org.apache.gravitino.listener.api.event.DisableUserPreEvent;
+import org.apache.gravitino.listener.api.event.EnableUserByIdEvent;
+import org.apache.gravitino.listener.api.event.EnableUserByIdFailureEvent;
+import org.apache.gravitino.listener.api.event.EnableUserByIdPreEvent;
 import org.apache.gravitino.listener.api.event.EnableUserEvent;
 import org.apache.gravitino.listener.api.event.EnableUserFailureEvent;
 import org.apache.gravitino.listener.api.event.EnableUserPreEvent;
@@ -68,6 +74,9 @@ import org.apache.gravitino.listener.api.event.GetRolePreEvent;
 import org.apache.gravitino.listener.api.event.GetUserByExternalIdEvent;
 import org.apache.gravitino.listener.api.event.GetUserByExternalIdFailureEvent;
 import org.apache.gravitino.listener.api.event.GetUserByExternalIdPreEvent;
+import org.apache.gravitino.listener.api.event.GetUserByIdEvent;
+import org.apache.gravitino.listener.api.event.GetUserByIdFailureEvent;
+import org.apache.gravitino.listener.api.event.GetUserByIdPreEvent;
 import org.apache.gravitino.listener.api.event.GetUserEvent;
 import org.apache.gravitino.listener.api.event.GetUserFailureEvent;
 import org.apache.gravitino.listener.api.event.GetUserPreEvent;
@@ -107,6 +116,9 @@ import org.apache.gravitino.listener.api.event.RemoveGroupPreEvent;
 import org.apache.gravitino.listener.api.event.RemoveUserByExternalIdEvent;
 import org.apache.gravitino.listener.api.event.RemoveUserByExternalIdFailureEvent;
 import org.apache.gravitino.listener.api.event.RemoveUserByExternalIdPreEvent;
+import org.apache.gravitino.listener.api.event.RemoveUserByIdEvent;
+import org.apache.gravitino.listener.api.event.RemoveUserByIdFailureEvent;
+import org.apache.gravitino.listener.api.event.RemoveUserByIdPreEvent;
 import org.apache.gravitino.listener.api.event.RemoveUserEvent;
 import org.apache.gravitino.listener.api.event.RemoveUserFailureEvent;
 import org.apache.gravitino.listener.api.event.RemoveUserPreEvent;
@@ -119,6 +131,9 @@ import org.apache.gravitino.listener.api.event.RevokePrivilegesPreEvent;
 import org.apache.gravitino.listener.api.event.RevokeUserRolesEvent;
 import org.apache.gravitino.listener.api.event.RevokeUserRolesFailureEvent;
 import org.apache.gravitino.listener.api.event.RevokeUserRolesPreEvent;
+import org.apache.gravitino.listener.api.event.UpdateUserExternalIdEvent;
+import org.apache.gravitino.listener.api.event.UpdateUserExternalIdFailureEvent;
+import org.apache.gravitino.listener.api.event.UpdateUserExternalIdPreEvent;
 import org.apache.gravitino.listener.api.info.GroupInfo;
 import org.apache.gravitino.listener.api.info.RoleInfo;
 import org.apache.gravitino.listener.api.info.UserInfo;
@@ -258,6 +273,41 @@ public class AccessControlEventDispatcher implements AccessControlDispatcher {
 
   /** {@inheritDoc} */
   @Override
+  public User getUserById(String metalake, long userId)
+      throws NoSuchUserException, NoSuchMetalakeException {
+    String initiator = PrincipalUtils.getCurrentUserName();
+
+    eventBus.dispatchEvent(new GetUserByIdPreEvent(initiator, metalake, userId));
+    try {
+      User userObject = dispatcher.getUserById(metalake, userId);
+      eventBus.dispatchEvent(new GetUserByIdEvent(initiator, metalake, new UserInfo(userObject)));
+
+      return userObject;
+    } catch (Exception e) {
+      eventBus.dispatchEvent(new GetUserByIdFailureEvent(initiator, metalake, e, userId));
+      throw e;
+    }
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public boolean removeUserById(String metalake, long userId) throws NoSuchMetalakeException {
+    String initiator = PrincipalUtils.getCurrentUserName();
+
+    eventBus.dispatchEvent(new RemoveUserByIdPreEvent(initiator, metalake, userId));
+    try {
+      boolean isExists = dispatcher.removeUserById(metalake, userId);
+      eventBus.dispatchEvent(new RemoveUserByIdEvent(initiator, metalake, userId, isExists));
+
+      return isExists;
+    } catch (Exception e) {
+      eventBus.dispatchEvent(new RemoveUserByIdFailureEvent(initiator, metalake, e, userId));
+      throw e;
+    }
+  }
+
+  /** {@inheritDoc} */
+  @Override
   public User enableUser(String metalake, String externalId)
       throws NoSuchUserException, NoSuchMetalakeException {
     String initiator = PrincipalUtils.getCurrentUserName();
@@ -276,6 +326,25 @@ public class AccessControlEventDispatcher implements AccessControlDispatcher {
 
   /** {@inheritDoc} */
   @Override
+  public User enableUserById(String metalake, long userId)
+      throws NoSuchUserException, NoSuchMetalakeException {
+    String initiator = PrincipalUtils.getCurrentUserName();
+
+    eventBus.dispatchEvent(new EnableUserByIdPreEvent(initiator, metalake, userId));
+    try {
+      User userObject = dispatcher.enableUserById(metalake, userId);
+      eventBus.dispatchEvent(
+          new EnableUserByIdEvent(initiator, metalake, new UserInfo(userObject)));
+
+      return userObject;
+    } catch (Exception e) {
+      eventBus.dispatchEvent(new EnableUserByIdFailureEvent(initiator, metalake, e, userId));
+      throw e;
+    }
+  }
+
+  /** {@inheritDoc} */
+  @Override
   public User disableUser(String metalake, String externalId)
       throws NoSuchUserException, NoSuchMetalakeException {
     String initiator = PrincipalUtils.getCurrentUserName();
@@ -288,6 +357,46 @@ public class AccessControlEventDispatcher implements AccessControlDispatcher {
       return userObject;
     } catch (Exception e) {
       eventBus.dispatchEvent(new DisableUserFailureEvent(initiator, metalake, e, externalId));
+      throw e;
+    }
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public User disableUserById(String metalake, long userId)
+      throws NoSuchUserException, NoSuchMetalakeException {
+    String initiator = PrincipalUtils.getCurrentUserName();
+
+    eventBus.dispatchEvent(new DisableUserByIdPreEvent(initiator, metalake, userId));
+    try {
+      User userObject = dispatcher.disableUserById(metalake, userId);
+      eventBus.dispatchEvent(
+          new DisableUserByIdEvent(initiator, metalake, new UserInfo(userObject)));
+
+      return userObject;
+    } catch (Exception e) {
+      eventBus.dispatchEvent(new DisableUserByIdFailureEvent(initiator, metalake, e, userId));
+      throw e;
+    }
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public User updateUserExternalId(String metalake, long userId, String newExternalId)
+      throws NoSuchUserException, NoSuchMetalakeException {
+    String initiator = PrincipalUtils.getCurrentUserName();
+
+    eventBus.dispatchEvent(
+        new UpdateUserExternalIdPreEvent(initiator, metalake, userId, newExternalId));
+    try {
+      User userObject = dispatcher.updateUserExternalId(metalake, userId, newExternalId);
+      eventBus.dispatchEvent(
+          new UpdateUserExternalIdEvent(initiator, metalake, new UserInfo(userObject)));
+
+      return userObject;
+    } catch (Exception e) {
+      eventBus.dispatchEvent(
+          new UpdateUserExternalIdFailureEvent(initiator, metalake, e, userId, newExternalId));
       throw e;
     }
   }
