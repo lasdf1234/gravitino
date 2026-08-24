@@ -983,33 +983,31 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
                   "Catalog %s has schemas, please drop them first or use force option", ident);
             }
 
-            // Snapshot schema properties (write-through secret URNs) before entities are removed.
-            // store.delete(cascade) only soft-deletes meta rows and does not call secret providers.
-            // Fileset secrets on cascade are cleaned inside FilesetCatalogOperations.dropSchema.
-            List<Map<String, String>> schemaSecretPropertySnapshots = new ArrayList<>();
-            for (SchemaEntity schema : schemaEntities) {
-              schemaSecretPropertySnapshots.add(copyProperties(schema.properties()));
-            }
-
+            // Child write-through secrets: capture properties (URNs) from the entity, then
+            // deleteSecrets after a successful drop — same capture-before-delete pattern as
+            // FilesetCatalogOperations.dropSchema. Fileset secrets are cleaned inside that
+            // dropSchema path; schema secrets are cleaned here.
             boolean managedStorage = isManagedStorageCatalog(catalogWrapper);
+            List<Map<String, String>> unmanagedSchemaSecrets =
+                managedStorage ? null : new ArrayList<>();
             if (managedStorage) {
-              // For managed catalog, call dropSchema to drop underlying resources first. Fileset
-              // write-through secrets are cleaned inside FilesetCatalogOperations.dropSchema
-              // (list → delete → deleteSecrets). Schema secrets are cleaned here after a successful
-              // dropSchema so non-fileset managed catalogs are covered without SchemaDispatcher.
-              for (int i = 0; i < schemaEntities.size(); i++) {
-                SchemaEntity schema = schemaEntities.get(i);
+              for (SchemaEntity schema : schemaEntities) {
+                Map<String, String> schemaProps = copyProperties(schema.properties());
                 try {
                   boolean dropped =
                       catalogWrapper.doWithSchemaOps(
                           ops -> ops.dropSchema(schema.nameIdentifier(), true));
                   if (dropped) {
-                    secretManager.deleteSecretsFromProperties(schemaSecretPropertySnapshots.get(i));
+                    secretManager.deleteSecretsFromProperties(schemaProps);
                   }
                 } catch (Exception e) {
                   LOG.warn("Failed to drop schema {}", schema.nameIdentifier());
                   throw new RuntimeException("Failed to drop schema " + schema.nameIdentifier(), e);
                 }
+              }
+            } else {
+              for (SchemaEntity schema : schemaEntities) {
+                unmanagedSchemaSecrets.add(copyProperties(schema.properties()));
               }
             }
 
@@ -1017,14 +1015,13 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
             // Invalidate after store.delete() to prevent a background thread from repopulating
             // the cache with stale data between invalidate and delete.
             Map<String, String> catalogProperties =
-                catalogWrapper.catalog().entity().getProperties();
+                copyProperties(catalogWrapper.catalog().entity().getProperties());
             boolean deleted = store.delete(ident, EntityType.CATALOG, true);
             if (deleted) {
               markLocalMutation(ident);
-              // Unmanaged: schemas removed only via store cascade — clean their secrets now.
-              // Managed path already cleaned per successful dropSchema above.
+              // Unmanaged: schemas removed only via store cascade — clean secrets captured above.
               if (!managedStorage) {
-                for (Map<String, String> schemaProperties : schemaSecretPropertySnapshots) {
+                for (Map<String, String> schemaProperties : unmanagedSchemaSecrets) {
                   secretManager.deleteSecretsFromProperties(schemaProperties);
                 }
               }
