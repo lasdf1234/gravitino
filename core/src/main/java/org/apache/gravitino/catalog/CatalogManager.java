@@ -983,23 +983,34 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
                   "Catalog %s has schemas, please drop them first or use force option", ident);
             }
 
-            if (isManagedStorageCatalog(catalogWrapper)) {
-              // For managed catalog, we need to call drop schema API to drop the underlying
-              // entities as well as the related resource first. Directly deleting the metadata from
-              // the store is not enough. Schema/fileset write-through secrets are cleaned by
-              // SchemaDispatcher / FilesetCatalogOperations when drop goes through those paths
-              // (CatalogHookDispatcher force-drop, or REST dropSchema).
-              schemaEntities.forEach(
-                  schema -> {
-                    try {
+            // Snapshot schema properties (write-through secret URNs) before entities are removed.
+            // store.delete(cascade) only soft-deletes meta rows and does not call secret providers.
+            // Fileset secrets on cascade are cleaned inside FilesetCatalogOperations.dropSchema.
+            List<Map<String, String>> schemaSecretPropertySnapshots = new ArrayList<>();
+            for (SchemaEntity schema : schemaEntities) {
+              schemaSecretPropertySnapshots.add(copyProperties(schema.properties()));
+            }
+
+            boolean managedStorage = isManagedStorageCatalog(catalogWrapper);
+            if (managedStorage) {
+              // For managed catalog, call dropSchema to drop underlying resources first. Fileset
+              // write-through secrets are cleaned inside FilesetCatalogOperations.dropSchema
+              // (list → delete → deleteSecrets). Schema secrets are cleaned here after a successful
+              // dropSchema so non-fileset managed catalogs are covered without SchemaDispatcher.
+              for (int i = 0; i < schemaEntities.size(); i++) {
+                SchemaEntity schema = schemaEntities.get(i);
+                try {
+                  boolean dropped =
                       catalogWrapper.doWithSchemaOps(
                           ops -> ops.dropSchema(schema.nameIdentifier(), true));
-                    } catch (Exception e) {
-                      LOG.warn("Failed to drop schema {}", schema.nameIdentifier());
-                      throw new RuntimeException(
-                          "Failed to drop schema " + schema.nameIdentifier(), e);
-                    }
-                  });
+                  if (dropped) {
+                    secretManager.deleteSecretsFromProperties(schemaSecretPropertySnapshots.get(i));
+                  }
+                } catch (Exception e) {
+                  LOG.warn("Failed to drop schema {}", schema.nameIdentifier());
+                  throw new RuntimeException("Failed to drop schema " + schema.nameIdentifier(), e);
+                }
+              }
             }
 
             // Finally, delete the catalog entity as well as all its sub-entities from the store.
@@ -1010,6 +1021,13 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
             boolean deleted = store.delete(ident, EntityType.CATALOG, true);
             if (deleted) {
               markLocalMutation(ident);
+              // Unmanaged: schemas removed only via store cascade — clean their secrets now.
+              // Managed path already cleaned per successful dropSchema above.
+              if (!managedStorage) {
+                for (Map<String, String> schemaProperties : schemaSecretPropertySnapshots) {
+                  secretManager.deleteSecretsFromProperties(schemaProperties);
+                }
+              }
               secretManager.deleteSecretsFromProperties(catalogProperties);
             }
             catalogCache.invalidate(ident);
@@ -1023,6 +1041,12 @@ public class CatalogManager implements CatalogDispatcher, Closeable {
             throw new RuntimeException(e);
           }
         });
+  }
+
+  private static Map<String, String> copyProperties(Map<String, String> properties) {
+    return properties == null || properties.isEmpty()
+        ? Collections.emptyMap()
+        : new HashMap<>(properties);
   }
 
   /**
