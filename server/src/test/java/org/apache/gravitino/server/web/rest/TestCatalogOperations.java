@@ -169,12 +169,8 @@ public class TestCatalogOperations extends BaseOperationsTest {
   public void testListCatalogsInfo() {
     TestCatalog catalog1 = buildCatalog("metalake1", "catalog1");
     TestCatalog catalog2 = buildCatalog("metalake1", "catalog2");
-    NameIdentifier ident1 = NameIdentifier.of("metalake1", "catalog1");
-    NameIdentifier ident2 = NameIdentifier.of("metalake1", "catalog2");
 
-    when(manager.listCatalogs(any())).thenReturn(new NameIdentifier[] {ident1, ident2});
-    when(manager.loadCatalog(ident1)).thenReturn(catalog1);
-    when(manager.loadCatalog(ident2)).thenReturn(catalog2);
+    when(manager.listCatalogsInfo(any())).thenReturn(new Catalog[] {catalog1, catalog2});
 
     Response resp =
         target("/metalakes/metalake1/catalogs")
@@ -206,7 +202,7 @@ public class TestCatalogOperations extends BaseOperationsTest {
     Assertions.assertEquals(
         ImmutableMap.of("key", "value", PROPERTY_IN_USE, "true"), catalogDTO2.properties());
 
-    doThrow(new NoSuchMetalakeException("mock error")).when(manager).listCatalogs(any());
+    doThrow(new NoSuchMetalakeException("mock error")).when(manager).listCatalogsInfo(any());
     Response resp1 =
         target("/metalakes/metalake1/catalogs")
             .queryParam("details", "true")
