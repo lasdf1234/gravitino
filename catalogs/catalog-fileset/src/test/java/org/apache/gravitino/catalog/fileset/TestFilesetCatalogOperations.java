@@ -3253,9 +3253,15 @@ public class TestFilesetCatalogOperations {
   }
 
   @Test
-  public void testMergeSecrets() throws Exception {
+  public void testMergeResolvesSecrets() throws Exception {
     long entityId = idGenerator.nextId();
-    SecretUrn urn = writeThroughUrn("schema", entityId, "aws-sk");
+    SecretUrn urn =
+        SecretUrn.buildWriteThrough(
+            "memory",
+            Map.of(
+                SecretConstants.ATTR_ENTITY_TYPE, "schema",
+                SecretConstants.ATTR_ENTITY_ID, String.valueOf(entityId),
+                SecretConstants.ATTR_PROPERTY_KEY, "aws-sk"));
     secretManager.writeSecrets(List.of(new SecretMaterial(urn, "super-secret")));
 
     String schemaName = "schema_secret_" + generateTestId();
@@ -3265,16 +3271,16 @@ public class TestFilesetCatalogOperations {
           Maps.newHashMap(Map.of(LOCATION, TEST_ROOT_PATH)),
           randomCatalogInfo("m1", "c1"),
           FILESET_PROPERTIES_METADATA);
+
       NameIdentifier schemaIdent = NameIdentifierUtil.ofSchema("m1", "c1", schemaName);
-      Schema schema =
-          ops.createSchema(
-              schemaIdent,
-              "comment",
-              Maps.newHashMap(
-                  StringIdentifier.newPropertiesWithId(
-                      StringIdentifier.fromId(entityId),
-                      Map.of(LOCATION, schemaPath, "aws-sk", urn.toString()))));
+      Map<String, String> schemaProps =
+          Maps.newHashMap(
+              StringIdentifier.newPropertiesWithId(
+                  StringIdentifier.fromId(entityId),
+                  Map.of(LOCATION, schemaPath, "aws-sk", urn.toString())));
+      Schema schema = ops.createSchema(schemaIdent, "comment", schemaProps);
       Assertions.assertEquals(urn.toString(), schema.properties().get("aws-sk"));
+
       Map<String, String> merged =
           ops.mergeUpLevelConfigurations(schemaIdent, schema.properties(), new Path(schemaPath));
       Assertions.assertEquals("super-secret", merged.get("aws-sk"));
