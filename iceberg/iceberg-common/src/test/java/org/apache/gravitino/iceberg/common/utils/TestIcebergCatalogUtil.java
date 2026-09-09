@@ -26,11 +26,7 @@ import java.util.Map;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergCatalogBackend;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergConstants;
 import org.apache.gravitino.iceberg.common.IcebergConfig;
-<<<<<<< HEAD
-=======
-import org.apache.gravitino.iceberg.common.authentication.AuthenticationConfig;
 import org.apache.gravitino.storage.GCSProperties;
->>>>>>> 5c8f5bf9d ([#9418] fix(iceberg): inject GCS FileIO token from gcs-service-account-file (#12962))
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.catalog.Catalog;

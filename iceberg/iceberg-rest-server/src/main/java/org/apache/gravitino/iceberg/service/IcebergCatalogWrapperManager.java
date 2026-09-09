@@ -74,19 +74,12 @@ public class IcebergCatalogWrapperManager implements AutoCloseable {
         Caffeine.newBuilder()
             .expireAfter(new CatalogWrapperExpiry(accessEvictionNanos))
             .removalListener(
-<<<<<<< HEAD
-                (k, v, c) -> {
-                  String catalogName = (String) k;
-                  LOG.info("Remove IcebergCatalogWrapper cache {}.", catalogName);
-                  closeIcebergCatalogWrapper((IcebergCatalogWrapper) v);
-=======
                 (catalogName, catalogWrapper, cause) -> {
                   LOG.debug(
                       "Removing IcebergCatalogWrapper from cache: catalog={}, cause={}",
                       catalogName,
                       cause);
                   closeIcebergCatalogWrapper(catalogWrapper);
->>>>>>> 5c8f5bf9d ([#9418] fix(iceberg): inject GCS FileIO token from gcs-service-account-file (#12962))
                 })
             .scheduler(
                 Scheduler.forScheduledExecutorService(

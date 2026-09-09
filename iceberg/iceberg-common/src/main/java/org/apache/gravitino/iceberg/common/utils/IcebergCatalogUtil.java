@@ -69,18 +69,9 @@ public class IcebergCatalogUtil {
 
   private static final Logger LOG = LoggerFactory.getLogger(IcebergCatalogUtil.class);
 
-<<<<<<< HEAD
-=======
-  /**
-   * Column that Iceberg adds to the {@code iceberg_tables} control table in its V1 view-support
-   * migration (see {@code JdbcUtil} in iceberg-core).
-   */
-  private static final String ICEBERG_TYPE_COLUMN = "iceberg_type";
-
   private static final String GCS_CLOUD_PLATFORM_SCOPE =
       "https://www.googleapis.com/auth/cloud-platform";
 
->>>>>>> 5c8f5bf9d ([#9418] fix(iceberg): inject GCS FileIO token from gcs-service-account-file (#12962))
   private static final ConcurrentHashMap<String, InMemoryCatalog> MEMORY_CATALOGS =
       new ConcurrentHashMap<>();
 
