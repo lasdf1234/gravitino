@@ -74,7 +74,7 @@ execution core.
    `gravitino-iceberg-rest-server.sh`-style entrypoint.
 2. **Dedicated auxiliary HTTP listener**: No `GravitinoAuxiliaryService`, no isolated
    `gravitino.maintenance.classpath`, and no dedicated TMS port (for example **9301**). TMS is not
-   an aux sibling of `iceberg-rest` / `lance-rest` / `scim`.
+   an aux sibling of `iceberg-rest` / `lance-rest`.
 3. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
    `StatisticsProvider`, `StrategyProvider`, `TableMetadataProvider`, or `JobSubmitter` contracts
    used by the event pipeline.
@@ -147,7 +147,7 @@ plus a minimal public health API (Option B). Optimizer ops may still be exposed 
 Implement `GravitinoAuxiliaryService` with `shortName() = "maintenance"`, expose a dedicated Jetty
 listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 
-**Pros:** Classpath isolation similar to `iceberg-rest` / `scim`.
+**Pros:** Classpath isolation similar to `iceberg-rest` / `lance-rest`.
 
 **Cons:** Extra port and aux enablement; diverges from Enterprise plugins that already extend
 **8090** via `extensionPackages`.
