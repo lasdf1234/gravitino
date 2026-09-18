@@ -80,9 +80,7 @@ execution core.
    used by the event pipeline.
 4. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
    for event-driven path.
-5. **Public event / task store API**: Operators do not list, cancel, or replay
-   `table_maintenance_event` rows via REST in MVP; the table is an internal reliability log.
-6. **HTTP or Kafka commit-event ingress**: No `POST …/events/iceberg-commit` for IRC, and no Kafka
+5. **HTTP or Kafka commit-event ingress**: No `POST …/events/iceberg-commit` for IRC, and no Kafka
    produce/consume path in MVP. Commit events are **in-process only** (§5.1.1). Remote IRC / cross-JVM
    delivery is out of scope (follow-up if needed).
 
@@ -208,7 +206,7 @@ Notes:
   receive commits for tables routed to that node.
 - **Durability** still uses `table_maintenance_event` (§6.3) — in-process delivery does not remove
   the need to persist the event before evaluate.
-- HTTP and Kafka commit-event ingress are **out of scope** for MVP (Non-Goal #6).
+- HTTP and Kafka commit-event ingress are **out of scope** for MVP (Non-Goal #5).
 
 Deployment:
 
@@ -474,7 +472,7 @@ provides it) and add a unique `(table_identifier, snapshot_id)` for stronger ide
    claim → pipeline; update terminal status. This meets **no silent event loss** after process
    crashes mid-handler.
 4. Retention: purge terminal rows older than a configured TTL (follow-up config; default e.g. 7–30
-   days). Not a public task API (Non-Goal #5).
+   days).
 
 Illustrative MySQL DDL:
 
@@ -555,7 +553,7 @@ metrics / recommend / submit); it is **not** exposed in the UI.
 | ------ | ------------------------------- | -------- | --------- |
 | `GET`  | `/api/maintenance/table/health` | Ops / LB | Optional  |
 
-There is **no** `POST /api/maintenance/table/events/iceberg-commit` in MVP (Non-Goal #6).
+There is **no** `POST /api/maintenance/table/events/iceberg-commit` in MVP (Non-Goal #5).
 
 ### 7.1 GET /api/maintenance/table/health
 
@@ -661,7 +659,7 @@ gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
 ```
 
-HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** part of MVP (Non-Goal #6).
+HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** part of MVP (Non-Goal #5).
 
 ### 8.4 Task types and minimum interval (global default + table override)
 
