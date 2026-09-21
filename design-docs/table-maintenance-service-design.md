@@ -120,21 +120,7 @@ webserver plugin.
 
 **Decision:** Rejected for Enterprise. Prefer the 8090 REST plugin.
 
-### 4.4 Option D: Expose a full optimizer-ops REST surface as the primary product API
-
-Map every optimizer capability (statistics update, recommendation submit, metrics list/monitor,
-update-stats job submit, etc.) to a synchronous HTTP API as the primary product surface.
-
-**Pros:** Convenient for scripts that want 1:1 HTTP coverage of optimizer capabilities.
-
-**Cons:** Enterprise UI and IRC-driven flow do not need those surfaces as public APIs. Duplicates
-Job APIs and inflates authz and support surface.
-
-**Decision:** Rejected as the **primary** product / UI API shape. Prefer in-process commit events
-plus a minimal public health API (Option B). Optimizer ops may still be exposed later as a
-**separate non-UI ops group** (§7.2), not as a console Compact-policy surface.
-
-### 4.5 Option E: Dedicated aux Jetty listener (:9301)
+### 4.4 Option E: Dedicated aux Jetty listener (:9301)
 
 Implement `GravitinoAuxiliaryService` with `shortName() = "maintenance"`, expose a dedicated Jetty
 listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
