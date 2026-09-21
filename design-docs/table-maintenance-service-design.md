@@ -250,7 +250,7 @@ IRC commit succeeded (same JVM)
         v
  MaintenanceEvaluateSubmitPipeline
         ├─ for each Active policy:
-        │     atomic claim: that policy row PENDING → RUNNING (§6.1)
+        │     atomic claim: that policy row IDLE → RUNNING (§6.1)
         │       └─ claim failed → skip this policy (another node / reclaim)
         │     if job_id still QUEUED/STARTED → release claim; skip
         │     else apply min-interval gate; Recommender.submitForStrategyName(...)
@@ -315,7 +315,7 @@ Node A / Node B — both receive an event for same table + same policy
         ├─ both resolve Active policies; upsert one row per policy
         ├─ both attempt per-policy claim:
         │     UPDATE … SET state=RUNNING
-        │     WHERE metalake_id=? AND table_identifier=? AND policy_id=? AND state=PENDING
+        │     WHERE metalake_id=? AND table_identifier=? AND policy_id=? AND state=IDLE
         │     ├─ Node A: rows_affected = 1 → runs that policy → release to IDLE
         │     └─ Node B: 0 rows → skip that policy (another node / reclaim)
         v
@@ -342,19 +342,24 @@ Table keying follows optimizer **`table_metrics.table_identifier`** (string iden
 | `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake that owns the maintenance policy                          |
 | `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table` (same form as optimizer / event payload) |
 | `policy_id`        | `BIGINT UNSIGNED NOT NULL` | Real `policy_meta.policy_id`                                       |
-| `state`            | `VARCHAR(16) NOT NULL`     | IDLE / PENDING / RUNNING (per policy row)                          |
+| `state`            | `VARCHAR(16) NOT NULL`     | `IDLE` / `RUNNING` only (per policy row)                           |
 | `updated_at`       | `BIGINT NOT NULL`          | Epoch millis; claim / reclaim                                      |
 | `job_id`           | `BIGINT UNSIGNED NULL`     | Last submitted job for **this policy** (`job_run_meta.job_run_id`) |
 
 **Primary key:** (`metalake_id`, `table_identifier`, `policy_id`).
 
+`state` has two values: `IDLE` (unclaimed) and `RUNNING` (a node holds evaluate → submit). Queued or
+deferred work stays on `table_maintenance_event.status`, not on this column.
+
 **Lifecycle:**
 
-1. On each event: resolve Active policies → `INSERT … ON DUPLICATE KEY UPDATE` each
-   `(table_identifier, policy)` row: set `state=PENDING`, `updated_at=now`.
+1. On each event: resolve Active policies → `INSERT` each missing `(table_identifier, policy)` row
+   as `state=IDLE`. On duplicate key, **do not** change `state` (a live `RUNNING` claim must stay).
 2. Claim: conditional `UPDATE … SET state=RUNNING WHERE metalake_id=? AND table_identifier=? AND
-   policy_id=? AND state=PENDING` (and reclaim stale `RUNNING` after `claimTimeoutMs`).
-3. Before submit: if `job_id` is set and that job is still active → skip that policy.
+   policy_id=? AND state=IDLE` (and reclaim stale `RUNNING` after `claimTimeoutMs` by setting it
+   back to `IDLE`). `rows_affected = 1` owns the lock.
+3. Before submit: if `job_id` is set and that job is still active → set `state=IDLE` and skip that
+   policy.
 4. On submit: write the new `job_id` on that policy's row.
 5. Done: set `state=IDLE` on **that policy row**. **Do not DELETE** — keep `job_id` for later
    events.
@@ -366,7 +371,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
     `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
     `table_identifier` VARCHAR(512) NOT NULL COMMENT 'normalized catalog.schema.table',
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
-    `state` VARCHAR(16) NOT NULL COMMENT 'IDLE|PENDING|RUNNING',
+    `state` VARCHAR(16) NOT NULL COMMENT 'IDLE|RUNNING',
     `updated_at` BIGINT(20) NOT NULL COMMENT 'last state upsert time in epoch millis',
     `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last job_run_id for this policy',
     PRIMARY KEY (`metalake_id`, `table_identifier`, `policy_id`),
