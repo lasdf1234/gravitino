@@ -186,7 +186,7 @@ Deployment:
 1. Package the TMS plugin jars with the main Gravitino server and set
    `gravitino.server.rest.extensionPackages` to include the TMS Feature package (see §8.1).
 2. Enable `iceberg-rest` in `gravitino.auxService.names` (same process as the main server).
-3. Enable in-process commit events (`tableMaintenance.inProcess` — §8.3).
+3. Enable in-process commit events (`tableMaintenance.inProcess` — §8.2).
 4. Attach Govern maintenance policies (e.g. `system_iceberg_compaction`) to catalogs/schemas/tables
    via existing Policy APIs on the main server (**8090**).
 
@@ -204,7 +204,7 @@ Deployment:
 
 ### 5.3 User process (event-driven)
 
-1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**, and turns on in-process commit events (§5.1.1 / §8.3).
+1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**, and turns on in-process commit events (§5.1.1 / §8.2).
 2. Operator creates / enables a maintenance policy and associates it to tables (or parents) via
    metalake Policy APIs, for example:
 
@@ -272,7 +272,7 @@ finish time used with `minIntervalMs` (§6.3). Stale `RUNNING` claims are releas
 **Gate order:**
 
 1. Per-policy in-flight / min-interval via `job_id` → `job_run_meta` and resolved `minIntervalMs`
-   (table prop → global conf → code default; §8.4).
+   (table prop → global conf → code default; §8.3).
 2. Policy trigger (`Recommender`) for each remaining Active policy.
 3. Submit maintenance job when trigger passes; persist `job_id`.
 
@@ -424,7 +424,7 @@ table_maintenance_event e
 ```
 
 `j.job_finished_at` is the end time of that policy's last job. Resolve `minIntervalMs` for the
-policy's task type (§8.4). When `e.created_at - j.job_finished_at > minIntervalMs` and `s.job_id`
+policy's task type (§8.3). When `e.created_at - j.job_finished_at > minIntervalMs` and `s.job_id`
 still points at that finished job, the policy has not completed another run after the interval
 elapsed. If `j.job_run_status` is still in flight (`QUEUED` / `STARTED`), the job is running; that
 gap does not mean the policy missed a run. `job_finished_at` is `0` until the job finishes.
@@ -517,39 +517,9 @@ Each route calls the existing optimizer command implementation. The IRC hook and
 | ----------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `gravitino.server.rest.extensionPackages` | none    | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
 | `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                    |
+| `gravitino.maintenance.claimTimeoutMs`    | `300000` | Reclaim a stale `RUNNING` claim after the worker fails.                                             |
 
-### 8.2 Table Maintenance plugin keys (`gravitino.conf`)
-
-Pipeline / provider keys stay under `gravitino.maintenance.*` (read by the plugin from the main
-server config). There is **no** TMS HTTP API and **no** dedicated TMS HTTP `host` / `httpPort`.
-
-| Key              | Default  | Description                                              |
-| ---------------- | -------- | -------------------------------------------------------- |
-| `claimTimeoutMs` | `300000` | Reclaim stale `RUNNING` claim rows after worker failure. |
-
-Existing provider keys continue under `gravitino.maintenance.*`, for example:
-
-- `gravitino.maintenance.gravitinoUri` / `gravitinoMetalake` / `gravitinoDefaultCatalog`
-- `gravitino.maintenance.recommender.*`, `updater.*`
-
-Per-task **minimum interval** defaults are under §8.4 (global → table override → code default).
-
-Example:
-
-```properties
-gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
-gravitino.auxService.names = iceberg-rest,lance-rest
-
-gravitino.maintenance.claimTimeoutMs = 300000
-gravitino.maintenance.gravitinoUri = http://127.0.0.1:8090
-gravitino.maintenance.gravitinoMetalake = test
-
-# Optional global min-interval overrides (omit → code defaults in §8.4)
-gravitino.maintenance.task.compaction.minIntervalMs = 3600000
-gravitino.maintenance.task.snapshot-expiry.minIntervalMs = 86400000
-```
-
-### 8.3 Iceberg REST → TMS in-process event keys
+### 8.2 Iceberg REST → TMS in-process event keys
 
 Illustrative keys (exact names may be finalized in implementation).
 
@@ -565,11 +535,12 @@ server must share **one JVM**.
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
 gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
+gravitino.maintenance.claimTimeoutMs = 300000
 ```
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
 
-### 8.4 Task types and minimum interval (global default + table override)
+### 8.3 Task types and minimum interval (global default + table override)
 
 TMS recognizes four maintenance **task types** (aligned with product Compact policy surface):
 
@@ -656,7 +627,7 @@ This design delivers the in-process plugin, IRC commit hook, `table_maintenance_
 #### Phase 3 checklist
 
 - [ ] Add `IcebergCommitEventHandler` and main-server-registered in-process callback / SPI (§5.1.1 /
-      §8.3).
+      §8.2).
 - [ ] Add EntityStore migration for **`table_maintenance_event`** (§6.3) and
       **`table_maintenance_state`** (§6.2).
 - [ ] IRC post-commit hook **INSERTs** one `table_maintenance_event` row per commit (§6.3). TMS does
