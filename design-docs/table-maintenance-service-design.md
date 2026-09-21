@@ -36,8 +36,8 @@ Today that core is not hosted as a long-running Gravitino service. Without a ser
 4. When Spark maintenance work is needed, submitted work already returns a `jobId` owned by the
    Gravitino job framework. That job-status boundary should stay.
 
-This design turns TMS into a **main-server REST plugin** on port **8090** (same pattern as IdP /
-SCIM token admin via `gravitino.server.rest.extensionPackages`) so colocated IRC can drive the
+This design turns TMS into a **main-server REST plugin** on port **8090** (same pattern as IdP
+via `gravitino.server.rest.extensionPackages`) so colocated IRC can drive the
 evaluate → submit pipeline **in-process** after commits, while reusing the existing optimizer
 execution core.
 
@@ -46,8 +46,8 @@ execution core.
 ## 2. Goals
 
 1. **Main REST plugin on 8090**: Enable Table Maintenance through
-   `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP /
-   SCIM token admin). Lifecycle is owned by the main Gravitino webserver; APIs share port **8090**
+   `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP). Lifecycle
+   is owned by the main Gravitino webserver; APIs share port **8090**
    (health in MVP; optional ops APIs later).
 2. **IRC in-process commit event**: After successful Iceberg commits via IRC, TMS receives a commit
    event through a **main-server-registered in-process callback / SPI** (IRC aux and main server
@@ -101,7 +101,7 @@ Continue running all optimizer work in ad hoc local processes, with no TMS servi
 ### 4.2 Option B: Main REST plugin on port 8090 (Chosen)
 
 Register Table Maintenance as a Jersey 2 `Feature` through
-`gravitino.server.rest.extensionPackages` (same pattern as IdP / SCIM token admin). Expose **health**
+`gravitino.server.rest.extensionPackages` (same pattern as IdP). Expose **health**
 (and optional later ops) under `/api/maintenance/table/...` on the main Gravitino webserver
 (**8090**). After each Iceberg commit, **colocated** IRC invokes a main-server-registered
 **in-process** callback that upserts state, takes an **atomic table claim**, runs gates, optional
