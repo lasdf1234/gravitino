@@ -47,7 +47,8 @@ execution core.
 
 1. **In-process plugin on the main server**: Load Table Maintenance through
    `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP) so the IRC
-   callback is registered in the main JVM. TMS does **not** expose an HTTP API.
+   callback is registered in the main JVM. The commit path does **not** use HTTP. Operator calls that
+   replace the optimizer CLI are the ops APIs in **§7**.
 2. **IRC in-process commit event**: After successful Iceberg commits via IRC, TMS receives a commit
    event through a **main-server-registered in-process callback / SPI** (IRC and main server share one JVM; see **§5.1.1**). The event handler runs gates, policy trigger evaluation, and job submission in-process (see **§5.4**).
 3. **Reuse existing optimizer execution core**: Event handling invokes the same `Updater` /
@@ -79,10 +80,10 @@ execution core.
    used by the event pipeline.
 4. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
    for event-driven path.
-5. **HTTP or Kafka ingress**: No TMS HTTP API, including no `POST …/events/iceberg-commit`, no health
-   or ops resources under `/api/maintenance/...`, and no Kafka produce/consume path. Commit handling
-   is **in-process only** (§5.1.1). Remote IRC / cross-JVM delivery is out of scope (follow-up if
-   needed).
+5. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, and no Kafka
+   produce/consume path. Commit handling is **in-process only** (§5.1.1). APIs that replace the
+   optimizer CLI are **§7**, and they are not a commit ingress. Remote IRC / cross-JVM delivery is
+   out of scope (follow-up if needed).
 
 ---
 
@@ -102,7 +103,7 @@ Continue running all optimizer work in ad hoc local processes, with no TMS servi
 
 Register Table Maintenance as a Jersey 2 `Feature` through
 `gravitino.server.rest.extensionPackages` (same pattern as IdP) so it runs inside the main server
-process. TMS does **not** expose an HTTP API. After each Iceberg commit, the **colocated** IRC hook
+process. The commit path does **not** use HTTP. After each Iceberg commit, the **colocated** IRC hook
 INSERTs the commit row and invokes a main-server-registered **in-process** callback that upserts
 state, takes an **atomic per-policy claim**, runs gates, `Recommender` trigger, and job submit.
 
@@ -183,9 +184,9 @@ TMS does not write the event row, and the row is not updated.
 Deployment:
 
 1. Package the TMS plugin jars with the main Gravitino server and set
-   `gravitino.server.rest.extensionPackages` to include the TMS Feature package (see §7.1).
+   `gravitino.server.rest.extensionPackages` to include the TMS Feature package (see §8.1).
 2. Enable `iceberg-rest` in `gravitino.auxService.names` (same process as the main server).
-3. Enable in-process commit events (`tableMaintenance.inProcess` — §7.3).
+3. Enable in-process commit events (`tableMaintenance.inProcess` — §8.3).
 4. Attach Govern maintenance policies (e.g. `system_iceberg_compaction`) to catalogs/schemas/tables
    via existing Policy APIs on the main server (**8090**).
 
@@ -193,7 +194,7 @@ Deployment:
 
 | Part                                | Responsibility                                                                                         |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; registers the in-process callback. No HTTP resources. |
+| `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; registers the in-process callback and the ops resources (§7). No health or commit-event resource. |
 | `IcebergCommitEventHandler`          | TMS in-process entry after the IRC hook has inserted the event; upserts state; claims; runs pipeline. |
 | `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`.                                            |
 | `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / rename (§6.1–§6.2, §6.4). |
@@ -203,7 +204,7 @@ Deployment:
 
 ### 5.3 User process (event-driven)
 
-1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**, and turns on in-process commit events (§5.1.1 / §7.3).
+1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**, and turns on in-process commit events (§5.1.1 / §8.3).
 2. Operator creates / enables a maintenance policy and associates it to tables (or parents) via
    metalake Policy APIs, for example:
 
@@ -271,7 +272,7 @@ finish time used with `minIntervalMs` (§6.3). Stale `RUNNING` claims are releas
 **Gate order:**
 
 1. Per-policy in-flight / min-interval via `job_id` → `job_run_meta` and resolved `minIntervalMs`
-   (table prop → global conf → code default; §7.4).
+   (table prop → global conf → code default; §8.4).
 2. Policy trigger (`Recommender`) for each remaining Active policy.
 3. Submit maintenance job when trigger passes; persist `job_id`.
 
@@ -423,7 +424,7 @@ table_maintenance_event e
 ```
 
 `j.job_finished_at` is the end time of that policy's last job. Resolve `minIntervalMs` for the
-policy's task type (§7.4). When `e.created_at - j.job_finished_at > minIntervalMs` and `s.job_id`
+policy's task type (§8.4). When `e.created_at - j.job_finished_at > minIntervalMs` and `s.job_id`
 still points at that finished job, the policy has not completed another run after the interval
 elapsed. If `j.job_run_status` is still in flight (`QUEUED` / `STARTED`), the job is running; that
 gap does not mean the policy missed a run. `job_finished_at` is `0` until the job finishes.
@@ -481,16 +482,43 @@ This design covers table rename/drop within a catalog.
 
 ---
 
-## 7. Configuration
+## 7. Optimizer CLI replacement APIs
 
-### 7.1 Enablement keys (`gravitino.conf`)
+The commit path stays in-process and does **not** call these APIs. They replace the
+`gravitino-optimizer` CLI (`--type ...`) for operators and scripts. The same plugin serves them on
+the main webserver (**8090**).
+
+- Prefix: `/api/maintenance/table/ops/...`. Not shown in the Compact-policy UI.
+- Caller must have **WRITE** on each target table. Missing privilege → **403**.
+- `--conf-path` stays server configuration. `update-statistics` and `append-metrics` send JSON Lines
+  in the body. The API does not accept a server `--file-path`.
+- `dryRun=true` returns the recommendation or job config and does not submit.
+
+| CLI `--type` | Method | Path | Body or query |
+| --- | --- | --- | --- |
+| `submit-strategy-jobs` | `POST` | `/api/maintenance/table/ops/strategy-jobs` | `identifiers`, `strategyName`, `dryRun`, `limit` |
+| `submit-update-stats-job` | `POST` | `/api/maintenance/table/ops/update-stats-jobs` | `identifiers`, `dryRun`, `updateMode` (`stats` / `metrics` / `all`), `updaterOptions`, `sparkConf` |
+| `update-statistics` | `POST` | `/api/maintenance/table/ops/statistics` | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines) |
+| `append-metrics` | `POST` | `/api/maintenance/table/ops/metrics` | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines) |
+| `monitor-metrics` | `POST` | `/api/maintenance/table/ops/metrics/monitor` | `identifiers`, `actionTime`, `rangeSeconds`, `partitionPath` |
+| `list-table-metrics` | `GET` | `/api/maintenance/table/ops/metrics/tables` | `identifiers`, `partitionPath` |
+| `list-job-metrics` | `GET` | `/api/maintenance/table/ops/metrics/jobs` | `identifiers` |
+
+Each route calls the existing optimizer command implementation. The IRC hook and
+`MaintenanceEvaluateSubmitPipeline` do not call this group.
+
+---
+
+## 8. Configuration
+
+### 8.1 Enablement keys (`gravitino.conf`)
 
 | Key                                       | Default | Description                                                                                          |
 | ----------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `gravitino.server.rest.extensionPackages` | none    | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
 | `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                    |
 
-### 7.2 Table Maintenance plugin keys (`gravitino.conf`)
+### 8.2 Table Maintenance plugin keys (`gravitino.conf`)
 
 Pipeline / provider keys stay under `gravitino.maintenance.*` (read by the plugin from the main
 server config). There is **no** TMS HTTP API and **no** dedicated TMS HTTP `host` / `httpPort`.
@@ -504,7 +532,7 @@ Existing provider keys continue under `gravitino.maintenance.*`, for example:
 - `gravitino.maintenance.gravitinoUri` / `gravitinoMetalake` / `gravitinoDefaultCatalog`
 - `gravitino.maintenance.recommender.*`, `updater.*`
 
-Per-task **minimum interval** defaults are under §7.4 (global → table override → code default).
+Per-task **minimum interval** defaults are under §8.4 (global → table override → code default).
 
 Example:
 
@@ -516,12 +544,12 @@ gravitino.maintenance.claimTimeoutMs = 300000
 gravitino.maintenance.gravitinoUri = http://127.0.0.1:8090
 gravitino.maintenance.gravitinoMetalake = test
 
-# Optional global min-interval overrides (omit → code defaults in §7.4)
+# Optional global min-interval overrides (omit → code defaults in §8.4)
 gravitino.maintenance.task.compaction.minIntervalMs = 3600000
 gravitino.maintenance.task.snapshot-expiry.minIntervalMs = 86400000
 ```
 
-### 7.3 Iceberg REST → TMS in-process event keys
+### 8.3 Iceberg REST → TMS in-process event keys
 
 Illustrative keys (exact names may be finalized in implementation).
 
@@ -541,7 +569,7 @@ gravitino.iceberg-rest.tableMaintenance.inProcess = true
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
 
-### 7.4 Task types and minimum interval (global default + table override)
+### 8.4 Task types and minimum interval (global default + table override)
 
 TMS recognizes four maintenance **task types** (aligned with product Compact policy surface):
 
@@ -592,29 +620,30 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 
 ---
 
-## 8. Work Plan and Checklist
+## 9. Work Plan and Checklist
 
-### 8.1 Suggested Work Plan
+### 9.1 Suggested Work Plan
 
 This design delivers the in-process plugin, IRC commit hook, `table_maintenance_event` log, shared
 `table_maintenance_state` + claim, and inline evaluate → submit pipeline.
 
 | Phase | Work item                              | Notes                                                                                      |
 | ----- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
-| 1     | Load the in-process plugin             | `TableMaintenanceRESTFeature` registers the callback; no HTTP resources.                   |
+| 1     | Load the in-process plugin             | `TableMaintenanceRESTFeature` registers the callback. No health or commit-event resource. |
 | 2     | Internal evaluate → submit pipeline    | `MaintenanceEvaluateSubmitPipeline` + Settings gates; unit tests.                          |
 | 3     | In-process IRC hook + event log        | IRC hook **INSERTs** the commit row (§6.3); TMS claim (§6).                                |
 | 4     | Hardening                              | Service metrics, graceful shutdown, user docs.                                             |
+| 5     | Optimizer CLI replacement APIs         | Ops resources in §7. Same commands as `gravitino-optimizer`.                               |
 
 #### Phase 1 checklist
 
-- [ ] Add `TableMaintenanceRESTFeature` (Jersey 2 `Feature`) that registers the in-process callback
-      and publishes no JAX-RS resources.
+- [ ] Add `TableMaintenanceRESTFeature` (Jersey 2 `Feature`) that registers the in-process callback.
+      Ops resources are added in phase 5. Do not add a health or commit-event resource.
 - [ ] Register via `gravitino.server.rest.extensionPackages` (illustrative package
       `org.apache.gravitino.maintenance.web.rest.feature`).
 - [ ] Package plugin jars with the main Gravitino server distribution (on the main server classpath).
 - [ ] Document `extensionPackages` enablement.
-- [ ] Add a unit test that the feature registers the callback and exposes no `/api/maintenance/...`
+- [ ] Add a unit test that the feature registers the callback and exposes no commit or health
       resource.
 
 #### Phase 2 checklist
@@ -627,7 +656,7 @@ This design delivers the in-process plugin, IRC commit hook, `table_maintenance_
 #### Phase 3 checklist
 
 - [ ] Add `IcebergCommitEventHandler` and main-server-registered in-process callback / SPI (§5.1.1 /
-      §7.3).
+      §8.3).
 - [ ] Add EntityStore migration for **`table_maintenance_event`** (§6.3) and
       **`table_maintenance_state`** (§6.2).
 - [ ] IRC post-commit hook **INSERTs** one `table_maintenance_event` row per commit (§6.3). TMS does
@@ -649,24 +678,33 @@ This design delivers the in-process plugin, IRC commit hook, `table_maintenance_
 - [ ] Graceful shutdown tests.
 - [ ] Update user-facing TMS / optimizer docs for in-process event mode.
 
-### 8.2 Review Checklist
+#### Phase 5 checklist
+
+- [ ] Add the seven ops resources in §7, each calling the existing optimizer command implementation.
+- [ ] Require WRITE on each target table; missing privilege returns 403.
+- [ ] `dryRun=true` returns the recommendation or job config and does not submit.
+- [ ] Accept statistics and metrics JSON Lines in the body. Do not accept a server `--file-path`.
+- [ ] Tests: each CLI `--type` maps to one route; the commit path does not call these routes.
+
+### 9.2 Review Checklist
 
 | Area         | Checklist                                                                                         |
 | ------------ | ------------------------------------------------------------------------------------------------- |
-| Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; no TMS HTTP API; IRC colocated in the same JVM. |
+| Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7). |
 | Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                            |
 | Event        | **In-process only** (§5.1.1); IRC hook inserts the commit row; TMS claims and evaluates; no HTTP/Kafka. |
+| Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required. |
 | Pipeline     | Inline on event: per-policy claim → gates → `Recommender` → Jobs; no metrics/monitor on event path. |
 | Durability   | IRC hook INSERTs one `table_maintenance_event` row per commit; TMS does not update it (§6.3). |
 | Rename/drop  | In-process lifecycle hook rewrites / purges string-keyed TMS rows (§6.4).                             |
 | Multi-node   | Shared `table_maintenance_state` + DB **claim** (§6.1–§6.2); no CronJob.                   |
 | Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                  |
 | Job boundary | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).            |
-| Security     | No TMS HTTP API.                                                                                  |
+| Security     | Ops APIs require table WRITE. No commit-event or health endpoint.                                |
 
 ---
 
-## 9. References
+## 10. References
 
 1. [Gravitino Iceberg REST service](../docs/iceberg-rest-service.md)
 2. [Gravitino Lance REST service](../docs/lance-rest-service.md)
