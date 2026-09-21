@@ -49,8 +49,7 @@ execution core.
    `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP). Lifecycle
    is owned by the main Gravitino webserver; APIs share port **8090**.
 2. **IRC in-process commit event**: After successful Iceberg commits via IRC, TMS receives a commit
-   event through a **main-server-registered in-process callback / SPI** (IRC aux and main server
-   share one JVM; see **§5.1.1**). The event handler runs gates, optional statistics Collect, policy
+   event through a **main-server-registered in-process callback / SPI** (IRC and main server share one JVM; see **§5.1.1**). The event handler runs gates, optional statistics Collect, policy
    trigger evaluation, and job submission in-process (see **§5.4**).
 3. **Reuse existing optimizer execution core**: Event handling invokes the same `Updater` /
    `Recommender` / job-submit paths already present in `maintenance/optimizer`, as **in-process
@@ -73,7 +72,7 @@ execution core.
    `gravitino-iceberg-rest-server.sh`-style entrypoint.
 2. **Dedicated auxiliary HTTP listener**: No `GravitinoAuxiliaryService`, no isolated
    `gravitino.maintenance.classpath`, and no dedicated TMS port (for example **9301**). TMS is not
-   an aux sibling of `iceberg-rest` / `lance-rest`.
+   a dedicated listener like `iceberg-rest` / `lance-rest`.
 3. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
    `StatisticsProvider`, `StrategyProvider`, `TableMetadataProvider`, or `JobSubmitter` contracts
    used by the event pipeline.
@@ -142,7 +141,7 @@ listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 Spark / Flink / Trino
         │  Iceberg REST commit
         v
-Gravitino Iceberg REST (IRC aux, typically :9001)
+Gravitino Iceberg REST (IRC, typically :9001)
         │  commit succeeded (same JVM as main server)
         │
         └─ in-process event callback / SPI  →  TMS handler on main-server classpath
@@ -175,10 +174,10 @@ Commit events are delivered **only in-process**. After a successful Iceberg comm
 
 | Requirement | Detail |
 | ----------- | ------ |
-| Deployment  | IRC aux (`iceberg-rest`) and the main Gravitino server share **one JVM**. |
+| Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**. |
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka. |
 | Payload     | Normalized `table_identifier` (`catalog.schema.table`). Policy selection uses Active policies + triggers, not commit metadata. |
-| Classloader | IRC uses an **isolated** aux classloader. Do **not** cast into TMS types. Register a callback on the main server that IRC can invoke across the boundary. |
+| Classloader | IRC may use an **isolated** classloader. Do **not** cast into TMS types. Register a callback on the main server that IRC can invoke across the boundary. |
 
 Notes:
 
@@ -220,8 +219,7 @@ Optimizer ops APIs are a **separate non-UI group** (§7.2), not shown in the con
 
 ### 5.3 User process (event-driven)
 
-1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` aux **in the same
-   JVM**, and turns on in-process commit events (§5.1.1 / §8.3).
+1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**, and turns on in-process commit events (§5.1.1 / §8.3).
 2. Operator creates / enables a maintenance policy and associates it to tables (or parents) via
    metalake Policy APIs, for example:
 
@@ -581,7 +579,7 @@ pipeline). Shipping Group B REST is a **follow-up**.
 | Key                                       | Default | Description                                                                                          |
 | ----------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `gravitino.server.rest.extensionPackages` | none    | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
-| `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** an aux service.                    |
+| `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                    |
 
 ### 8.2 Table Maintenance plugin keys (`gravitino.conf`)
 
@@ -629,8 +627,8 @@ Illustrative keys (exact names may be finalized in implementation).
 | --------------------------------------------------- | ------- | --------------------------------------------------------------------------- |
 | `gravitino.iceberg-rest.tableMaintenance.inProcess` | `false` | When `true`, IRC invokes the **main-server-registered event callback / SPI** after commit. |
 
-Because IRC uses an isolated aux classloader, the callback must be registered by the TMS plugin (for
-example on `GravitinoEnv`), not a direct cast to TMS implementation classes. IRC aux and the main
+Because IRC may use an isolated classloader, the callback must be registered by the TMS plugin (for
+example on `GravitinoEnv`), not a direct cast to TMS implementation classes. IRC and the main
 server must share **one JVM**.
 
 ```properties
@@ -713,7 +711,7 @@ submit pipeline.
 - [ ] Add `TableMaintenanceRESTFeature` (Jersey 2 `Feature`) and health JAX-RS resource.
 - [ ] Register via `gravitino.server.rest.extensionPackages` (illustrative package
       `org.apache.gravitino.maintenance.web.rest.feature`).
-- [ ] Package plugin jars with the main Gravitino server distribution (no aux classpath).
+- [ ] Package plugin jars with the main Gravitino server distribution (on the main server classpath).
 - [ ] Add `GET /api/maintenance/table/health` on **8090** (no `code` envelope).
 - [ ] Add sanitized error handling.
 - [ ] Document `extensionPackages` enablement.
