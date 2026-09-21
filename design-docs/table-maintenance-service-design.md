@@ -60,8 +60,10 @@ execution core.
    store or `/api/maintenance/table/policies` CRUD.
 6. **Multi-node safe event processing**: Use a shared DB claim on `table_maintenance_state` so only
    one TMS replica runs the evaluate → submit pipeline for a given `(table, policy)` at a time (§6).
-7. **Durable event log**: **Each event is written into the database** (`table_maintenance_event`)
-   **before** claim / evaluate, so a crash or restart cannot silently drop an event (§6.3).
+7. **Commit log**: Each successful Iceberg commit **INSERTs** one `table_maintenance_event` row
+   (`snapshot_id`, `created_at`). The row is not updated. A policy that has not finished another run
+   is read by joining that row to `table_maintenance_state` and `job_run_meta.job_finished_at`,
+   compared with `minIntervalMs` (§6.3).
 
 ---
 
@@ -148,11 +150,10 @@ Gravitino Iceberg REST (IRC, typically :9001)
                 v
          IcebergCommitEventHandler
                 │
-                ├─ INSERT table_maintenance_event (PENDING)  ← durable; no silent loss (§6.3)
+                ├─ INSERT table_maintenance_event (one row per commit — §6.3)
                 ├─ upsert state rows per Active policy
                 ├─ for each policy: atomic DB claim on that policy row (multi-node — §6)
-                ├─ claim lost for a policy → leave that policy for reclaim / another node
-                ├─ pipeline done → UPDATE event terminal status
+                ├─ claim lost for a policy → leave that policy for another node
                 v
          MaintenanceEvaluateSubmitPipeline
                 │
@@ -174,7 +175,7 @@ Commit events are delivered **only in-process**. After a successful Iceberg comm
 | ----------- | ------ |
 | Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**. |
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka. |
-| Payload     | Normalized `table_identifier` (`catalog.schema.table`). Policy selection uses Active policies + triggers, not commit metadata. |
+| Payload     | Normalized `table_identifier` (`catalog.schema.table`) and the committed `snapshot_id`. Policy selection uses Active policies + triggers. |
 
 Deployment:
 
@@ -199,7 +200,7 @@ REST prefix for TMS **health** (and optional later ops) on **8090**:
 | `IcebergCommitEventHandler`          | In-process event entry; persists event; upserts state; claims; runs pipeline.                          |
 | `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`.                                            |
 | `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / rename (§6.1–§6.2, §6.4). |
-| `TableMaintenanceEventStore`        | Shared DB access for durable `table_maintenance_event` insert / terminal update / reclaim / rename (§6.3–§6.4). |
+| `TableMaintenanceEventStore`        | Shared DB access for `table_maintenance_event` insert / rename / drop (§6.3–§6.4). |
 | `IcebergTableLifecycleHook`         | In-process IRC rename/drop hook: rewrite or purge TMS rows keyed by `table_identifier` (§6.4).     |
 | Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for event path.                |
 
@@ -229,10 +230,10 @@ REST prefix for TMS **health** (and optional later ops) on **8090**:
 
 3. Engines write through Gravitino Iceberg REST. On commit success, IRC delivers a commit event to
    TMS **in-process** (§5.1.1).
-4. TMS **writes a `table_maintenance_event` row first** (keyed by `table_identifier`), then resolves
-   Active policies, upserts one state row per `(table_identifier, policy)`, and for each policy
-   claims that row, runs gates → trigger → submits when thresholds are met, then marks the event
-   terminal.
+4. TMS **INSERTs one `table_maintenance_event` row** for the commit (`table_identifier`,
+   `snapshot_id`), then resolves Active policies, upserts one state row per
+   `(table_identifier, policy)`, and for each policy claims that row, runs gates → trigger →
+   submits when thresholds are met. The event row is not updated.
 5. Operators observe runs in the Gravitino **Jobs** UI / APIs.
 
 ### 5.4 Implementation process (event path)
@@ -244,30 +245,29 @@ IRC commit succeeded (same JVM)
         v
  IcebergCommitEventHandler
         │
-        ├─ INSERT table_maintenance_event status=PENDING (§6.3)  ← durable first
+        ├─ INSERT table_maintenance_event (§6.3)  ← one new row per commit
         ├─ resolve Active policies (StrategyProvider / listPolicies)
         ├─ upsert one state row per policy (§6.2)
         v
  MaintenanceEvaluateSubmitPipeline
         ├─ for each Active policy:
         │     atomic claim: that policy row IDLE → RUNNING (§6.1)
-        │       └─ claim failed → skip this policy (another node / reclaim)
+        │       └─ claim failed → skip this policy (another node holds it)
         │     if job_id still QUEUED/STARTED → release claim; skip
         │     else apply min-interval gate; Recommender.submitForStrategyName(...)
         │       └── JobSubmitter → rewrite / … when trigger passes
         │       └── write job_id on that policy row
         │     release claim (state → IDLE on that policy row; do not DELETE)
-        └─ UPDATE table_maintenance_event → PROCESSED | SKIPPED | FAILED (§6.3)
 ```
 
 The in-process handler runs the gate + submit path on the calling thread (or a bounded executor
 owned by the plugin — implementation detail). Maintenance Spark jobs are **submitted asynchronously**
-via the job framework; the event path does not block on Spark completion. **Every accepted event has
-a DB row before evaluate runs.** Per-policy claim keeps evaluate → submit single-flight for each
+via the job framework; the event path does not block on Spark completion. **Every commit INSERTs an
+event row; that row is not updated.** Per-policy claim keeps evaluate → submit single-flight for each
 `(table, policy)` across nodes; per-policy `job_id` also prevents a later event from submitting again
-while the previous job for that policy is still running (and supplies `job_finished_at` for cooldown
-when configured). A reclaim loop (startup + periodic) finishes `PENDING` / `DEFERRED` / retryable
-`FAILED` events so crashes cannot silently drop events (§6.3).
+while the previous job for that policy is still running. `job_run_meta.job_finished_at` is the last
+finish time used with `minIntervalMs` (§6.3). Stale `RUNNING` claims are released after
+`claimTimeoutMs` (§6.2).
 
 **Gate order:**
 
@@ -293,7 +293,7 @@ Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reas
 
 | Table                      | Role                                                                 |
 | -------------------------- | -------------------------------------------------------------------- |
-| `table_maintenance_event`  | **Durable event log** — insert before evaluate so no event is lost (§6.3) |
+| `table_maintenance_event`  | **Commit log** — one INSERT per successful Iceberg commit (§6.3) |
 | `table_maintenance_state`  | Multi-node **claim** + last `job_id` per policy (§6.1–§6.2)          |
 
 `table_maintenance_state` primary key is `(metalake_id, table_identifier, policy_id)` — **one row
@@ -302,7 +302,7 @@ independently.
 
 Policy attachment remains in `policy_relation_meta` (resolved via `listPolicies()` / object
 identifier APIs); the state table stores multi-node claim state and the last `job_id` per policy.
-The event table stores every event attempt independently of claim success. `metalake_id` and
+The event table stores one row per commit. `metalake_id` and
 `policy_id` still come from Gravitino Policy / metalake metadata; only **table** identity avoids
 `table_meta`.
 
@@ -311,7 +311,7 @@ The event table stores every event attempt independently of claim success. `meta
 ```text
 Node A / Node B — both receive an event for same table + same policy
         │
-        ├─ both INSERT table_maintenance_event (PENDING)   ← durable first (§6.3)
+        ├─ both INSERT table_maintenance_event             ← one row per commit (§6.3)
         ├─ both resolve Active policies; upsert one row per policy
         ├─ both attempt per-policy claim:
         │     UPDATE … SET state=RUNNING
@@ -325,8 +325,8 @@ Different policies on the same table may be claimed by different nodes concurren
 Gate checks alone are insufficient (read race). **Claim is the write lock** for that policy row;
 gates for a policy run only after its claim succeeds. Each attached policy is unique for a table, so
 per-policy claim prevents double-submit of the same job without locking unrelated policies.
-**Event insert is not the lock** — it is the durability / reclaim source so a deferred or crashed
-event is not forgotten.
+**Event insert is not the lock.** It records the commit. The claim on `table_maintenance_state` is
+the lock.
 
 ### 6.2 State table (shared store)
 
@@ -348,8 +348,7 @@ Table keying follows optimizer **`table_metrics.table_identifier`** (string iden
 
 **Primary key:** (`metalake_id`, `table_identifier`, `policy_id`).
 
-`state` has two values: `IDLE` (unclaimed) and `RUNNING` (a node holds evaluate → submit). Queued or
-deferred work stays on `table_maintenance_event.status`, not on this column.
+`state` has two values: `IDLE` (unclaimed) and `RUNNING` (a node holds evaluate → submit).
 
 **Lifecycle:**
 
@@ -381,62 +380,53 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
   COMMENT 'TMS multi-node event claim + last policy job';
 ```
 
-### 6.3 Durable event log (`table_maintenance_event`)
+### 6.3 Commit log (`table_maintenance_event`)
 
-**Requirement:** each in-process commit event is written into this table **before** claim / evaluate,
-so TMS process death or a claim race cannot silently drop the event. Like `table_metrics`, rows key
-by **`table_identifier`** string — **not** `table_meta.table_id` — so IRC tables without Gravitino
-table metadata still persist.
+Each successful Iceberg commit **INSERTs** one row. The handler does not update that row. Like
+`table_metrics`, rows key by **`table_identifier`** string — **not** `table_meta.table_id` — so IRC
+tables without Gravitino table metadata still persist. `snapshot_id` comes from the commit.
 
 ```text
 in-process callback
       │
       ▼
-INSERT table_maintenance_event   ← durable; status=PENDING
+INSERT table_maintenance_event   ← one new row; never UPDATE
       │
       ▼
 upsert + claim (table_maintenance_state) → pipeline (§5.4)
-      │
-      ▼
-UPDATE table_maintenance_event
-  status = PROCESSED | SKIPPED | DEFERRED | FAILED
 ```
 
-| Column             | Type                       | Notes                                                                 |
-| ------------------ | -------------------------- | --------------------------------------------------------------------- |
-| `event_id`         | `BIGINT UNSIGNED NOT NULL` | Surrogate PK (auto-increment)                                         |
-| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake from config / policy resolution                              |
-| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table` (event payload)                     |
-| `ingress`          | `VARCHAR(16) NOT NULL`     | Always `IN_PROCESS`                                              |
-| `status`           | `VARCHAR(16) NOT NULL`     | `PENDING` / `PROCESSING` / `PROCESSED` / `SKIPPED` / `DEFERRED` / `FAILED` |
-| `result`           | `VARCHAR(32) NULL`         | Internal outcome: `accepted` / `submitted` / `deferred` / …           |
-| `job_id`           | `BIGINT UNSIGNED NULL`     | Set when a maintenance job was submitted                              |
-| `attempt_count`    | `INT NOT NULL`             | Incremented on reclaim / retry                                        |
-| `last_error`       | `VARCHAR(1024) NULL`       | Last failure message (no raw stacks)                                  |
-| `created_at`       | `BIGINT NOT NULL`          | Epoch millis at insert                                                |
-| `updated_at`       | `BIGINT NOT NULL`          | Epoch millis at last status change                                    |
+| Column             | Type                       | Notes                                              |
+| ------------------ | -------------------------- | -------------------------------------------------- |
+| `event_id`         | `BIGINT UNSIGNED NOT NULL` | Surrogate PK (auto-increment)                      |
+| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake from config / policy resolution           |
+| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table`                  |
+| `snapshot_id`      | `BIGINT NOT NULL`          | Snapshot of this commit                            |
+| `created_at`       | `BIGINT NOT NULL`          | Epoch millis when the row was inserted             |
 
-**Primary key:** (`event_id`). **Index:** (`status`, `updated_at`), (`metalake_id`,
-`table_identifier`, `created_at`).
+**Primary key:** (`event_id`). **Index:** (`metalake_id`, `table_identifier`, `created_at`).
 
-The event payload is only `table_identifier` (§5.1.1), so there is **no** unique key on snapshot id.
-Duplicate callbacks (if any) may insert multiple rows for the same table; claim + per-policy
-`job_id` still prevent double-submit. Optional follow-up: persist Iceberg `snapshotId` (when IRC
-provides it) and add a unique `(table_identifier, snapshot_id)` for stronger idempotency.
+There is **no** unique key on `snapshot_id`. Every commit INSERTs, including a repeated callback for
+the same snapshot. Claim and per-policy `job_id` still prevent double-submit (§6.1–§6.2).
 
-**Lifecycle:**
+**Which policy has not finished another run**
 
-1. Event handler: `INSERT` with `status=PENDING`, then mark `PROCESSING` while policies are claimed
-   and evaluated.
-2. Pipeline terminal: `PROCESSED` (evaluated / submitted), `SKIPPED` (no Active policy / noop),
-   `FAILED` (retryable evaluate error), or `DEFERRED` (no policy claimed / hard gate — another node
-   or reclaim will finish).
-3. **Reclaim** (plugin start + periodic interval): select `status IN ('PENDING','DEFERRED','FAILED')`
-   with `attempt_count` under max; skip policy rows that currently have a `RUNNING` claim; re-enter
-   per-policy claim → pipeline; update terminal status. This meets **no silent event loss** after
-   process crashes mid-handler.
-4. Retention: purge terminal rows older than a configured TTL (follow-up config; default e.g. 7–30
-   days).
+Join the commit row to the policy rows for that table, then to the last job:
+
+```text
+table_maintenance_event e
+  JOIN table_maintenance_state s
+    ON s.metalake_id = e.metalake_id
+   AND s.table_identifier = e.table_identifier
+  JOIN job_run_meta j
+    ON j.job_run_id = s.job_id
+```
+
+`j.job_finished_at` is the end time of that policy's last job. Resolve `minIntervalMs` for the
+policy's task type (§8.4). When `e.created_at - j.job_finished_at > minIntervalMs` and `s.job_id`
+still points at that finished job, the policy has not completed another run after the interval
+elapsed. If `j.job_run_status` is still in flight (`QUEUED` / `STARTED`), the job is running; that
+gap does not mean the policy missed a run. `job_finished_at` is `0` until the job finishes.
 
 Illustrative MySQL DDL:
 
@@ -445,19 +435,12 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_event` (
     `event_id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'commit event id',
     `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
     `table_identifier` VARCHAR(512) NOT NULL COMMENT 'normalized catalog.schema.table',
-    `ingress` VARCHAR(16) NOT NULL COMMENT 'IN_PROCESS',
-    `status` VARCHAR(16) NOT NULL COMMENT 'PENDING|PROCESSING|PROCESSED|SKIPPED|DEFERRED|FAILED',
-    `result` VARCHAR(32) NULL COMMENT 'accepted|submitted|deferred|… when known',
-    `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'submitted job_run_id when any',
-    `attempt_count` INT NOT NULL DEFAULT 0 COMMENT 'reclaim / retry count',
-    `last_error` VARCHAR(1024) NULL COMMENT 'last failure message',
+    `snapshot_id` BIGINT(20) NOT NULL COMMENT 'snapshot id of this commit',
     `created_at` BIGINT(20) NOT NULL COMMENT 'insert time epoch millis',
-    `updated_at` BIGINT(20) NOT NULL COMMENT 'last update epoch millis',
     PRIMARY KEY (`event_id`),
-    KEY `idx_status_updated` (`status`, `updated_at`),
     KEY `idx_table_created` (`metalake_id`, `table_identifier`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'TMS durable commit-event log (no silent event loss)';
+  COMMENT 'TMS commit log; one INSERT per Iceberg commit';
 ```
 
 ### 6.4 Table rename / drop lifecycle (required with string keys)
@@ -478,10 +461,9 @@ commit-event callback — §5.1.1). Prefer wiring next to existing IRC rename/dr
    Preserve `state`, `job_id`, `updated_at` (except bump `updated_at` for audit). If a conflicting
    destination key already exists (rare), fail the rewrite loudly or merge per implementation policy
    — do not silently drop `job_id`.
-2. **`table_maintenance_event`:** rewrite **non-terminal** rows
-   (`PENDING` / `PROCESSING` / `DEFERRED` / retryable `FAILED`) to `new_identifier` so reclaim
-   continues under the new name. **Terminal** rows may keep the old identifier as audit history
-   (optional: also rewrite for simpler queries).
+2. **`table_maintenance_event`:** rewrite every row for the metalake:
+   `UPDATE … SET table_identifier = new WHERE metalake_id = ? AND table_identifier = old`, so later
+   joins still find those commits.
 3. Policy attachments on Gravitino metadata objects (when present via `metadata_object_id`) are
    outside this table rewrite; object-id bindings survive rename when `table_meta` exists. String-
    based policy attachments, if any, must be updated by the Policy / IRC reconcile path separately.
@@ -490,8 +472,7 @@ commit-event callback — §5.1.1). Prefer wiring next to existing IRC rename/dr
 
 1. **`table_maintenance_state`:** `DELETE` (or soft-clear) all rows for
    `(metalake_id, table_identifier)`.
-2. **`table_maintenance_event`:** mark incomplete rows `SKIPPED` / `FAILED` with reason `table_dropped`,
-   or delete them; do not reclaim after drop.
+2. **`table_maintenance_event`:** `DELETE` rows for `(metalake_id, table_identifier)`.
 3. In-flight Spark jobs are **not** cancelled by this hook (job framework owns lifecycle); operators
    cancel via Jobs APIs if needed.
 
@@ -572,11 +553,9 @@ Pipeline / provider keys stay under `gravitino.maintenance.*` (read by the plugi
 server config). There is **no** dedicated TMS HTTP `host` / `httpPort` — health (and optional later
 ops) bind on the main webserver (**8090**).
 
-| Key                      | Default  | Description                                              |
-| ------------------------ | -------- | -------------------------------------------------------- |
-| `claimTimeoutMs`         | `300000` | Reclaim stale `RUNNING` claim rows after worker failure. |
-| `eventReclaimIntervalMs` | `60000`  | Scan incomplete `table_maintenance_event` rows (§6.3).   |
-| `eventMaxAttempts`       | `5`      | Max reclaim attempts before leaving `FAILED`.            |
+| Key              | Default  | Description                                              |
+| ---------------- | -------- | -------------------------------------------------------- |
+| `claimTimeoutMs` | `300000` | Reclaim stale `RUNNING` claim rows after worker failure. |
 
 Existing provider keys continue under `gravitino.maintenance.*`, for example:
 
@@ -592,8 +571,6 @@ gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.r
 gravitino.auxService.names = iceberg-rest,lance-rest
 
 gravitino.maintenance.claimTimeoutMs = 300000
-gravitino.maintenance.eventReclaimIntervalMs = 60000
-gravitino.maintenance.eventMaxAttempts = 5
 gravitino.maintenance.gravitinoUri = http://127.0.0.1:8090
 gravitino.maintenance.gravitinoMetalake = test
 
@@ -685,7 +662,7 @@ submit pipeline.
 | ----- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
 | 1     | REST plugin + health                   | `TableMaintenanceRESTFeature`, `GET …/health`, errors, enablement docs.                    |
 | 2     | Internal evaluate → submit pipeline    | `MaintenanceEvaluateSubmitPipeline` + Settings gates; unit tests.                          |
-| 3     | In-process IRC hook + event log        | Callback / SPI (§5.1.1); **durable event insert** + claim (§6).                            |
+| 3     | In-process IRC hook + event log        | Callback / SPI (§5.1.1); **INSERT one commit row** + claim (§6).                           |
 | 4     | Hardening                              | Service metrics, graceful shutdown, user docs.                                             |
 
 #### Phase 1 checklist
@@ -712,19 +689,22 @@ submit pipeline.
       §8.3).
 - [ ] Add EntityStore migration for **`table_maintenance_event`** (§6.3) and
       **`table_maintenance_state`** (§6.2).
-- [ ] Persist every event **before** claim / evaluate; terminal status update; reclaim loop
-      (`eventReclaimIntervalMs` / `eventMaxAttempts`).
+- [ ] Persist every commit with **INSERT** into `table_maintenance_event` (§6.3). Do not update
+      the row. Read "policy has not finished another run" by joining `created_at` to
+      `job_run_meta.job_finished_at` and `minIntervalMs`.
 - [ ] Upsert + **per-policy claim** on `table_maintenance_state` (§6.1).
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **rename/drop** in-process hook to rewrite / purge `table_maintenance_state` and
-      incomplete `table_maintenance_event` rows (§6.4).
-- [ ] Integration tests: in-process event → event row → claim → pipeline once; crash after insert →
-      reclaim; no double-submit; rename updates state `table_identifier`; drop clears state.
+      `table_maintenance_event` rows (§6.4).
+- [ ] Integration tests: each commit inserts one event row; claim runs the pipeline once; no
+      double-submit; `created_at - job_finished_at > minIntervalMs` with the same finished `job_id`
+      means that policy has not completed another run; an in-flight job does not; rename updates
+      `table_identifier`; drop clears state and event rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 4 checklist
 
-- [ ] Service metrics: event counts, deferred/submit ratios, claim conflicts, failures.
+- [ ] Service metrics: event insert counts, submit counts, claim conflicts, failures.
 - [ ] Graceful shutdown tests.
 - [ ] Update user-facing TMS / optimizer docs for in-process event mode.
 - [ ] Add OpenAPI for health if published; validate with `./gradlew :docs:build`.
@@ -738,7 +718,7 @@ submit pipeline.
 | Event        | **In-process only** (§5.1.1); shared handler + durable event + DB claim; no HTTP/Kafka ingress.   |
 | Public API   | Group A health (§7); Group B ops non-UI + table WRITE (§7.2); no commit-event REST.        |
 | Pipeline     | Inline on event: per-policy claim → gates → `Recommender` → Jobs; no metrics/monitor on event path. |
-| Durability   | Every event inserted into `table_maintenance_event` before evaluate; reclaim incomplete rows (§6.3). |
+| Durability   | Every commit INSERTs one `table_maintenance_event` row; the row is not updated (§6.3). |
 | Rename/drop  | In-process lifecycle hook rewrites / purges string-keyed TMS rows (§6.4).                             |
 | Multi-node   | Shared `table_maintenance_state` + DB **claim** (§6.1–§6.2); no CronJob.                   |
 | Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                  |
