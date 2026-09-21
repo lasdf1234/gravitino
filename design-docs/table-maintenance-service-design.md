@@ -80,7 +80,7 @@ execution core.
 4. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
    for event-driven path.
 5. **HTTP or Kafka commit-event ingress**: No `POST …/events/iceberg-commit` for IRC, and no Kafka
-   produce/consume path in MVP. Commit events are **in-process only** (§5.1.1). Remote IRC / cross-JVM
+   produce/consume path. Commit events are **in-process only** (§5.1.1). Remote IRC / cross-JVM
    delivery is out of scope (follow-up if needed).
 
 ---
