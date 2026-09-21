@@ -109,10 +109,6 @@ statistics Collect, `Recommender` trigger, and job submit.
 **Pros:** One HTTP port for ops/health; reuses main-server auth filters; no remote event hop on the
 commit path; reuses Policy + Jobs on the same server; matches Enterprise plugin packaging.
 
-**Cons:** TMS shares the main webserver classpath (unlike isolated aux services); requires IRC aux
-and main server in **one JVM**; gate-deferred tables retry only on the next commit; no cold-table
-fallback without follow-up CronJob.
-
 **Decision:** **Chosen** for MVP.
 
 ### 4.3 Option C: Independent long-running Table Maintenance Service process
