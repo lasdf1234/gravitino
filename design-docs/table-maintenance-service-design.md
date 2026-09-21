@@ -107,7 +107,7 @@ Register Table Maintenance as a Jersey 2 `Feature` through
 statistics Collect, `Recommender` trigger, and job submit.
 
 **Pros:** One HTTP port for ops/health; reuses main-server auth filters; no remote event hop on the
-commit path; reuses Policy + Jobs on the same server; matches Enterprise plugin packaging.
+commit path; reuses Policy + Jobs on the same server; matches plugin packaging.
 
 **Decision:** **Chosen** for MVP.
 
@@ -127,7 +127,7 @@ listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 
 **Pros:** Classpath isolation similar to `iceberg-rest` / `lance-rest`.
 
-**Cons:** Extra port and aux enablement; diverges from Enterprise plugins that already extend
+**Cons:** Extra port and aux enablement; diverges from plugins that already extend
 **8090** via `extensionPackages`.
 
 **Decision:** Rejected. Prefer Option B.
