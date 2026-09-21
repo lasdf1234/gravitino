@@ -279,11 +279,10 @@ crashes cannot silently drop events (§6.3).
 
 **Gate order:**
 
-1. Global concurrency limits (Collect and/or maintenance submits).
-2. Per-policy in-flight / min-interval via `job_id` → `job_run_meta` and resolved `minIntervalMs`
+1. Per-policy in-flight / min-interval via `job_id` → `job_run_meta` and resolved `minIntervalMs`
    (table prop → global conf → code default; §8.4).
-3. Policy trigger (`Recommender`) for each remaining Active policy.
-4. Submit maintenance job when trigger passes; persist `job_id`.
+2. Policy trigger (`Recommender`) for each remaining Active policy.
+3. Submit maintenance job when trigger passes; persist `job_id`.
 
 ---
 
