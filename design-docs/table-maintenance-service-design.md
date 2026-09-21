@@ -17,11 +17,11 @@
   under the License.
 -->
 
-# Design of Table Maintenance Service in Gravitino Enterprise
+# Design of Table Maintenance Service in Gravitino
 
 ## 1. Background
 
-The Table Maintenance Service (TMS) in Gravitino Enterprise is currently an alpha feature.
+The Table Maintenance Service (TMS) in Gravitino is currently an alpha feature.
 The `maintenance/optimizer` package already contains the execution core for statistics collection,
 rule evaluation, strategy recommendation, metrics query, and job submission (`Updater`,
 `Recommender`, providers, `JobSubmitter`).
@@ -118,7 +118,7 @@ commit path; reuses Policy + Jobs on the same server; matches plugin packaging.
 **Cons:** Extra deployable; duplicates server lifecycle patterns already covered by the main
 webserver plugin.
 
-**Decision:** Rejected for Enterprise. Prefer the 8090 REST plugin.
+**Decision:** Rejected. Prefer the 8090 REST plugin.
 
 ### 4.4 Option E: Dedicated aux Jetty listener (:9301)
 
@@ -552,7 +552,7 @@ the plugin is shutting down.
 These APIs expose optimizer capabilities as a **separate HTTP group** for scripts and advanced
 operators:
 
-- **Not** shown in the Enterprise UI Compact-policy console.
+- **Not** shown in the UI Compact-policy console.
 - **Authorization:** caller must have **WRITE** privilege on the target table (Gravitino table write
   privilege / equivalent). Missing privilege → **403**. List/query ops that target a table also
   require WRITE on that table for this group (ops-only surface, not a general read API).
