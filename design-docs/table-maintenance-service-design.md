@@ -47,8 +47,7 @@ execution core.
 
 1. **Main REST plugin on 8090**: Enable Table Maintenance through
    `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP). Lifecycle
-   is owned by the main Gravitino webserver; APIs share port **8090**
-   (health in MVP; optional ops APIs later).
+   is owned by the main Gravitino webserver; APIs share port **8090**.
 2. **IRC in-process commit event**: After successful Iceberg commits via IRC, TMS receives a commit
    event through a **main-server-registered in-process callback / SPI** (IRC aux and main server
    share one JVM; see **§5.1.1**). The event handler runs gates, optional statistics Collect, policy
