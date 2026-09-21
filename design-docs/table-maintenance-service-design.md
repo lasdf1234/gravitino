@@ -176,10 +176,10 @@ post-commit hook** INSERTs one `table_maintenance_event` row, then invokes a
 `IcebergCommitEventHandler` → `MaintenanceEvaluateSubmitPipeline` + `table_maintenance_state` claim.
 TMS does not write the event row, and the row is not updated.
 
-| Requirement | Detail |
-| ----------- | ------ |
-| Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**. |
-| Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka. |
+| Requirement | Detail                                                                                                                                    |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**.                                                                     |
+| Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka.                                                |
 | Payload     | Normalized `table_identifier` (`catalog.schema.table`) and the committed `snapshot_id`. Policy selection uses Active policies + triggers. |
 
 Deployment:
@@ -193,15 +193,15 @@ Deployment:
 
 ### 5.2 Internal structure
 
-| Part                                | Responsibility                                                                                         |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Part                                | Responsibility                                                                                                                                           |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; registers the in-process callback and the ops resources (§7). No health or commit-event resource. |
-| `IcebergCommitEventHandler`          | TMS in-process entry after the IRC hook has inserted the event; upserts state; claims; runs pipeline. |
-| `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`.                                            |
-| `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / rename (§6.1–§6.2, §6.4). |
-| `TableMaintenanceEventStore`        | Shared DB access for `table_maintenance_event` insert / rename / drop (§6.3–§6.4). |
-| `IcebergTableLifecycleHook`         | In-process IRC rename/drop hook: rewrite or purge TMS rows keyed by `table_identifier` (§6.4).     |
-| Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for event path.                |
+| `IcebergCommitEventHandler`         | TMS in-process entry after the IRC hook has inserted the event; upserts state; claims; runs pipeline.                                                    |
+| `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`.                                                                                               |
+| `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / rename (§6.1–§6.2, §6.4).                                                      |
+| `TableMaintenanceEventStore`        | Shared DB access for `table_maintenance_event` insert / rename / drop (§6.3–§6.4).                                                                       |
+| `IcebergTableLifecycleHook`         | In-process IRC rename/drop hook: rewrite or purge TMS rows keyed by `table_identifier` (§6.4).                                                           |
+| Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for event path.                                                                |
 
 ### 5.3 User process (event-driven)
 
@@ -298,10 +298,10 @@ Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reas
 `table_metrics` stores `table_identifier`, and `iceberg_cleanup_job` keys by
 `catalog_id` + `namespace` + `table_name`). TMS must not require Gravitino table metadata to exist.
 
-| Table                      | Role                                                                 |
-| -------------------------- | -------------------------------------------------------------------- |
-| `table_maintenance_event`  | **Commit log** — one INSERT per successful Iceberg commit (§6.3) |
-| `table_maintenance_state`  | Multi-node **claim** + in-flight `job_id` and finished `last_job_id` per policy (§6.1–§6.2) |
+| Table                     | Role                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------- |
+| `table_maintenance_event` | **Commit log** — one INSERT per successful Iceberg commit (§6.3)                            |
+| `table_maintenance_state` | Multi-node **claim** + in-flight `job_id` and finished `last_job_id` per policy (§6.1–§6.2) |
 
 `table_maintenance_state` primary key is `(metalake_id, table_identifier, policy_id)` — **one row
 per attached maintenance policy**. Claim is **per policy row**: each `(table, policy)` is claimed
@@ -345,15 +345,15 @@ Table keying follows optimizer **`table_metrics.table_identifier`** (string iden
 
 **Table name:** `table_maintenance_state`
 
-| Column             | Type                       | Notes                                                              |
-| ------------------ | -------------------------- | ------------------------------------------------------------------ |
-| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake that owns the maintenance policy                          |
-| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table` (same form as optimizer / event payload) |
-| `policy_id`        | `BIGINT UNSIGNED NOT NULL` | Real `policy_meta.policy_id`                                       |
-| `state`            | `VARCHAR(16) NOT NULL`     | `IDLE` / `RUNNING` only (per policy row)                           |
-| `updated_at`       | `BIGINT NOT NULL`          | Epoch millis; claim / reclaim                                      |
+| Column             | Type                       | Notes                                                                                     |
+| ------------------ | -------------------------- | ----------------------------------------------------------------------------------------- |
+| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake that owns the maintenance policy                                                 |
+| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table` (same form as optimizer / event payload)                |
+| `policy_id`        | `BIGINT UNSIGNED NOT NULL` | Real `policy_meta.policy_id`                                                              |
+| `state`            | `VARCHAR(16) NOT NULL`     | `IDLE` / `RUNNING` only (per policy row)                                                  |
+| `updated_at`       | `BIGINT NOT NULL`          | Epoch millis; claim / reclaim                                                             |
 | `job_id`           | `BIGINT UNSIGNED NULL`     | In-flight job for **this policy** (`job_run_meta.job_run_id`). Null when none is running. |
-| `last_job_id`      | `BIGINT UNSIGNED NULL`     | Last finished job for **this policy**. Its `job_finished_at` is the previous end time. |
+| `last_job_id`      | `BIGINT UNSIGNED NULL`     | Last finished job for **this policy**. Its `job_finished_at` is the previous end time.    |
 
 **Primary key:** (`metalake_id`, `table_identifier`, `policy_id`).
 
@@ -407,13 +407,13 @@ INSERT table_maintenance_event   ← one new row; never UPDATE
 in-process callback → TMS upsert + claim (table_maintenance_state) → pipeline (§5.4)
 ```
 
-| Column             | Type                       | Notes                                              |
-| ------------------ | -------------------------- | -------------------------------------------------- |
-| `event_id`         | `BIGINT UNSIGNED NOT NULL` | Surrogate PK (auto-increment)                      |
-| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake from config / policy resolution           |
-| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table`                  |
-| `snapshot_id`      | `BIGINT NOT NULL`          | Snapshot of this commit                            |
-| `created_at`       | `BIGINT NOT NULL`          | Epoch millis when the row was inserted             |
+| Column             | Type                       | Notes                                    |
+| ------------------ | -------------------------- | ---------------------------------------- |
+| `event_id`         | `BIGINT UNSIGNED NOT NULL` | Surrogate PK (auto-increment)            |
+| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake from config / policy resolution |
+| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table`        |
+| `snapshot_id`      | `BIGINT NOT NULL`          | Snapshot of this commit                  |
+| `created_at`       | `BIGINT NOT NULL`          | Epoch millis when the row was inserted   |
 
 **Primary key:** (`event_id`). **Index:** (`metalake_id`, `table_identifier`, `created_at`).
 
@@ -504,15 +504,15 @@ the main webserver (**8090**).
   in the body. The API does not accept a server `--file-path`.
 - `dryRun=true` returns the recommendation or job config and does not submit.
 
-| CLI `--type` | Method | Path | Body or query |
-| --- | --- | --- | --- |
-| `submit-strategy-jobs` | `POST` | `/api/maintenance/table/ops/strategy-jobs` | `identifiers`, `strategyName`, `dryRun`, `limit` |
+| CLI `--type`              | Method | Path                                           | Body or query                                                                                      |
+| ------------------------- | ------ | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `submit-strategy-jobs`    | `POST` | `/api/maintenance/table/ops/strategy-jobs`     | `identifiers`, `strategyName`, `dryRun`, `limit`                                                   |
 | `submit-update-stats-job` | `POST` | `/api/maintenance/table/ops/update-stats-jobs` | `identifiers`, `dryRun`, `updateMode` (`stats` / `metrics` / `all`), `updaterOptions`, `sparkConf` |
-| `update-statistics` | `POST` | `/api/maintenance/table/ops/statistics` | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines) |
-| `append-metrics` | `POST` | `/api/maintenance/table/ops/metrics` | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines) |
-| `monitor-metrics` | `POST` | `/api/maintenance/table/ops/metrics/monitor` | `identifiers`, `actionTime`, `rangeSeconds`, `partitionPath` |
-| `list-table-metrics` | `GET` | `/api/maintenance/table/ops/metrics/tables` | `identifiers`, `partitionPath` |
-| `list-job-metrics` | `GET` | `/api/maintenance/table/ops/metrics/jobs` | `identifiers` |
+| `update-statistics`       | `POST` | `/api/maintenance/table/ops/statistics`        | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines)                                  |
+| `append-metrics`          | `POST` | `/api/maintenance/table/ops/metrics`           | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines)                                  |
+| `monitor-metrics`         | `POST` | `/api/maintenance/table/ops/metrics/monitor`   | `identifiers`, `actionTime`, `rangeSeconds`, `partitionPath`                                       |
+| `list-table-metrics`      | `GET`  | `/api/maintenance/table/ops/metrics/tables`    | `identifiers`, `partitionPath`                                                                     |
+| `list-job-metrics`        | `GET`  | `/api/maintenance/table/ops/metrics/jobs`      | `identifiers`                                                                                      |
 
 Each route calls the existing optimizer command implementation. The IRC hook and
 `MaintenanceEvaluateSubmitPipeline` do not call this group.
@@ -523,18 +523,18 @@ Each route calls the existing optimizer command implementation. The IRC hook and
 
 ### 8.1 Enablement keys (`gravitino.conf`)
 
-| Key                                       | Default | Description                                                                                          |
-| ----------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `gravitino.server.rest.extensionPackages` | none    | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
-| `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                    |
-| `gravitino.maintenance.claimTimeoutMs`    | `300000` | Reclaim a stale `RUNNING` claim after the worker fails.                                             |
+| Key                                       | Default  | Description                                                                                               |
+| ----------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `gravitino.server.rest.extensionPackages` | none     | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
+| `gravitino.auxService.names`              | none     | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                       |
+| `gravitino.maintenance.claimTimeoutMs`    | `300000` | Reclaim a stale `RUNNING` claim after the worker fails.                                                   |
 
 ### 8.2 Iceberg REST → TMS in-process event keys
 
 Illustrative keys (exact names may be finalized in implementation).
 
-| Key (illustrative)                                  | Default | Description                                                                 |
-| --------------------------------------------------- | ------- | --------------------------------------------------------------------------- |
+| Key (illustrative)                                  | Default | Description                                                                                |
+| --------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------ |
 | `gravitino.iceberg-rest.tableMaintenance.inProcess` | `false` | When `true`, IRC invokes the **main-server-registered event callback / SPI** after commit. |
 
 Because IRC may use an isolated classloader, the callback must be registered by the TMS plugin (for
@@ -608,13 +608,13 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 This design delivers the in-process plugin, IRC commit hook, `table_maintenance_event` log, shared
 `table_maintenance_state` + claim, and inline evaluate → submit pipeline.
 
-| Phase | Work item                              | Notes                                                                                      |
-| ----- | -------------------------------------- | ------------------------------------------------------------------------------------------ |
-| 1     | Load the in-process plugin             | `TableMaintenanceRESTFeature` registers the callback. No health or commit-event resource. |
-| 2     | Internal evaluate → submit pipeline    | `MaintenanceEvaluateSubmitPipeline` + Settings gates; unit tests.                          |
-| 3     | In-process IRC hook + event log        | IRC hook **INSERTs** the commit row (§6.3); TMS claim (§6).                                |
-| 4     | Hardening                              | Service metrics, graceful shutdown, user docs.                                             |
-| 5     | Optimizer CLI replacement APIs         | Ops resources in §7. Same commands as `gravitino-optimizer`.                               |
+| Phase | Work item                           | Notes                                                                                     |
+| ----- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
+| 1     | Load the in-process plugin          | `TableMaintenanceRESTFeature` registers the callback. No health or commit-event resource. |
+| 2     | Internal evaluate → submit pipeline | `MaintenanceEvaluateSubmitPipeline` + Settings gates; unit tests.                         |
+| 3     | In-process IRC hook + event log     | IRC hook **INSERTs** the commit row (§6.3); TMS claim (§6).                               |
+| 4     | Hardening                           | Service metrics, graceful shutdown, user docs.                                            |
+| 5     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                              |
 
 #### Phase 1 checklist
 
@@ -670,19 +670,19 @@ This design delivers the in-process plugin, IRC commit hook, `table_maintenance_
 
 ### 9.2 Review Checklist
 
-| Area         | Checklist                                                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------- |
+| Area         | Checklist                                                                                                        |
+| ------------ | ---------------------------------------------------------------------------------------------------------------- |
 | Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7). |
-| Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                            |
-| Event        | **In-process only** (§5.1.1); IRC hook inserts the commit row; TMS claims and evaluates; no HTTP/Kafka. |
-| Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required. |
-| Pipeline     | Inline on event: per-policy claim → gates → `Recommender` → Jobs; no metrics/monitor on event path. |
-| Durability   | IRC hook INSERTs one `table_maintenance_event` row per commit; TMS does not update it (§6.3). |
-| Rename/drop  | In-process lifecycle hook rewrites / purges string-keyed TMS rows (§6.4).                             |
-| Multi-node   | Shared `table_maintenance_state` + DB **claim** (§6.1–§6.2); no CronJob.                   |
-| Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                  |
-| Job boundary | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).            |
-| Security     | Ops APIs require table WRITE. No commit-event or health endpoint.                                |
+| Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                                           |
+| Event        | **In-process only** (§5.1.1); IRC hook inserts the commit row; TMS claims and evaluates; no HTTP/Kafka.          |
+| Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.              |
+| Pipeline     | Inline on event: per-policy claim → gates → `Recommender` → Jobs; no metrics/monitor on event path.              |
+| Durability   | IRC hook INSERTs one `table_maintenance_event` row per commit; TMS does not update it (§6.3).                    |
+| Rename/drop  | In-process lifecycle hook rewrites / purges string-keyed TMS rows (§6.4).                                        |
+| Multi-node   | Shared `table_maintenance_state` + DB **claim** (§6.1–§6.2); no CronJob.                                         |
+| Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                                 |
+| Job boundary | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).                           |
+| Security     | Ops APIs require table WRITE. No commit-event or health endpoint.                                                |
 
 ---
 
