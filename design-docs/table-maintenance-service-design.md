@@ -177,7 +177,6 @@ Commit events are delivered **only in-process**. After a successful Iceberg comm
 | Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**. |
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka. |
 | Payload     | Normalized `table_identifier` (`catalog.schema.table`). Policy selection uses Active policies + triggers, not commit metadata. |
-| Classloader | IRC may use an **isolated** classloader. Do **not** cast into TMS types. Register a callback on the main server that IRC can invoke across the boundary. |
 
 Notes:
 
