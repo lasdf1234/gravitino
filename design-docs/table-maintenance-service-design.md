@@ -64,7 +64,8 @@ execution core.
 7. **Commit log**: The **IRC post-commit hook** **INSERTs** one `table_maintenance_event` row per
    successful Iceberg commit (`snapshot_id`, `created_at`). TMS does not write this table, and the
    row is not updated. A policy that has not finished another run is read by joining that row to
-   `table_maintenance_state` and `job_run_meta.job_finished_at`, compared with `minIntervalMs` (§6.3).
+   `table_maintenance_state.last_job_id` and `job_run_meta.job_finished_at`, compared with
+   `minIntervalMs` (§6.3).
 
 ---
 
@@ -253,10 +254,13 @@ IRC commit succeeded (same JVM)
               ├─ for each Active policy:
               │     atomic claim: that policy row IDLE → RUNNING (§6.1)
               │       └─ claim failed → skip this policy (another node holds it)
-              │     if job_id still QUEUED/STARTED → release claim; skip
-              │     else apply min-interval gate; Recommender.submitForStrategyName(...)
+              │     if job_id is set and that job has finished:
+              │       last_job_id = job_id; clear job_id
+              │     if job_id is still QUEUED/STARTED → release claim; skip
+              │     else apply min-interval using last_job_id → job_finished_at
+              │     Recommender.submitForStrategyName(...)
               │       └── JobSubmitter → rewrite / … when trigger passes
-              │       └── write job_id on that policy row
+              │       └── set job_id to this submission; do not change last_job_id
               │     release claim (state → IDLE on that policy row; do not DELETE)
 ```
 
@@ -264,17 +268,20 @@ The in-process handler runs the gate + submit path on the calling thread (or a b
 owned by the plugin — implementation detail). Maintenance Spark jobs are **submitted asynchronously**
 via the job framework; the event path does not block on Spark completion. **The IRC hook INSERTs
 one event row per commit; TMS does not update it.** Per-policy claim keeps evaluate → submit single-flight for each
-`(table, policy)` across nodes; per-policy `job_id` also prevents a later event from submitting again
-while the previous job for that policy is still running. `job_run_meta.job_finished_at` is the last
-finish time used with `minIntervalMs` (§6.3). Stale `RUNNING` claims are released after
+`(table, policy)` across nodes. A non-null `job_id` is the in-flight submission and blocks another
+submit. When that job has finished, the pipeline moves it to `last_job_id` and clears `job_id`.
+`last_job_id` → `job_run_meta.job_finished_at` is the previous end time used with `minIntervalMs`
+(§6.3). Stale `RUNNING` claims are released after
 `claimTimeoutMs` (§6.2).
 
 **Gate order:**
 
-1. Per-policy in-flight / min-interval via `job_id` → `job_run_meta` and resolved `minIntervalMs`
-   (table prop → global conf → code default; §8.3).
-2. Policy trigger (`Recommender`) for each remaining Active policy.
-3. Submit maintenance job when trigger passes; persist `job_id`.
+1. If `job_id` is set and that job has finished: `last_job_id = job_id`, then clear `job_id`.
+2. If `job_id` is still in flight (`QUEUED` / `STARTED`): skip this policy.
+3. Otherwise apply min-interval using `last_job_id` → `job_run_meta.job_finished_at` and the resolved
+   `minIntervalMs` (table prop → global conf → code default; §8.3).
+4. Policy trigger (`Recommender`) for each remaining Active policy.
+5. On submit: set `job_id` to this submission. Do not change `last_job_id`.
 
 ---
 
@@ -294,14 +301,15 @@ Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reas
 | Table                      | Role                                                                 |
 | -------------------------- | -------------------------------------------------------------------- |
 | `table_maintenance_event`  | **Commit log** — one INSERT per successful Iceberg commit (§6.3) |
-| `table_maintenance_state`  | Multi-node **claim** + last `job_id` per policy (§6.1–§6.2)          |
+| `table_maintenance_state`  | Multi-node **claim** + in-flight `job_id` and finished `last_job_id` per policy (§6.1–§6.2) |
 
 `table_maintenance_state` primary key is `(metalake_id, table_identifier, policy_id)` — **one row
 per attached maintenance policy**. Claim is **per policy row**: each `(table, policy)` is claimed
 independently.
 
 Policy attachment remains in `policy_relation_meta` (resolved via `listPolicies()` / object
-identifier APIs); the state table stores multi-node claim state and the last `job_id` per policy.
+identifier APIs); the state table stores multi-node claim state, the in-flight `job_id`, and the
+last finished `last_job_id` per policy.
 The event table stores one row per commit. `metalake_id` and
 `policy_id` still come from Gravitino Policy / metalake metadata; only **table** identity avoids
 `table_meta`.
@@ -330,7 +338,7 @@ the lock.
 
 ### 6.2 State table (shared store)
 
-One relational table holds multi-node claim and the last submitted job per policy. Style follows
+One relational table holds multi-node claim, the in-flight job, and the last finished job per policy. Style follows
 work-queue tables such as `iceberg_cleanup_job` (no soft-delete / version / audit boilerplate).
 Table keying follows optimizer **`table_metrics.table_identifier`** (string identity), not
 `table_meta.table_id`.
@@ -344,7 +352,8 @@ Table keying follows optimizer **`table_metrics.table_identifier`** (string iden
 | `policy_id`        | `BIGINT UNSIGNED NOT NULL` | Real `policy_meta.policy_id`                                       |
 | `state`            | `VARCHAR(16) NOT NULL`     | `IDLE` / `RUNNING` only (per policy row)                           |
 | `updated_at`       | `BIGINT NOT NULL`          | Epoch millis; claim / reclaim                                      |
-| `job_id`           | `BIGINT UNSIGNED NULL`     | Last submitted job for **this policy** (`job_run_meta.job_run_id`) |
+| `job_id`           | `BIGINT UNSIGNED NULL`     | In-flight job for **this policy** (`job_run_meta.job_run_id`). Null when none is running. |
+| `last_job_id`      | `BIGINT UNSIGNED NULL`     | Last finished job for **this policy**. Its `job_finished_at` is the previous end time. |
 
 **Primary key:** (`metalake_id`, `table_identifier`, `policy_id`).
 
@@ -357,11 +366,11 @@ Table keying follows optimizer **`table_metrics.table_identifier`** (string iden
 2. Claim: conditional `UPDATE … SET state=RUNNING WHERE metalake_id=? AND table_identifier=? AND
    policy_id=? AND state=IDLE` (and reclaim stale `RUNNING` after `claimTimeoutMs` by setting it
    back to `IDLE`). `rows_affected = 1` owns the lock.
-3. Before submit: if `job_id` is set and that job is still active → set `state=IDLE` and skip that
-   policy.
-4. On submit: write the new `job_id` on that policy's row.
-5. Done: set `state=IDLE` on **that policy row**. **Do not DELETE** — keep `job_id` for later
-   events.
+3. If `job_id` is set and that job has finished: `last_job_id = job_id`, then set `job_id` to null.
+   Do this only after the job ends, not at submit time.
+4. Before submit: if `job_id` is still set (job still active) → set `state=IDLE` and skip that policy.
+5. On submit: set `job_id` to this submission's `job_run_id`. Do **not** change `last_job_id`.
+6. Done: set `state=IDLE` on **that policy row**. **Do not DELETE** — keep `job_id` and `last_job_id`.
 
 Illustrative MySQL DDL:
 
@@ -372,12 +381,13 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
     `state` VARCHAR(16) NOT NULL COMMENT 'IDLE|RUNNING',
     `updated_at` BIGINT(20) NOT NULL COMMENT 'last state upsert time in epoch millis',
-    `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last job_run_id for this policy',
+    `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'in-flight job_run_id; null when none is running',
+    `last_job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last finished job_run_id',
     PRIMARY KEY (`metalake_id`, `table_identifier`, `policy_id`),
     KEY `idx_state_updated` (`state`, `updated_at`),
     KEY `idx_table_identifier` (`table_identifier`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'TMS multi-node event claim + last policy job';
+  COMMENT 'TMS multi-node event claim, in-flight job_id, last finished job';
 ```
 
 ### 6.3 Commit log (`table_maintenance_event`)
@@ -408,11 +418,11 @@ in-process callback → TMS upsert + claim (table_maintenance_state) → pipelin
 **Primary key:** (`event_id`). **Index:** (`metalake_id`, `table_identifier`, `created_at`).
 
 There is **no** unique key on `snapshot_id`. Every commit INSERTs, including a repeated callback for
-the same snapshot. Claim and per-policy `job_id` still prevent double-submit (§6.1–§6.2).
+the same snapshot. Claim, in-flight `job_id`, and `last_job_id` still prevent double-submit (§6.1–§6.2).
 
 **Which policy has not finished another run**
 
-Join the commit row to the policy rows for that table, then to the last job:
+Join the commit row to the policy rows for that table, then to the last **finished** job:
 
 ```text
 table_maintenance_event e
@@ -420,14 +430,14 @@ table_maintenance_event e
     ON s.metalake_id = e.metalake_id
    AND s.table_identifier = e.table_identifier
   JOIN job_run_meta j
-    ON j.job_run_id = s.job_id
+    ON j.job_run_id = s.last_job_id
 ```
 
-`j.job_finished_at` is the end time of that policy's last job. Resolve `minIntervalMs` for the
-policy's task type (§8.3). When `e.created_at - j.job_finished_at > minIntervalMs` and `s.job_id`
-still points at that finished job, the policy has not completed another run after the interval
-elapsed. If `j.job_run_status` is still in flight (`QUEUED` / `STARTED`), the job is running; that
-gap does not mean the policy missed a run. `job_finished_at` is `0` until the job finishes.
+`j.job_finished_at` is the end time of that policy's previous finished job. Resolve `minIntervalMs`
+for the policy's task type (§8.3). When `s.job_id` is null and
+`e.created_at - j.job_finished_at > minIntervalMs`, the policy has not completed another run after
+the interval elapsed. A non-null `s.job_id` means a job is still in flight, so this commit is not a
+missed run.
 
 Illustrative MySQL DDL:
 
@@ -447,7 +457,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_event` (
 ### 6.4 Table rename / drop lifecycle (required with string keys)
 
 Because TMS keys by **`table_identifier`** (not a stable `table_id`), a rename would otherwise orphan
-claim / `job_id` rows and break cooldown / in-flight gates. Historical **`table_metrics`** rows can
+claim / `job_id` / `last_job_id` rows and break cooldown / in-flight gates. Historical **`table_metrics`** rows can
 tolerate orphan names; **`table_maintenance_state` cannot**.
 
 **Hook:** after a successful Iceberg table rename (or drop), IRC invokes an in-process
@@ -459,9 +469,9 @@ commit-event callback — §5.1.1). Prefer wiring next to existing IRC rename/dr
 
 1. **`table_maintenance_state`:** rewrite every row for the metalake:
    `UPDATE … SET table_identifier = new WHERE metalake_id = ? AND table_identifier = old`.
-   Preserve `state`, `job_id`, `updated_at` (except bump `updated_at` for audit). If a conflicting
+   Preserve `state`, `job_id`, `last_job_id`, `updated_at` (except bump `updated_at` for audit). If a conflicting
    destination key already exists (rare), fail the rewrite loudly or merge per implementation policy
-   — do not silently drop `job_id`.
+   — do not silently drop `job_id` or `last_job_id`.
 2. **`table_maintenance_event`:** rewrite every row for the metalake:
    `UPDATE … SET table_identifier = new WHERE metalake_id = ? AND table_identifier = old`, so later
    joins still find those commits.
@@ -577,8 +587,8 @@ TMS recognizes four maintenance **task types** (aligned with product Compact pol
 | `maintenance.manifest-rewrite.minIntervalMs` | Manifest rewrite min interval for this table |
 | `maintenance.orphan-cleanup.minIntervalMs`   | Orphan cleanup min interval for this table   |
 
-The event path uses per-policy `job_id` → `job_run_meta.job_finished_at` and the resolved `minIntervalMs` for
-that task type (§5.4 / §6.2). Policy content still owns **trigger thresholds** (e.g. MSE); interval
+The event path uses per-policy `last_job_id` → `job_run_meta.job_finished_at` and the resolved `minIntervalMs` for
+that task type (§5.4 / §6.2). `job_id` is only the in-flight submission. Policy content still owns **trigger thresholds** (e.g. MSE); interval
 only caps how often a successful submit may repeat.
 
 Example table override:
@@ -632,15 +642,16 @@ This design delivers the in-process plugin, IRC commit hook, `table_maintenance_
       **`table_maintenance_state`** (§6.2).
 - [ ] IRC post-commit hook **INSERTs** one `table_maintenance_event` row per commit (§6.3). TMS does
       not write or update that row. Read "policy has not finished another run" by joining
-      `created_at` to `job_run_meta.job_finished_at` and `minIntervalMs`.
+      `created_at` to `last_job_id` → `job_run_meta.job_finished_at` and `minIntervalMs`.
 - [ ] Upsert + **per-policy claim** on `table_maintenance_state` (§6.1).
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **rename/drop** in-process hook to rewrite / purge `table_maintenance_state` and
       `table_maintenance_event` rows (§6.4).
 - [ ] Integration tests: each commit inserts one event row; claim runs the pipeline once; no
-      double-submit; `created_at - job_finished_at > minIntervalMs` with the same finished `job_id`
-      means that policy has not completed another run; an in-flight job does not; rename updates
-      `table_identifier`; drop clears state and event rows.
+      double-submit; when `job_id` is null and `created_at - last_job_id.job_finished_at > minIntervalMs`
+      the policy has not completed another run; a non-null `job_id` is in flight; on finish,
+      `job_id` moves to `last_job_id` and `job_id` is cleared; rename updates `table_identifier`;
+      drop clears state and event rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 4 checklist
