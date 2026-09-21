@@ -178,14 +178,6 @@ Commit events are delivered **only in-process**. After a successful Iceberg comm
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka. |
 | Payload     | Normalized `table_identifier` (`catalog.schema.table`). Policy selection uses Active policies + triggers, not commit metadata. |
 
-Notes:
-
-- Multi-node safety still uses the shared DB claim (§6): each replica that hosts colocated IRC may
-  receive commits for tables routed to that node.
-- **Durability** still uses `table_maintenance_event` (§6.3) — in-process delivery does not remove
-  the need to persist the event before evaluate.
-- HTTP and Kafka commit-event ingress are **out of scope** (Non-Goal #5).
-
 Deployment:
 
 1. Package the TMS plugin jars with the main Gravitino server and set
