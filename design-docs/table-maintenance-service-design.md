@@ -205,9 +205,6 @@ REST prefix for TMS **health** (and optional later ops) on **8090**:
 | `IcebergTableLifecycleHook`         | In-process IRC rename/drop hook: rewrite or purge TMS rows keyed by `table_identifier` (§6.4).     |
 | Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for event path.                |
 
-No REST handlers are required for the **UI Compact-policy** surface beyond **health**.
-Optimizer ops APIs are a **separate non-UI group** (§7.2), not shown in the console.
-
 ### 5.3 User process (event-driven)
 
 1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**, and turns on in-process commit events (§5.1.1 / §8.3).
