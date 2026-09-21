@@ -109,7 +109,7 @@ statistics Collect, `Recommender` trigger, and job submit.
 **Pros:** One HTTP port for ops/health; reuses main-server auth filters; no remote event hop on the
 commit path; reuses Policy + Jobs on the same server; matches plugin packaging.
 
-**Decision:** **Chosen** for MVP.
+**Decision:** **Chosen**.
 
 ### 4.3 Option C: Independent long-running Table Maintenance Service process
 
@@ -166,9 +166,9 @@ Gravitino Iceberg REST (IRC aux, typically :9001)
          Gravitino Job framework (rewrite / cleanup / …)
 ```
 
-#### 5.1.1 In-process commit event (MVP only)
+#### 5.1.1 In-process commit event
 
-MVP delivers commit events **only in-process**. After a successful Iceberg commit, IRC invokes a
+Commit events are delivered **only in-process**. After a successful Iceberg commit, IRC invokes a
 **main-server-registered callback / SPI** (for example on `GravitinoEnv`). That callback enters
 `IcebergCommitEventHandler` → durable `table_maintenance_event` insert →
 `MaintenanceEvaluateSubmitPipeline` + `table_maintenance_state` claim.
@@ -186,7 +186,7 @@ Notes:
   receive commits for tables routed to that node.
 - **Durability** still uses `table_maintenance_event` (§6.3) — in-process delivery does not remove
   the need to persist the event before evaluate.
-- HTTP and Kafka commit-event ingress are **out of scope** for MVP (Non-Goal #5).
+- HTTP and Kafka commit-event ingress are **out of scope** (Non-Goal #5).
 
 Deployment:
 
@@ -207,7 +207,7 @@ REST prefix for TMS **health** (and optional later ops) on **8090**:
 
 | Part                                | Responsibility                                                                                         |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; wires health (MVP); registers in-process callback. |
+| `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; wires health; registers in-process callback. |
 | `IcebergCommitEventHandler`          | In-process event entry; persists event; upserts state; claims; runs pipeline.                          |
 | `MaintenanceEvaluateSubmitPipeline` | Gates → on-demand Collect → `Recommender` → `JobSubmitter`.                                            |
 | `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / rename (§6.1–§6.2, §6.4). |
@@ -215,7 +215,7 @@ REST prefix for TMS **health** (and optional later ops) on **8090**:
 | `IcebergTableLifecycleHook`         | In-process IRC rename/drop hook: rewrite or purge TMS rows keyed by `table_identifier` (§6.4).     |
 | Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for event path.                |
 
-No REST handlers are required for the **UI Compact-policy** surface beyond **health** in MVP.
+No REST handlers are required for the **UI Compact-policy** surface beyond **health**.
 Optimizer ops APIs are a **separate non-UI group** (§7.2), not shown in the console.
 
 ### 5.3 User process (event-driven)
@@ -291,7 +291,7 @@ job for that policy is still running (and supplies `job_finished_at` for cooldow
 A reclaim loop (startup + periodic) finishes `PENDING` / `DEFERRED` / retryable `FAILED` events so
 crashes cannot silently drop events (§6.3).
 
-**Gate order (MVP):**
+**Gate order:**
 
 1. Global concurrency limits (Collect and/or maintenance submits).
 2. Per-policy in-flight / min-interval via `job_id` → `job_run_meta` and resolved `minIntervalMs`
@@ -307,7 +307,7 @@ On **multiple** Gravitino / TMS nodes, an in-process event may run on **any** re
 colocated IRC and receives the commit. Without coordination, two nodes could both pass gates and
 double-submit Collect or compaction jobs.
 
-**MVP approach:** two shared tables in the Gravitino entity DB. Table identity uses a **normalized
+**Approach:** two shared tables in the Gravitino entity DB. Table identity uses a **normalized
 string `table_identifier`** (`catalog.schema.table`), **not** `table_meta.table_id`.
 
 Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reason
@@ -424,7 +424,7 @@ UPDATE table_maintenance_event
 | `event_id`         | `BIGINT UNSIGNED NOT NULL` | Surrogate PK (auto-increment)                                         |
 | `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake from config / policy resolution                              |
 | `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table` (event payload)                     |
-| `ingress`          | `VARCHAR(16) NOT NULL`     | MVP: always `IN_PROCESS`                                              |
+| `ingress`          | `VARCHAR(16) NOT NULL`     | Always `IN_PROCESS`                                              |
 | `status`           | `VARCHAR(16) NOT NULL`     | `PENDING` / `PROCESSING` / `PROCESSED` / `SKIPPED` / `DEFERRED` / `FAILED` |
 | `result`           | `VARCHAR(32) NULL`         | Internal outcome: `accepted` / `submitted` / `deferred` / …           |
 | `job_id`           | `BIGINT UNSIGNED NULL`     | Set when a maintenance job was submitted                              |
@@ -436,7 +436,7 @@ UPDATE table_maintenance_event
 **Primary key:** (`event_id`). **Index:** (`status`, `updated_at`), (`metalake_id`,
 `table_identifier`, `created_at`).
 
-MVP event payload is only `table_identifier` (§5.1.1), so there is **no** unique key on snapshot id.
+The event payload is only `table_identifier` (§5.1.1), so there is **no** unique key on snapshot id.
 Duplicate callbacks (if any) may insert multiple rows for the same table; claim + per-policy
 `job_id` still prevent double-submit. Optional follow-up: persist Iceberg `snapshotId` (when IRC
 provides it) and add a unique `(table_identifier, snapshot_id)` for stronger idempotency.
@@ -461,7 +461,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_event` (
     `event_id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'commit event id',
     `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
     `table_identifier` VARCHAR(512) NOT NULL COMMENT 'normalized catalog.schema.table',
-    `ingress` VARCHAR(16) NOT NULL COMMENT 'IN_PROCESS (MVP)',
+    `ingress` VARCHAR(16) NOT NULL COMMENT 'IN_PROCESS',
     `status` VARCHAR(16) NOT NULL COMMENT 'PENDING|PROCESSING|PROCESSED|SKIPPED|DEFERRED|FAILED',
     `result` VARCHAR(32) NULL COMMENT 'accepted|submitted|deferred|… when known',
     `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'submitted job_run_id when any',
@@ -512,28 +512,28 @@ commit-event callback — §5.1.1). Prefer wiring next to existing IRC rename/dr
    cancel via Jobs APIs if needed.
 
 Catalog rename (changes the `catalog.` prefix of many identifiers) is a **follow-up** bulk rewrite;
-MVP covers table rename/drop within a catalog.
+This design covers table rename/drop within a catalog.
 
 ---
 
 ## 7. Public REST API
 
-TMS HTTP APIs are split into **groups**. MVP ships **health only** for the public surface; the
+TMS HTTP APIs are split into **groups**. The public surface ships **health only**; the
 commit-event path is **in-process** (no REST). Group B covers optional optimizer ops (statistics /
 metrics / recommend / submit); it is **not** exposed in the UI.
 
-| Group                    | Audience                    | In UI? | MVP                              |
+| Group                    | Audience                    | In UI? | Scope                            |
 | ------------------------ | --------------------------- | ------ | -------------------------------- |
 | A — Health               | Ops / LB                    | No     | **Yes**                          |
 | B — Optimizer ops        | Scripts / advanced ops only | **No** | Follow-up; authz required (§7.2) |
 
-### 7.0 Group A — Health (MVP)
+### 7.0 Group A — Health
 
 | Method | Path                            | Caller   | Required? |
 | ------ | ------------------------------- | -------- | --------- |
 | `GET`  | `/api/maintenance/table/health` | Ops / LB | Optional  |
 
-There is **no** `POST /api/maintenance/table/events/iceberg-commit` in MVP (Non-Goal #5).
+There is **no** `POST /api/maintenance/table/events/iceberg-commit` (Non-Goal #5).
 
 ### 7.1 GET /api/maintenance/table/health
 
@@ -569,7 +569,7 @@ operators:
 | List job metrics         | Query stored job metrics                                 |
 | Submit update-stats job  | Submit built-in Iceberg update-stats Spark jobs          |
 
-MVP **event path does not call** this group (Collect / submit stay in-process inside the event
+The **event path does not call** this group (Collect / submit stay in-process inside the event
 pipeline). Shipping Group B REST is a **follow-up**.
 
 ---
@@ -600,7 +600,7 @@ Existing provider keys continue under `gravitino.maintenance.*`, for example:
 - `gravitino.maintenance.gravitinoUri` / `gravitinoMetalake` / `gravitinoDefaultCatalog`
 - `gravitino.maintenance.recommender.*`, `updater.*`
 
-Runtime Settings used by event gates (max concurrency) are configuration keys in MVP.
+Runtime Settings used by event gates (max concurrency) are configuration keys.
 
 Per-task **minimum interval** defaults are under §8.4 (global → table override → code default).
 
@@ -639,7 +639,7 @@ gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
 ```
 
-HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** part of MVP (Non-Goal #5).
+HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
 
 ### 8.4 Task types and minimum interval (global default + table override)
 
@@ -696,7 +696,7 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 
 ### 9.1 Suggested Work Plan
 
-MVP delivers the 8090 REST plugin (health), in-process IRC commit events, durable
+This design delivers the 8090 REST plugin (health), in-process IRC commit events, durable
 `table_maintenance_event` log, shared `table_maintenance_state` + claim, and inline evaluate →
 submit pipeline.
 
@@ -740,7 +740,7 @@ submit pipeline.
       incomplete `table_maintenance_event` rows (§6.4).
 - [ ] Integration tests: in-process event → event row → claim → pipeline once; crash after insert →
       reclaim; no double-submit; rename updates state `table_identifier`; drop clears state.
-- [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress in MVP.
+- [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 4 checklist
 
@@ -762,12 +762,12 @@ submit pipeline.
 | Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; health on main server **8090**; IRC colocated in same JVM. |
 | Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                            |
 | Event        | **In-process only** (§5.1.1); shared handler + durable event + DB claim; no HTTP/Kafka ingress.   |
-| Public API   | Group A health (§7); Group B ops non-UI + table WRITE (§7.2); no commit-event REST in MVP.        |
+| Public API   | Group A health (§7); Group B ops non-UI + table WRITE (§7.2); no commit-event REST.        |
 | Pipeline     | Inline on event: gates → stats Collect → `Recommender` → Jobs; no metrics/monitor on event path.    |
 | Collect      | On-demand update-stats (stats mode); gated; never blind 1:1 per commit.                           |
 | Durability   | Every event inserted into `table_maintenance_event` before evaluate; reclaim incomplete rows (§6.3). |
 | Rename/drop  | In-process lifecycle hook rewrites / purges string-keyed TMS rows (§6.4).                             |
-| Multi-node   | Shared `table_maintenance_state` + DB **claim** (§6.1–§6.2); no CronJob in MVP.                   |
+| Multi-node   | Shared `table_maintenance_state` + DB **claim** (§6.1–§6.2); no CronJob.                   |
 | Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                  |
 | Job boundary | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).            |
 | Security     | No public commit-event REST; Group B requires table WRITE; sanitized errors.                      |
