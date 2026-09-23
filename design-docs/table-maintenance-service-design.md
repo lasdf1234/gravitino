@@ -98,20 +98,11 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
 
 ### 4.1 Deployment options
 
-|                     | A: Process-local only                           | **B: In-process plugin (Chosen)** | C: Separate TMS process                                  | D: Aux Jetty listener (:9301)                          |
-| ------------------- | ----------------------------------------------- | --------------------------------- | -------------------------------------------------------- | ------------------------------------------------------ |
-| Pros                | Simple; no new listener                         | See below                         | Full JVM isolation                                       | Classpath isolation like IRC                           |
-| Cons / why rejected | No IRC target; no central automated maintenance | —                                 | Extra deployable; duplicates main-server plugin patterns | Extra port; diverges from **8090** `extensionPackages` |
-| Decision            | Rejected                                        | **Chosen**                        | Rejected                                                 | Rejected                                               |
-
-**Option B (Chosen):** Register TMS as a Jersey 2 `Feature` via
-`gravitino.server.rest.extensionPackages` (same as IdP) inside the main server. Commit path does
-**not** use HTTP. After each Iceberg commit, the colocated IRC hook INSERTs
-`table_maintenance_event` (§6.3) and invokes an in-process callback; TMS runs compaction evaluate →
-submit on a bounded executor (§5.4.1). Timed work uses `MaintenancePoller` on every node (§5.3).
-
-**Pros:** No extra process or port; no remote hop on commit; reuses Policy + Jobs; peers stay equal
-(no maintenance leader).
+|                     | A: Process-local only                           | **B: In-process plugin (Chosen)**                                                    | C: Separate TMS process                                  | D: Aux Jetty listener (:9301)                          |
+| ------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------- | ------------------------------------------------------ |
+| Pros                | Simple; no new listener                         | Same JVM as IdP/`extensionPackages`; no extra port; in-process commit; peer pollers | Full JVM isolation                                       | Classpath isolation like IRC                           |
+| Cons / why rejected | No IRC target; no central automated maintenance | Slightly couples TMS to the main server                                              | Extra deployable; duplicates main-server plugin patterns | Extra port; diverges from **8090** `extensionPackages` |
+| Decision            | Rejected                                        | **Chosen**                                                                           | Rejected                                                 | Rejected                                               |
 
 ### 4.2 Industry survey: commit / write-path triggers
 
