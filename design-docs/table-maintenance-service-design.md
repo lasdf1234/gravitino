@@ -43,14 +43,12 @@ execution core.
 TMS uses a **dual trigger model** (§5.3–§5.5):
 
 - **Commit path** — after each successful Iceberg commit, the IRC post-commit hook **INSERTs** one
-  `table_maintenance_event` row (§6.3), then invokes an in-process TMS callback. TMS processes
-  **compaction only** on a bounded executor (§5.4.1) — not on the IRC thread. **No schedule or
-  `next_due_at` on this path.**
-- **Scheduled path** — each Gravitino node runs a **`MaintenancePoller`** (same pattern as
-  `IcebergCleanupManager`: worker loops, `pollIntervalMs`, `takePendingDue` per-row claim). When
-  `next_due_at` is reached (for example **Daily · 02:00** compaction, **Sun · 03:00** snapshot
-  expiry), any node may claim and run that policy. **All four policy types**, including compaction,
-  use this path. At-least-once latest-state.
+  `table_maintenance_event` row (§6.3), then invokes an in-process TMS callback for **compaction
+  only** (§5.4.1).
+- **Scheduled path** — each Gravitino node runs a **`MaintenancePoller`** (`takePendingDue` per-row
+  claim). When `next_due_at` is reached (for example **Daily · 02:00** compaction, **Sun · 03:00**
+  snapshot expiry), any node may claim and run that policy. **All four policy types**, including
+  compaction, use this path. At-least-once latest-state.
 
 When commit and poller collide on the same compaction row, they share **`table_maintenance_state`**
 and the same per-row **claim** so only one submission wins (§5.4.3, §6.1). Commit logic stays
