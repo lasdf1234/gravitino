@@ -40,19 +40,20 @@ This design turns TMS into a **main-server REST plugin** on port **8090** (same 
 via `gravitino.server.rest.extensionPackages`) with colocated IRC, reusing the existing optimizer
 execution core.
 
-TMS uses a **dual trigger model** per policy type (§5.3–§5.5):
+TMS uses a **dual trigger model** (§5.3–§5.5):
 
-- **Commit path (compaction accelerator)** — after each successful Iceberg commit, IRC enqueues
-  **compaction** evaluate → submit on a bounded executor (best effort). Covers hot tables between
-  scheduled runs.
-- **Scheduled path (all four policy types)** — each Gravitino node runs a **`MaintenancePoller`**
-  (same pattern as `IcebergCleanupManager`: worker loops, `pollIntervalMs`, `takePendingDue`
-  per-row claim). When a policy row's wall-clock **`next_due_at`** is reached (for example
-  **Daily · 02:00** compaction, **Sun · 03:00** snapshot expiry), any node may claim and run that
-  policy. At-least-once latest-state.
+- **Commit path** — after each successful Iceberg commit, IRC **enqueues only** (bounded executor,
+  best effort). The worker resolves the effective compaction policy, applies `minIntervalMs`, and may
+  submit a compaction job (§5.4.1). **No schedule or `next_due_at` on this path.**
+- **Scheduled path** — each Gravitino node runs a **`MaintenancePoller`** (same pattern as
+  `IcebergCleanupManager`: worker loops, `pollIntervalMs`, `takePendingDue` per-row claim). When
+  `next_due_at` is reached (for example **Daily · 02:00** compaction, **Sun · 03:00** snapshot
+  expiry), any node may claim and run that policy. **All four policy types**, including compaction,
+  use this path. At-least-once latest-state.
 
-Both paths share the same **`table_maintenance_state` row** and **per-(table, policy) claim**; only
-one path runs a given policy on a table at a time (§5.4.3).
+When commit and poller collide on the same compaction row, they share **`table_maintenance_state`**
+and the same per-row **claim** so only one submission wins (§5.4.3, §6.1). Commit logic stays
+simple; scheduling lives in the poller only.
 
 There is **no** cluster-wide scheduler lease (§4.5). Coordination is **per-(table, policy) row**
 claim, matching `iceberg_cleanup_job` / `IcebergCleanupJobStore.takePendingJob` (§4.6, §5.3).
@@ -73,13 +74,13 @@ claim, matching `iceberg_cleanup_job` / `IcebergCleanupJobStore.takePendingJob` 
    policies with sensible defaults in one step. Profiles are **not** a fifth policy type (§5.2).
 4. **Precedence per maintenance type**: For each maintenance type, the **nearest** attachment along
    `table → schema → catalog → metalake` wins. Policies are **not** additive for maintenance (§5.2).
-5. **Dual trigger model (option B)**: **Compaction** uses **both** commit acceleration (§5.4.1) and
-   poller schedule (§5.4.2). **Manifest rewrite, snapshot expiry, and orphan cleanup** use the
-   poller only (§5.5–§5.6). Each policy carries a UI-visible **schedule** (Daily / Weekly / cron +
-   timezone) that drives `next_due_at` (§5.2.4).
+5. **Dual trigger model (option B)**: **Compaction** on **commit** (§5.4.1, unchanged simple path)
+   **and** on the **poller** at wall-clock schedule (§5.4.2). **Manifest rewrite, snapshot expiry,
+   and orphan cleanup** use the poller only (§5.5–§5.6). Policy **schedule** drives `next_due_at`
+   for the **poller only** (§5.2.4).
 6. **Wall-clock schedules in Gravitino**: Operators configure **Daily · 02:00**, **Sun · 03:00**,
-   **Weekly**, and **Paused** on policies without K8s CronJob. Timing lives in policy content and
-   Gravitino config, not external YAML.
+   **Weekly**, and **Paused** on policies without K8s CronJob. Schedules are read by the poller, not
+   by the commit hook.
 7. **Reuse existing optimizer execution core**: Both paths invoke the same `Updater` /
    `Recommender` / job-submit paths in `maintenance/optimizer` as **in-process methods**.
 8. **Job framework compatibility**: Spark maintenance work continues to use the Gravitino job
@@ -279,11 +280,11 @@ run on every commit.
 | Stale metrics | Recommender can use pre-commit statistics for compaction debt | Expire / orphan need **fresh** table-wide metadata; scheduler pass refreshes stats first |
 | Industry alignment | Databricks auto-compact; Amoro minor optimizing | Glue, Amoro, Floe schedule expire / orphan / manifest separately |
 
-**TMS decision (option B):** IRC commit path accelerates **`system_iceberg_compaction` only** (§5.4.1).
-**All four policy types** — including compaction — also run on the **`MaintenancePoller`** when
-their wall-clock schedule fires (§5.4.2, §5.2.4). Manifest / expire / orphan are **poller-only** on
-the commit path. This matches industry (write-triggered compact + scheduled maintenance) and supports
-inactive tables via nightly compaction.
+**TMS decision (option B):** IRC commit path runs **`system_iceberg_compaction` only** (§5.4.1) — the
+same simple post-commit enqueue as before. The **`MaintenancePoller`** also runs **all four policy
+types** — including compaction — when their wall-clock schedule fires (§5.4.2, §5.2.4). Manifest /
+expire / orphan are **poller-only** on the commit path. Nightly compaction covers tables that stop
+receiving commits.
 
 ---
 
@@ -300,7 +301,7 @@ Gravitino Iceberg REST (IRC, typically :9001)
         │
         └─ IRC post-commit hook (§5.4.1)
                 │
-                └─ bounded executor → compaction only (claim; minInterval; Recommender)
+                └─ bounded executor → compaction only (minIntervalMs; Recommender)
 
 MaintenancePoller (every Gravitino node — §5.3)
         │  workerLoop: takePendingDue → claim row → evaluate → submit
@@ -416,8 +417,12 @@ on successful job finish:
 **Paused:** `policy_meta.enabled = false` → poller does not claim the row; commit path also skips
 compaction for that policy.
 
-**`minIntervalMs`:** optional floor — even if schedule says 02:00, skip if
-`job_finished_at + minIntervalMs` has not passed (prevents commit + 02:00 double-run within one hour).
+**`minIntervalMs`:** minimum time between runs for a `(table, policy)` — checked via
+`last_job_id` → `job_run_meta.job_finished_at` on **both** paths. Prevents commit and a 02:00 poller
+run from submitting twice within one hour.
+
+**Commit vs poller:** `schedule` and `next_due_at` apply to the **poller only**. The commit hook does
+not read `next_due_at` and does not advance it after a run.
 
 **Applies to / table patterns:** policy attachment resolves to one row per matching
 `table_identifier` (exact table, schema, catalog, metalake, or glob like `events.*`). TMS
@@ -504,12 +509,12 @@ no K8s CronJob requirement.
 
 ---
 
-### 5.4 Compaction: commit accelerator + scheduled poller (option B)
+### 5.4 Compaction: commit path + poller schedule (option B)
 
-Compaction is the **only** policy type with **two wake sources**. Both converge on the same
-`(table, compaction_policy_id)` state row and the same claim (§5.4.3).
+Compaction is the **only** policy type with two wake sources. The **commit path is unchanged** from
+the original design; option B only adds compaction to the poller schedule.
 
-#### 5.4.1 Commit path (accelerator)
+#### 5.4.1 Commit path (compaction only)
 
 ```text
 IRC commit succeeded (same JVM)
@@ -518,35 +523,36 @@ IRC commit succeeded (same JVM)
         └─ enqueue on bounded executor (required):
               resolve effective system_iceberg_compaction policy (§5.2.3)
               if policy.enabled = false → return
-              upsert table_maintenance_state row if missing
-              tryClaimCompactionRow()  // same CAS as poller (§6.1)
               minIntervalMs gate (last_job_id)
               Recommender → submit builtin-iceberg-compaction
-              release claim; record job_run_meta; refresh next_due_at from schedule (§5.2.4)
+              record job_run_meta (§6.5)
 ```
 
 1. IRC hook returns quickly — **no** evaluate on the commit thread.
-2. **Best effort** (§10): lost enqueue → wait for next commit or **02:00 poller** run.
+2. **No `next_due_at` check** — every commit may enqueue; `minIntervalMs` and Recommender decide
+   whether to submit.
+3. **Best effort** (§10): lost enqueue → next commit, **02:00 poller**, or manual run.
 
-#### 5.4.2 Scheduled path (nightly compaction)
+On multiple nodes, the executor uses the shared row **claim** (§6.1) before submit so two replicas
+do not double-submit for the same table. This is an implementation detail of multi-node safety, not
+part of the commit trigger model.
 
-When `nightly_compaction` schedule is **Daily · 02:00**, the poller claims compaction rows whose
-`next_due_at <= now`:
+#### 5.4.2 Poller path (scheduled compaction)
 
-- **Inactive tables** that had no commits still compact at 02:00.
-- **Active tables** may already have compacted via commit; `minIntervalMs` + Recommender may no-op.
+When `nightly_compaction` is **Daily · 02:00**, the poller claims compaction rows with
+`next_due_at <= now`, then runs the same evaluate → submit pipeline. After success,
+`next_due_at = nextOccurrence(schedule)` (§5.2.4).
 
-#### 5.4.3 Deduplication (commit vs poller, multi-node)
+- **Inactive tables** with no recent commits still compact at 02:00.
+- **Active tables** may have compacted via commit; `minIntervalMs` + Recommender may no-op.
 
-```text
-Same table, same compaction policy row:
-  - Commit worker on Node A and poller worker on Node B both may try at once
-  - UPDATE … SET state=RUNNING WHERE state=IDLE → only one rows_affected=1
-  - Loser skips; no double Spark job
-  - in-flight job_id on row blocks both paths until job finishes
-```
+Manifest / expire / orphan: **poller only** — the commit hook does not touch them.
 
-Manifest / expire / orphan: **poller only** — commit path does not touch those policy types.
+#### 5.4.3 When commit and poller meet
+
+If commit and poller try the same compaction row at once: **claim** (`state` CAS) plus
+`minIntervalMs` and in-flight `job_id` prevent duplicate Spark jobs (§6.1). No extra commit-side
+scheduling logic is required.
 
 ---
 
@@ -596,7 +602,7 @@ policy write (§8.1).
 | Part | Responsibility |
 | ---- | -------------- |
 | `TableMaintenanceRESTFeature` | Jersey 2 `Feature`; commit callback, poller lifecycle, ops resources (§7). |
-| `IcebergCommitEventHandler` | Enqueues compaction accelerator on bounded executor (§5.4.1). |
+| `IcebergCommitEventHandler` | Enqueues compaction on bounded executor after commit (§5.4.1). |
 | `MaintenancePoller` | Worker loops + heartbeat scheduler; `takePendingDue` → evaluate → submit (§5.3). |
 | `MaintenanceEvaluateSubmitPipeline` | Interval gate → Recommender → submit for one claimed `(table, policy)`. |
 | `TableMaintenanceStateStore` | `table_maintenance_state` upsert / `takePendingDue` / heartbeat / rename (§6). |
@@ -619,7 +625,7 @@ cluster-wide scheduler lease and **no** `TableMaintenanceEventStore`.
    `manifest_rewrite` Daily · 04:00, `orphan_cleanup` Weekly (Paused = `enabled: false`).
 4. Operator enables the **maintenance poller** (`gravitino.maintenance.poller.enabled=true`, §8.1).
 5. Engines write through Gravitino Iceberg REST. On commit success, IRC enqueues **compaction**
-   accelerator (§5.4.1).
+   evaluate → submit on the bounded executor (§5.4.1).
 6. On each poll cycle on every node, workers claim **due rows** (all four types when
    `next_due_at <= now`) and submit within `maxConcurrentJobs` (§5.3).
 7. Operators observe runs in the Gravitino **Jobs** UI / APIs. Manual runs remain available through
@@ -665,8 +671,8 @@ refreshClaimHeartbeats on owned rows (peer cannot finish with stale heartbeat to
 ```
 
 **Commit compaction path** uses the same `state` / `claim_lease_expires_at` columns and the same
-CAS as the poller. It does **not** require `next_due_at <= now` to wake up; after a successful run,
-both paths update `next_due_at` from the policy schedule (§5.2.4).
+CAS as the poller before submit. It does **not** read `next_due_at` and does **not** update
+`next_due_at` after a run — only the poller advances `next_due_at` from the policy schedule (§5.2.4).
 
 Gate checks alone are insufficient (read race). **Claim is the write lock** for that policy row.
 
@@ -721,7 +727,7 @@ Earlier drafts INSERTed one `table_maintenance_event` row per commit. That table
 | ---- | --------- |
 | Minimum time between runs | Per-type `minIntervalMs` + `last_job_id` → `job_run_meta.job_finished_at` (§8.3) |
 | Time-driven maintenance without commits | `MaintenancePoller` + `next_due_at` (§5.3) |
-| Compaction after write | Commit accelerator (§5.4.1) |
+| Compaction after write | Commit path (§5.4.1) |
 | Inactive-table compaction | Poller at schedule (§5.4.2) |
 | Recovery | Table state + `last_measured_snapshot_id` (§10.2) — not a per-commit log |
 
@@ -833,7 +839,7 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 | 1 | In-process plugin + bounded executor | Feature, compaction callback (§5.4.1). |
 | 2 | State table + claim + precedence | `table_maintenance_state` + `next_due_at` (§6); nearest-wins (§5.2.3). |
 | 3 | `MaintenancePoller` | `takePendingDue`, worker loops, heartbeats (§5.3); mirror `IcebergCleanupManager`. |
-| 4 | Compaction dual path | Commit accelerator + poller schedule; dedup (§5.4). |
+| 4 | Compaction on poller schedule | Poller claims compaction due rows; commit path unchanged (§5.4). |
 | 5 | Track A / B orchestration | Hot pipeline + orphan ranking (§5.5–§5.6). |
 | 6 | Maintenance profile API | `standard` one-step setup (§5.2.2). |
 | 7 | Ops APIs | §7. |
@@ -853,10 +859,9 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 
 #### Phase 4 checklist
 
-- [ ] IRC hook enqueues compaction accelerator on bounded executor (§5.4.1).
-- [ ] Poller claims compaction due rows at schedule (§5.4.2).
-- [ ] Commit + poller dedup: one claim per row; minIntervalMs prevents double-run (§5.4.3).
-- [ ] Policy `schedule` → `nextOccurrence` → `next_due_at` (§5.2.4).
+- [ ] IRC hook enqueues compaction on bounded executor (§5.4.1); no `next_due_at` on commit path.
+- [ ] Poller claims compaction due rows at schedule; advances `next_due_at` (§5.4.2, §5.2.4).
+- [ ] Commit + poller: claim + `minIntervalMs` prevent double-submit (§5.4.3, §6.1).
 - [ ] Unit tests: commit thread does not block on evaluate.
 - [ ] Commit path ignores manifest / expire / orphan policies.
 
@@ -882,7 +887,7 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 
 | Model | TMS target |
 | ----- | ---------- |
-| Best effort | **Commit compaction accelerator** (§5.4.1) |
+| Best effort | **Commit compaction path** (§5.4.1) |
 | At-least-once latest-state | **`MaintenancePoller` path** — recovery from table state, not event rows |
 | Exactly-once job effect | **Not required** — claims + idempotency key bound duplicates |
 
