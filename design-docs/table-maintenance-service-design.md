@@ -104,7 +104,7 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
 | Cons / why rejected | No IRC target; no central automated maintenance | Slightly couples TMS to the main server                                              | Extra deployable; duplicates main-server plugin patterns | Extra port; diverges from **8090** `extensionPackages` |
 | Decision            | Rejected                                        | **Chosen**                                                                           | Rejected                                                 | Rejected                                               |
 
-### 4.2 Industry survey: commit / write-path triggers
+### 4.2 Maintenance trigger options
 
 **Compaction** is most often tied to **writes/commits**. Manifest rewrite, expire, and orphan usually
 are **not** run on every commit.
@@ -129,7 +129,23 @@ are **not** run on every commit.
 **all four** types on schedule (§5.4.2, §5.2.4). Manifest / expire / orphan are **poller-only**.
 Nightly compaction covers tables that stop receiving commits.
 
-### 4.3 Industry: how defaults reach tables, and why TMS uses discovery
+### 4.3 Multi-node schedule options
+
+Peer nodes typically use one of four patterns: **1–2** = policy/job grain; **3** = row grain;
+**4** = external Cron + queue.
+
+|                  | 1. Per-node cron + distributed lock                                                                                       | 2. Shared DB compete for trigger                                                                                                      | 3. Due rows + row-level CAS                                                                                                                                  | 4. External cron enqueue + multi-consumer                                                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Typical products | ShedLock; Spring + Redis/DB lock                                                                                          | Quartz JDBC Cluster                                                                                                                   | TMS / `IcebergCleanupManager`; Temporal lease; Hangfire; db-scheduler; SQS visibility timeout (analogy)                                                      | OpenHouse CronJob; Floe; cloud Cron → SQS                                                                                                                       |
+| Pros             | Simple; no leader election; prevents double runs of the same job                                                          | Mature; peers share work **by job**; one winner per fire                                                                              | No leader; **row-level** parallelism; lease reclaim on crash; fits large table counts                                                                        | Decouples trigger from execution; consumers scale on the **external** queue                                                                                     |
+| Cons             | Often a **single lock for the whole job** — hard to parallelize **per table**                                             | Trigger is typically **policy/job-scoped**; locking can bottleneck many short fires; heavier stack                                    | Needs a **state table** + lease; needs **materialization / discovery** for above-table policies                                                              | Requires **extra components** (external Cron and/or message queue); duplicate-enqueue and consumer **idempotency** still needed                                 |
+| Chosen? Reason   | **Rejected.** Coarse lock serializes all tables under one policy/job; TMS must run many tables concurrently across peers. | **Rejected.** Same grain as pattern 1: winner then lists the policy scope. Does not give per-table claim shared with the commit path. | **Chosen** (§5.3). Matches in-tree cleanup; poller and commit path share the same `(table, policy)` claim; scales with due rows, not with a single job lock. | **Rejected.** TMS must not introduce other runtime components beyond Gravitino and its entity DB. Pattern **3** keeps coordination in-process + existing store. |
+
+**TMS mapping:** discovery (§4.4 / §5.3.5) materializes due rows; `takePendingDue` + CAS is
+pattern **3**.
+
+---
+### 4.4 Table discovery options
 
 Products close the gap from catalog/scope defaults to runnable table work differently:
 
@@ -158,22 +174,6 @@ complete in-process table list or Create/Update-only copy.
 Bounded lag (default 1h) before a new table is scheduled is the same class of gap other products
 have, while due-work stays scalable with per-row claims.
 
-### 4.4 Industry: multi-node schedule coordination without HA
-
-Peer nodes typically use one of four patterns: **1–2** = policy/job grain; **3** = row grain;
-**4** = external Cron + queue.
-
-|                  | 1. Per-node cron + distributed lock                                                                                       | 2. Shared DB compete for trigger                                                                                                      | 3. Due rows + row-level CAS                                                                                                                                  | 4. External cron enqueue + multi-consumer                                                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Typical products | ShedLock; Spring + Redis/DB lock                                                                                          | Quartz JDBC Cluster                                                                                                                   | TMS / `IcebergCleanupManager`; Temporal lease; Hangfire; db-scheduler; SQS visibility timeout (analogy)                                                      | OpenHouse CronJob; Floe; cloud Cron → SQS                                                                                                                       |
-| Pros             | Simple; no leader election; prevents double runs of the same job                                                          | Mature; peers share work **by job**; one winner per fire                                                                              | No leader; **row-level** parallelism; lease reclaim on crash; fits large table counts                                                                        | Decouples trigger from execution; consumers scale on the **external** queue                                                                                     |
-| Cons             | Often a **single lock for the whole job** — hard to parallelize **per table**                                             | Trigger is typically **policy/job-scoped**; locking can bottleneck many short fires; heavier stack                                    | Needs a **state table** + lease; needs **materialization / discovery** for above-table policies                                                              | Requires **extra components** (external Cron and/or message queue); duplicate-enqueue and consumer **idempotency** still needed                                 |
-| Chosen? Reason   | **Rejected.** Coarse lock serializes all tables under one policy/job; TMS must run many tables concurrently across peers. | **Rejected.** Same grain as pattern 1: winner then lists the policy scope. Does not give per-table claim shared with the commit path. | **Chosen** (§5.3). Matches in-tree cleanup; poller and commit path share the same `(table, policy)` claim; scales with due rows, not with a single job lock. | **Rejected.** TMS must not introduce other runtime components beyond Gravitino and its entity DB. Pattern **3** keeps coordination in-process + existing store. |
-
-**TMS mapping:** discovery (§4.3 / §5.3.5) materializes due rows; `takePendingDue` + CAS is
-pattern **3**.
-
----
 
 ## 5. Proposal
 
@@ -189,7 +189,7 @@ Gravitino IRC (:9001, same JVM as main server)
 
 MaintenancePoller (every node — §5.3)
         takePendingDue → claim → evaluate → submit
-        ├─ Compaction due (§5.4.2) — e.g. Daily · 02:00
+        ├─ Compaction due (§5.4.2)
         ├─ Track A (§5.5): manifest | expire (soft: manifest before expire; worst-first)
         ├─ Track B (§5.6): orphan (oldest-cleanup-first; olderThan floor)
         └─ shared: optional maintenance window + maxConcurrentJobs
@@ -250,17 +250,15 @@ effective_policy(table, maintenance_type) =
 
 Only **one** policy per maintenance type is evaluated for a table.
 
-#### 5.2.4 Policy schedule (UI: Daily · 02:00, Sun · 03:00, Weekly, Paused)
+#### 5.2.4 Policy schedule
 
 Each policy stores a **schedule** in `policy_meta.content`; TMS sets wall-clock **`next_due_at`** from it.
 
-**Illustrative UI rows and content:**
+**Illustrative `content.schedule`:**
 
 |                             | `nightly_compaction`                                    | `weekly_snapshot_expiry`                                               | `manifest_rewrite`                                      | `orphan_cleanup`                                                       |
 | --------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- |
 | Applies to                  | All Iceberg…                                            | All Iceberg…                                                           | `events.*`                                              | All                                                                    |
-| Schedule (UI)               | Daily · 02:00                                           | Sun · 03:00                                                            | Daily · 04:00                                           | Weekly                                                                 |
-| Status                      | Active                                                  | Active                                                                 | Active                                                  | Paused                                                                 |
 | `content.schedule` (stored) | `{ "type": "daily", "at": "02:00", "timezone": "UTC" }` | `{ "type": "weekly", "day": "SUN", "at": "03:00", "timezone": "UTC" }` | `{ "type": "daily", "at": "04:00", "timezone": "UTC" }` | `{ "type": "weekly", "day": "SUN", "at": "04:00" }` + `enabled: false` |
 
 **`next_due_at` computation:**
@@ -270,7 +268,7 @@ on create/schedule change: next_due_at = nextOccurrence(schedule, timezone)
 on job finish: next_due_at = nextOccurrence(schedule, timezone, after = job_finished_at)
 ```
 
-**Paused:** `enabled = false` → poller and commit path skip.
+**Disabled:** `policy_meta.enabled = false` → poller and commit path skip.
 
 **`minIntervalMs`:** min gap between runs via `last_job_id` → `job_finished_at` on **both** paths.
 
@@ -406,7 +404,7 @@ the only schedule driver; §7 is for manual / CLI runs only.
 #### 5.3.5 Scope discovery (above-table attachments)
 
 Discovery expands schema / catalog / metalake attachments into **table-level** state rows (§5.2.5).
-It does **not** replace `takePendingDue`. **Why discovery:** §4.3.
+It does **not** replace `takePendingDue`. **Why discovery:** §4.4.
 
 **Catalog source:** list tables from the **Iceberg/HMS** backend used by IRC — not only Gravitino
 `table_meta`.
@@ -510,7 +508,7 @@ Pattern: `IcebergCleanupManager` / `takePendingJob` (§5.3).
 2. Apply `standard` profile or create/attach four policies; set schedules (§5.2.4).
 3. Enable poller (`gravitino.maintenance.poller.enabled=true`, §8.1).
 4. IRC commits INSERT events + compaction callback (§5.4.1); poller claims due rows (§5.3).
-5. Observe via Jobs UI; manual runs via §7.
+5. Observe via Jobs APIs; manual runs via §7.
 
 ---
 
@@ -715,7 +713,7 @@ Each type has its own `minIntervalMs`, compared per `(table, policy_id)` via
 
 |           | Deployment                                               | Policy                                                                          | Trigger                                                                     | Discovery                                                        | Multi-node                                                        | Executor                                          | Durability                                                       | Orchestration                                    | Industry                             | Fault tolerance                                              |
 | --------- | -------------------------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------ | ------------------------------------------------------------ |
-| Checklist | `extensionPackages`; IRC same JVM; ops on **8090** (§7). | Four types; nearest-wins; table attach immediate; above-table discovery (§5.2). | Compaction: commit + poller; others: poller + `next_due_at` (§5.4, §5.2.4). | Iceberg/HMS list; separate from `takePendingDue` (§5.3.5, §4.3). | No leader; per-row CAS like `IcebergCleanupManager` (§5.3, §4.4). | Bounded; evaluate **off** commit thread (§5.4.1). | Event INSERT per commit (§6.3); state for claim/schedule (§6.2). | Track A soft order; orphan separate (§5.5–§5.6). | §4.2 / §4.3 / §4.4 (row CAS chosen). | Poller at-least-once latest-state; commit best effort (§10). |
+| Checklist | `extensionPackages`; IRC same JVM; ops on **8090** (§7). | Four types; nearest-wins; table attach immediate; above-table discovery (§5.2). | Compaction: commit + poller; others: poller + `next_due_at` (§5.4, §5.2.4). | Iceberg/HMS list; separate from `takePendingDue` (§5.3.5, §4.4). | No leader; per-row CAS like `IcebergCleanupManager` (§5.3, §4.3). | Bounded; evaluate **off** commit thread (§5.4.1). | Event INSERT per commit (§6.3); state for claim/schedule (§6.2). | Track A soft order; orphan separate (§5.5–§5.6). | §4.2 / §4.3 / §4.4 (row CAS chosen). | Poller at-least-once latest-state; commit best effort (§10). |
 
 ---
 
