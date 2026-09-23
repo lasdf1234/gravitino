@@ -44,9 +44,8 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
   `table_maintenance_event` row (§6.3), then invokes an in-process TMS callback for **compaction
   only** (§5.4.1).
 - **Scheduled path** — each Gravitino node runs a **`MaintenancePoller`** (`takePendingDue` per-row
-  claim). When `next_due_at` is reached (for example **Daily · 02:00** compaction, **Sun · 03:00**
-  snapshot expiry), any node may claim and run that policy. **All four policy types**, including
-  compaction, use this path (§10: at-least-once latest-state).
+  claim). When `next_due_at` is reached, any node may claim and run that policy. **All four policy
+  types**, including compaction, use this path (§10: at-least-once latest-state).
 
 When commit and poller collide on the same compaction row, they share **`table_maintenance_state`**
 and the same per-row **claim** so only one submission wins (§5.4.3, §6.1). Scheduling lives in the
