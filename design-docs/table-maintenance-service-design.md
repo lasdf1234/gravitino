@@ -44,12 +44,13 @@ TMS uses a **dual trigger model** (§5.3):
 
 - **Commit path** — IRC wakes **compaction only** after each successful commit (bounded executor,
   per-policy claim, `minIntervalMs`, Recommender → submit). Best effort.
-- **Scheduled path** — a **K8s CronJob** (or any external orchestrator) calls
-  `POST …/maintenance/scheduled-run` on a cadence. TMS scans tables, refreshes statistics, and runs
-  manifest rewrite, snapshot expiry, and orphan cleanup. At-least-once latest-state.
+- **Scheduled path** — each Gravitino node runs a **`MaintenancePoller`** (same pattern as
+  `IcebergCleanupManager`: worker loops, `pollIntervalMs`, `takePendingDue` per-row claim).
+  Manifest rewrite, snapshot expiry, and orphan cleanup run when a policy row's `next_due_at` has
+  passed. At-least-once latest-state.
 
-There is **no** in-process periodic scheduler and **no** cluster-wide scheduler lease inside
-Gravitino (§4.5–§4.6).
+There is **no** cluster-wide scheduler lease (§4.5). Coordination is **per-(table, policy) row**
+claim, matching `iceberg_cleanup_job` / `IcebergCleanupJobStore.takePendingJob` (§4.6, §5.3).
 
 ---
 
@@ -68,8 +69,8 @@ Gravitino (§4.5–§4.6).
 4. **Precedence per maintenance type**: For each maintenance type, the **nearest** attachment along
    `table → schema → catalog → metalake` wins. Policies are **not** additive for maintenance (§5.2).
 5. **Dual trigger model**: Commit path drives **compaction only** (§5.4). Scheduled path is driven by
-   an **external clock** (K8s CronJob → `scheduled-run` API) for manifest rewrite, snapshot expiry,
-   and orphan cleanup (§5.3, §5.5–§5.6).
+   a **built-in `MaintenancePoller`** on every node (poll + `takePendingDue` claim) for manifest
+   rewrite, snapshot expiry, and orphan cleanup (§5.3, §5.5–§5.6).
 6. **Reuse existing optimizer execution core**: Both paths invoke the same `Updater` /
    `Recommender` / job-submit paths in `maintenance/optimizer` as **in-process methods**.
 7. **Job framework compatibility**: Spark maintenance work continues to use the Gravitino job
@@ -92,15 +93,17 @@ Gravitino (§4.5–§4.6).
 2. **Dedicated auxiliary HTTP listener**: No `GravitinoAuxiliaryService`, no isolated
    `gravitino.maintenance.classpath`, and no dedicated TMS port (for example **9301**). TMS is not
    a dedicated listener like `iceberg-rest` / `lance-rest`.
-3. **Built-in HA scheduler**: No `MaintenanceScheduler`, no `scheduler.intervalMs`, and no
-   cluster-wide scheduler lease inside Gravitino (§4.5). Timed maintenance uses an external orchestrator.
-4. **Per-commit event log**: No `table_maintenance_event` table (§6.3). Interval and recovery use
+3. **Cluster-wide scheduler lease**: No single-node leader that scans all tables each tick (§4.5).
+   Timed maintenance uses **per-node pollers** and **per-row claims** instead (§4.6).
+4. **K8s CronJob as the default clock**: Not required for 2.0; optional external `run-due` API only
+   (§4.7).
+5. **Per-commit event log**: No `table_maintenance_event` table (§6.3). Interval and recovery use
    `table_maintenance_state` + `job_run_meta`, not one INSERT per commit.
-5. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
+6. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
    `StatisticsProvider`, `StrategyProvider`, `TableMetadataProvider`, or `JobSubmitter` contracts.
-6. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
+7. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
    for the commit compaction path.
-7. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, and no Kafka
+8. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, and no Kafka
    produce/consume path. Commit handling is **in-process only** (§5.1.1).
 
 ---
@@ -123,7 +126,7 @@ Register Table Maintenance as a Jersey 2 `Feature` through
 `gravitino.server.rest.extensionPackages` (same pattern as IdP) so it runs inside the main server
 process. The commit path does **not** use HTTP. After each Iceberg commit, the **colocated** IRC hook
 enqueues **compaction-only** evaluate → submit on a bounded executor (§5.4). Timed maintenance is
-triggered by an external CronJob calling `scheduled-run` (§4.6).
+driven by a built-in `MaintenancePoller` on every node (§4.6).
 
 **Pros:** No extra process or port; no remote event hop on the commit path; reuses Policy + Jobs on
 the same server; matches plugin packaging; keeps Gravitino replicas peer-equal (no maintenance leader).
@@ -151,68 +154,82 @@ listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 
 **Decision:** Rejected. Prefer Option B.
 
-### 4.5 Option F: Built-in scheduler with cluster lease (Rejected)
+### 4.5 Option F: Cluster-wide scheduler lease (Rejected)
 
 Run a `MaintenanceScheduler` inside every Gravitino replica. Each tick attempts to acquire a
 **cluster-wide scheduler lease** in the entity DB; the winner scans all tables, ranks candidates,
 and submits jobs until `maxConcurrentJobs` is reached.
 
-**Pros:**
-
-- Self-contained: no K8s (or other orchestrator) dependency.
-- Missed commit signals recover on the next tick.
-- One configuration surface (`gravitino.maintenance.scheduler.*`).
-
 **Cons:**
 
 - **Leader/follower scheduling inside a peer-replica service.** Only one node runs each tick even
-  though every replica serves IRC traffic. That introduces a maintenance **master** role that
-  Gravitino's otherwise stateless, load-balanced deployment model does not have elsewhere.
-- **Duplicate work without the lease:** if every replica scanned independently, catalog reads,
-  statistics refresh, and evaluate calls would multiply by replica count; `maxConcurrentJobs` would
-  be ambiguous (per node vs cluster-wide).
-- **Reinvents an external orchestrator.** A 5-minute in-process tick is functionally similar to a
-  CronJob calling a wake-up API; the orchestration logic (candidate selection, ranking, claims,
-  `minIntervalMs`) still lives in TMS either way.
-- **Industry pattern:** products that ship a maintenance service often expose a **scheduler or
-  trigger API** and let the platform operator choose the clock (Floe: built-in scheduler **or** external
-  `POST …/maintenance/trigger`; OpenHouse: K8s CronJob data services). Few require every application
-  replica to elect a maintenance leader.
+  though every replica serves IRC traffic.
+- Unnecessary when **per-row claims** already prevent duplicate work (see §4.6).
 
-**Decision:** **Rejected.** Use an external clock (§4.6) for timed maintenance. Gravitino nodes stay
-peers; coordination is limited to **per-(table, policy) claims** on submit (§6).
+**Decision:** **Rejected.** Do not elect a maintenance leader. Use per-node pollers and per-row
+claims instead.
 
-### 4.6 Option G: K8s CronJob external clock (Chosen for timed maintenance)
+### 4.6 Option G: Per-node `MaintenancePoller` + `takePendingDue` claim (Chosen)
 
-A single CronJob (or enterprise scheduler — Airflow, Argo, etc.) calls TMS on a cadence:
+Mirror the existing **`IcebergCleanupManager`** pattern
+(`iceberg/iceberg-rest-server/.../cleanup/IcebergCleanupManager.java`):
 
 ```text
-POST /api/metalakes/{metalake}/maintenance/scheduled-run
+Every Gravitino node (same JVM as TMS plugin):
+  workerThreads × workerLoop():
+    1. takePendingDue(now, heartbeatTimeoutMs, candidateWindow)
+         → SELECT rows WHERE next_due_at <= now
+           AND (state = IDLE OR stale RUNNING heartbeat)
+           ORDER BY track ranking LIMIT window
+         → for each candidate: CAS UPDATE state = RUNNING (rows_affected = 1 wins)
+    2. if empty → sleep(pollIntervalMs)
+    3. refresh heartbeat on owned rows (like refreshHeartbeats)
+    4. evaluate → Recommender → submit for claimed row
+    5. on success: last_job_id, next_due_at = finished_at + minIntervalMs, state = IDLE
+    6. on failure / node death: heartbeat expires → another node reclaims row
 ```
 
-TMS performs candidate selection, statistics refresh, worst-first ranking, hot pipeline
-(`manifest → expire`), orphan track, claims, and job submission. The CronJob only answers **when**
-to start a maintenance round.
+| `IcebergCleanupManager` | TMS `MaintenancePoller` |
+| ----------------------- | ------------------------- |
+| `iceberg_cleanup_job` row | `table_maintenance_state` row per `(table, policy)` |
+| `takePendingJob` | `takePendingDue` |
+| `markRunning` CAS | same claim on `state` + `claim_lease_expires_at` |
+| `heartbeat` / `heartbeatTimeoutMs` | same |
+| `pollIntervalMs`, `workerThreads`, `candidateWindow` | same config shape (§8.1) |
+| PENDING → RUNNING | IDLE (due) → RUNNING |
 
 **Pros:**
 
-- **Explicit singleton invoker** — `concurrencyPolicy: Forbid` on the CronJob replaces an internal
-  scheduler lease without making Gravitino replicas asymmetric.
-- **Familiar ops model** — schedule, timezone, and maintenance window live in GitOps / Helm next to
-  other batch jobs.
-- **Same TMS logic** — candidate rules, `minIntervalMs`, Recommender, and claims stay in one place;
-  only the wake-up mechanism moves out of process.
+- **No K8s dependency**; works on any install (VM, bare metal, K8s).
+- **No cluster-wide lease**; many due rows claimed by **different nodes** in parallel.
+- **Same mechanism as commit path** — operators and implementers already understand row claims.
+- **Schedule in Gravitino config** (and future UI), not in a K8s YAML file.
+- Proven in-tree: GC pollers, entity change log cleaner, and `IcebergCleanupManager` all use
+  per-node timers; cleanup uses **row-level CAS**, which is the coordination model here.
 
 **Cons:**
 
-- Requires a cluster (or external scheduler). Non-K8s deployments must run an equivalent periodic
-  `curl` / ops script (documented in §5.3).
-- Cron granularity is coarser than a 5-minute in-process tick; per-table `minIntervalMs` still gates
-  actual work.
+- Poll granularity is config-driven (`pollIntervalMs`), not operator cron syntax.
+- Worst-first ranking is approximate (SQL `ORDER BY` on due rows per poll batch), not a single
+  global scan — acceptable for maintenance throughput.
 
-**Decision:** **Chosen** for manifest rewrite, snapshot expiry, and orphan cleanup.
+**Decision:** **Chosen** for manifest rewrite, snapshot expiry, and orphan cleanup in 2.0.
 
-### 4.7 Industry survey: scheduled maintenance clocks
+### 4.7 Option H: K8s CronJob as the default clock (Rejected for 2.0)
+
+A CronJob calls `POST …/maintenance/scheduled-run` (or `run-due`) on a cadence.
+
+**Cons:**
+
+- Does not work for non-Kubernetes installs without an external cron script.
+- Puts the schedule in K8s manifests where the Gravitino UI cannot show or change it.
+- Duplicates what a built-in poller already provides.
+
+**Decision:** **Rejected as the 2.0 default.** Optional follow-up: expose
+`POST …/maintenance/run-due` that runs **one poller cycle** (process whatever rows are due now) for
+operators who prefer an external clock. Built-in `MaintenancePoller` remains the default.
+
+### 4.8 Industry survey: scheduled maintenance clocks
 
 Most lakehouse maintenance products treat **snapshot expiry, manifest rewrite, and orphan cleanup** as
 **time-driven** (scheduler, cron, or platform optimizer interval), not as post-commit hooks.
@@ -225,12 +242,11 @@ Most lakehouse maintenance products treat **snapshot expiry, manifest rewrite, a
 | [OpenHouse](https://github.com/linkedin/openhouse/blob/main/ARCHITECTURE.md) | K8s **CronJob** data services | Operator-defined | Table maintenance jobs triggered by platform cron |
 | [Databricks OPTIMIZE / VACUUM guidance](https://docs.databricks.com/aws/en/tables/operations/optimize) | Scheduled jobs or predictive optimization | **Daily** recommended starting point for `OPTIMIZE`; predictive layer for UC tables | File layout (`OPTIMIZE`) and vacuum are **scheduled / platform-driven**, separate from write path |
 
-**Takeaway for TMS:** timed maintenance belongs on an **external or platform scheduler**. TMS exposes
-`scheduled-run`; operators configure **when** to call it (K8s CronJob). **Per-table eligibility**
-(`minIntervalMs`, `olderThan`, Recommender thresholds) remains in TMS policy content — the CronJob
-does not encode per-table logic.
+**Takeaway for TMS:** timed maintenance is **time-driven** in industry; TMS implements that with a
+built-in poller plus per-row `next_due_at` / `minIntervalMs`. External cron (Floe trigger API,
+OpenHouse CronJob) is optional, not the 2.0 default.
 
-### 4.8 Industry survey: commit / write-path triggers
+### 4.9 Industry survey: commit / write-path triggers
 
 **Compaction** (rewrite data files, small-file consolidation) is the operation most often tied to
 **writes or commits**. Manifest rewrite, snapshot expiry, and orphan cleanup are usually **not**
@@ -255,8 +271,8 @@ run on every commit.
 | Industry alignment | Databricks auto-compact; Amoro minor optimizing | Glue, Amoro, Floe schedule expire / orphan / manifest separately |
 
 **TMS decision:** IRC commit path runs **`system_iceberg_compaction` only** (§5.4). Manifest rewrite,
-snapshot expiry, and orphan cleanup run only on **`scheduled-run`** (§5.5–§5.6). This matches the
-dominant industry split while keeping a fast write path.
+snapshot expiry, and orphan cleanup run only when a **`MaintenancePoller`** claims a due policy row
+(§5.3, §5.5–§5.6). This matches the dominant industry split while keeping a fast write path.
 
 ---
 
@@ -276,24 +292,22 @@ Gravitino Iceberg REST (IRC, typically :9001)
                 └─ bounded executor → compaction evaluate → submit
                    (per-policy claim; minIntervalMs; Recommender)
 
-K8s CronJob (or external scheduler)
-        │  POST …/maintenance/scheduled-run  (§5.3)
+MaintenancePoller (every Gravitino node — §5.3)
+        │  workerLoop: takePendingDue → claim row → evaluate → submit
         v
-ScheduledMaintenanceService
-        │
         ├─ Track A — hot pipeline (§5.5):
-        │     candidates: manifest / expire due (minIntervalMs)
+        │     due rows: manifest / expire policies (next_due_at <= now)
         │     refresh statistics (Updater)
-        │     rank tables worst-first
+        │     rank claimed batch worst-first
         │     per table: manifests → expire (Recommender → SQL)
         │
         ├─ Track B — orphan cleanup (§5.6):
-        │     candidates: orphan policy + per-table minIntervalMs elapsed
-        │     rank oldest-successful-cleanup first
+        │     due rows: orphan policy (next_due_at <= now)
+        │     rank oldest-successful-cleanup first in candidate window
         │     remove orphan files SQL (olderThan enforced server-side)
         │
         ├─ shared: maintenance window (optional) + maxConcurrentJobs
-        │     (tables not reached carry over to next Cron invocation)
+        │     (unclaimed due rows remain for next poll on any node)
         v
 Gravitino Job framework + job_run_meta (every run — §6.5)
 ```
@@ -324,9 +338,9 @@ attachment grain:
 | Maintenance type | Illustrative policy type | Built-in job template | Typical attachment | Trigger path |
 | ---------------- | ------------------------ | --------------------- | ------------------ | ------------ |
 | Compaction | `system_iceberg_compaction` | `builtin-iceberg-compaction` | Table | **Commit** (§5.4) + optional manual / ops |
-| Manifest rewrite | `system_iceberg_rewrite_manifests` | `builtin-iceberg-rewrite-manifests` | Table or schema | **Scheduled** (§5.5) |
-| Snapshot expiry | `system_iceberg_snapshot_expiration` | `builtin-iceberg-expire-snapshots` | Catalog | **Scheduled** (§5.5) |
-| Orphan cleanup | `system_iceberg_orphan_file_removal` | `builtin-iceberg-remove-orphan-files` | Catalog | **Scheduled** (§5.6) |
+| Manifest rewrite | `system_iceberg_rewrite_manifests` | `builtin-iceberg-rewrite-manifests` | Table or schema | **Poller** (§5.3, §5.5) |
+| Snapshot expiry | `system_iceberg_snapshot_expiration` | `builtin-iceberg-expire-snapshots` | Catalog | **Poller** (§5.3, §5.5) |
+| Orphan cleanup | `system_iceberg_orphan_file_removal` | `builtin-iceberg-remove-orphan-files` | Catalog | **Poller** (§5.3, §5.6) |
 
 See [iceberg-compaction-policy](../docs/iceberg-compaction-policy.md),
 [iceberg-expire-snapshots-maintenance-job](./iceberg-expire-snapshots-maintenance-job.md),
@@ -364,80 +378,78 @@ Only **one** policy per maintenance type is evaluated for a table.
 
 ---
 
-### 5.3 Scheduled path: external clock + `scheduled-run` API
+### 5.3 Scheduled path: `MaintenancePoller` (poll + `takePendingDue`)
 
-Timed maintenance is **not** driven by an in-process ticker. An external orchestrator invokes TMS.
+Timed maintenance uses the same coordination model as **`IcebergCleanupManager`**: every Gravitino
+node runs worker loops that poll the entity DB for **due rows** and claim them with compare-and-swap.
+There is **no** cluster-wide scheduler lease.
 
-#### 5.3.1 `POST /api/metalakes/{metalake}/maintenance/scheduled-run`
+#### 5.3.1 Poller lifecycle
 
-**Request:**
+On TMS plugin start (when `gravitino.maintenance.poller.enabled=true`, §8.1):
 
-| Field | Type | Required | Description |
-| ----- | ---- | -------- | ----------- |
-| `tracks` | string[] | no | Subset of `hot-pipeline`, `orphan`. Default: both. |
-| `maxTables` | integer | no | Cap tables processed this round (worst-first / oldest-first). |
-| `dryRun` | boolean | no | Return planned work without submit. Default `false`. |
+1. Start `workerThreads` worker loops (daemon threads, like `iceberg-cleanup-worker`).
+2. Start one scheduler thread for **heartbeat renewal** on owned rows (`refreshClaimHeartbeats`).
+3. Each worker iteration:
+   - `TableMaintenanceStateStore.takePendingDue(now, heartbeatTimeoutMs, candidateWindow)`
+   - If a row is claimed (`rows_affected = 1`): run `MaintenanceEvaluateSubmitPipeline` for that
+     `(table, policy)` (refresh stats for hot-pipeline types, Recommender, submit).
+   - If nothing due: `sleep(pollIntervalMs)`.
+4. On plugin shutdown: stop workers; in-flight claims expire via `heartbeatTimeoutMs` and are
+   reclaimed by peers.
 
-**Response:** `202 Accepted`
+#### 5.3.2 Due rows (`next_due_at`)
 
-```json
-{
-  "roundId": "…",
-  "tracks": ["hot-pipeline", "orphan"],
-  "tablesConsidered": 120,
-  "jobsSubmitted": 8,
-  "deferred": 112
-}
+Each `table_maintenance_state` row for a **non-compaction** policy carries:
+
+| Field | Role |
+| ----- | ---- |
+| `next_due_at` | Epoch millis when this row becomes eligible for `takePendingDue` |
+| `state` | `IDLE` (claimable) or `RUNNING` (a node owns evaluate → submit) |
+| `claim_lease_expires_at` / heartbeat | Reclaim stale `RUNNING` like `iceberg_cleanup_job.heartbeat_at` |
+
+**When `next_due_at` is set:**
+
+- On policy attach: `next_due_at = now` (first run eligible immediately on next poll).
+- After successful maintenance: `next_due_at = job_finished_at + minIntervalMs`.
+- Compaction rows on the commit path use the same `last_job_id` / `minIntervalMs` gate but are **not**
+  picked by the poller (commit path only).
+
+**Candidate selection SQL (illustrative):**
+
+```sql
+SELECT … FROM table_maintenance_state
+ WHERE next_due_at <= :now
+   AND policy_type IN ('manifest-rewrite', 'snapshot-expiry', 'orphan-cleanup')
+   AND (state = 'IDLE'
+        OR (state = 'RUNNING' AND claim_lease_expires_at < :now))
+ ORDER BY
+   CASE track WHEN 'orphan' THEN oldest_cleanup_score END,
+   CASE track WHEN 'hot-pipeline' THEN health_score END DESC
+ LIMIT :candidateWindow
 ```
 
-**Behavior:**
+Then for each row: `UPDATE … SET state='RUNNING', claim_lease_expires_at=… WHERE … AND state='IDLE'`
+(same CAS pattern as `IcebergCleanupJobStore.takePendingJob` / `markRunning`).
 
-1. Authenticate caller (service account or operator token with maintenance invoke privilege).
-2. If `maintenanceWindow` is configured (§8.1) and current UTC time is outside the window, return
-   `200` with `jobsSubmitted: 0` and `deferredReason: "outside_maintenance_window"`.
-3. Enumerate tables with attached policies for the requested tracks.
-4. Refresh statistics (`Updater`) before evaluate on the hot pipeline.
-5. Rank candidates, claim per `(table, policy)`, apply `minIntervalMs`, Recommender, submit until
-   `maxConcurrentJobs` slots are used.
-6. Write `job_run_meta` for every submission (§6.5).
+#### 5.3.3 Multi-node behavior
 
-**Idempotency:** safe to call on overlapping schedules when Cron `concurrencyPolicy: Forbid` is set.
-Per-policy claims prevent duplicate submits across concurrent Gravitino nodes.
+```text
+Node A worker claims table1.manifest policy row
+Node B worker claims table2.expire policy row   ← parallel, no leader
+Node C worker claims table3.orphan policy row
 
-#### 5.3.2 Example K8s CronJob
-
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: gravitino-maintenance-scheduled
-spec:
-  schedule: "0 22 * * *"          # nightly; cluster timezone
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: trigger
-            image: curlimages/curl:8.5.0
-            command:
-            - sh
-            - -c
-            - |
-              curl -sf -X POST \
-                -H "Authorization: Bearer ${MAINTENANCE_TOKEN}" \
-                -H "Content-Type: application/json" \
-                -d '{"tracks":["hot-pipeline","orphan"]}' \
-                "http://gravitino:8090/api/metalakes/${METALAKE}/maintenance/scheduled-run"
-          restartPolicy: OnFailure
+Node A dies mid-run → heartbeat expires → Node B takePendingDue reclaims table1 row
 ```
 
-**Non-K8s:** run the same `curl` from cron, Airflow, or CI on the desired cadence.
+`maxConcurrentJobs` (§8.1) caps **cluster-wide** in-flight Spark submissions; workers stop claiming
+new rows when the cap is reached until slots free up.
 
-**Why one CronJob is enough:** orphan eligibility uses **per-table** `minIntervalMs` (default 7 days),
-not a separate weekly Cron. A nightly `scheduled-run` scans all tables; only tables past their
-interval are submitted.
+#### 5.3.4 Optional external trigger (non-default)
+
+`POST /api/metalakes/{metalake}/maintenance/run-due` may be added later: runs **one poller cycle**
+(process due rows now) for operators who want an external clock. **2.0 default:** built-in poller only;
+no K8s CronJob requirement.
 
 ---
 
@@ -467,7 +479,7 @@ IRC commit succeeded (same JVM)
 
 ### 5.5 Hot pipeline (scheduled — Track A)
 
-When `scheduled-run` selects a table for **Track A**, enabled operations run in this **fixed order**:
+When the poller claims a table for **Track A**, enabled operations run in this **fixed order**:
 
 ```text
 1. manifests         Recommender → rewrite manifests SQL
@@ -510,15 +522,16 @@ policy write (§8.1).
 
 | Part | Responsibility |
 | ---- | -------------- |
-| `TableMaintenanceRESTFeature` | Jersey 2 `Feature`; commit callback, `scheduled-run`, ops resources (§7). |
+| `TableMaintenanceRESTFeature` | Jersey 2 `Feature`; commit callback, poller lifecycle, ops resources (§7). |
 | `IcebergCommitEventHandler` | Enqueues compaction pipeline on bounded executor (§5.4). |
-| `ScheduledMaintenanceService` | `scheduled-run` handler: candidates → stats → evaluate → submit (§5.3). |
-| `MaintenanceEvaluateSubmitPipeline` | Claim → interval gate → Recommender → submit for one `(table, policy)`. |
-| `TableMaintenanceStateStore` | `table_maintenance_state` upsert / claim / rename (§6). |
+| `MaintenancePoller` | Worker loops + heartbeat scheduler; `takePendingDue` → evaluate → submit (§5.3). |
+| `MaintenanceEvaluateSubmitPipeline` | Interval gate → Recommender → submit for one claimed `(table, policy)`. |
+| `TableMaintenanceStateStore` | `table_maintenance_state` upsert / `takePendingDue` / heartbeat / rename (§6). |
 | `IcebergTableLifecycleHook` | IRC rename/drop: rewrite or purge state rows (§6.4). |
 | Existing optimizer classes | `Updater`, `Recommender`, providers, `JobSubmitter`. |
 
-There is **no** `MaintenanceScheduler` and **no** `TableMaintenanceEventStore`.
+Pattern reference: `IcebergCleanupManager`, `IcebergCleanupJobStore.takePendingJob`. There is **no**
+cluster-wide scheduler lease and **no** `TableMaintenanceEventStore`.
 
 ---
 
@@ -528,10 +541,11 @@ There is **no** `MaintenanceScheduler` and **no** `TableMaintenanceEventStore`.
    and turns on in-process commit callbacks (§5.1.1 / §8.2).
 2. Operator applies a **`standard` profile** or creates four policies and attaches them at the
    intended grains via metalake Policy APIs.
-3. Operator deploys a **K8s CronJob** (or equivalent) that calls `scheduled-run` nightly (§5.3.2).
+3. Operator enables the **maintenance poller** (`gravitino.maintenance.poller.enabled=true`, §8.1).
 4. Engines write through Gravitino Iceberg REST. On commit success, IRC enqueues **compaction**
    evaluate → submit (§5.4).
-5. On each Cron invocation, TMS runs manifest / expire / orphan tracks within limits (§5.3).
+5. On each poll cycle on every node, workers claim due manifest / expire / orphan rows and submit
+   within `maxConcurrentJobs` (§5.3).
 6. Operators observe runs in the Gravitino **Jobs** UI / APIs. Manual runs remain available through
    ops APIs (§7) and `runJob`.
 
@@ -539,9 +553,9 @@ There is **no** `MaintenanceScheduler` and **no** `TableMaintenanceEventStore`.
 
 ## 6. Multi-node coordination (shared claim)
 
-On **multiple** Gravitino / TMS nodes, commit compaction and `scheduled-run` handling may run on
-**any** replica that receives the IRC commit or the HTTP call. Without coordination, two nodes could
-both evaluate and submit the same policy's job for the same table.
+On **multiple** Gravitino / TMS nodes, commit compaction and poller workers may run on **any**
+replica. Without coordination, two nodes could both evaluate and submit the same policy's job for the
+same table.
 
 **Approach:** shared table `table_maintenance_state` in the Gravitino entity DB. Table identity uses
 a **normalized string `table_identifier`** (`catalog.schema.table`), **not** `table_meta.table_id`.
@@ -550,23 +564,32 @@ a **normalized string `table_identifier`** (`catalog.schema.table`), **not** `ta
 | ----- | ---- |
 | `table_maintenance_state` | Multi-node **claim**, in-flight `job_id`, finished `last_job_id` per policy (§6.1–§6.2) |
 
-**No cluster-wide scheduler lease.** The external CronJob (with `concurrencyPolicy: Forbid`) is the
-singleton **wake-up** invoker. Gravitino replicas remain peers.
+**No cluster-wide scheduler lease.** Every node polls; **per-row CAS** picks the winner, like
+`IcebergCleanupJobStore.takePendingJob`. Gravitino replicas remain peers.
 
 `table_maintenance_state` primary key is `(metalake_id, table_identifier, policy_id)` — **one row per
-effective maintenance policy instance** for a table. Claim is **per policy row**.
+effective maintenance policy instance** for a table.
 
-### 6.1 Claim flow
+### 6.1 Claim flow (`takePendingDue` / commit path)
+
+**Poller path** (same CAS as `markRunning` on `iceberg_cleanup_job`):
 
 ```text
-Node A / Node B — both evaluate the same (table, policy)
+Node A / Node B — both poll due rows
         │
-        ├─ both attempt per-policy claim:
-        │     UPDATE … SET state=RUNNING, claim_lease_expires_at=now+leaseMs
-        │     WHERE metalake_id=? AND table_identifier=? AND policy_id=? AND state=IDLE
-        │     ├─ Node A: rows_affected = 1 → runs evaluate → submit → release to IDLE
-        │     └─ Node B: 0 rows → skip (another node holds claim)
+        ├─ both SELECT candidate rows (next_due_at <= now, IDLE or stale RUNNING)
+        ├─ both attempt per-row claim:
+        │     UPDATE … SET state=RUNNING, claim_lease_expires_at=now+leaseMs, updated_at=now
+        │     WHERE metalake_id=? AND table_identifier=? AND policy_id=?
+        │       AND (state=IDLE OR (state=RUNNING AND claim_lease_expires_at < now))
+        │     ├─ Node A: rows_affected = 1 → evaluate → submit → IDLE, set next_due_at
+        │     └─ Node B: 0 rows → try next candidate
+        v
+refreshClaimHeartbeats on owned rows (peer cannot finish with stale heartbeat token)
 ```
+
+**Commit compaction path** uses the same `state` / `claim_lease_expires_at` columns; it does not
+depend on `next_due_at` for wake-up.
 
 Gate checks alone are insufficient (read race). **Claim is the write lock** for that policy row.
 
@@ -580,7 +603,8 @@ Gate checks alone are insufficient (read race). **Claim is the write lock** for 
 | `table_identifier` | `VARCHAR(512) NOT NULL` | Normalized `catalog.schema.table` |
 | `policy_id` | `BIGINT UNSIGNED NOT NULL` | Real `policy_meta.policy_id` |
 | `state` | `VARCHAR(16) NOT NULL` | `IDLE` / `RUNNING` (per policy row) |
-| `updated_at` | `BIGINT NOT NULL` | Epoch millis; claim / reclaim |
+| `next_due_at` | `BIGINT NOT NULL` | Epoch millis; poller selects rows with `next_due_at <= now` (§5.3) |
+| `updated_at` | `BIGINT NOT NULL` | Epoch millis; claim / reclaim / heartbeat |
 | `job_id` | `BIGINT UNSIGNED NULL` | In-flight job (`job_run_meta.job_run_id`) |
 | `last_job_id` | `BIGINT UNSIGNED NULL` | Last finished job; `job_finished_at` drives min-interval |
 | `last_measured_snapshot_id` | `BIGINT NULL` | Snapshot id at last successful evaluate (§10.3) |
@@ -597,17 +621,19 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
     `table_identifier` VARCHAR(512) NOT NULL COMMENT 'normalized catalog.schema.table',
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
     `state` VARCHAR(16) NOT NULL COMMENT 'IDLE|RUNNING',
-    `updated_at` BIGINT(20) NOT NULL COMMENT 'last state upsert time in epoch millis',
+    `next_due_at` BIGINT(20) NOT NULL COMMENT 'poller eligibility time, epoch millis',
+    `updated_at` BIGINT(20) NOT NULL COMMENT 'last state/heartbeat upsert, epoch millis',
     `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'in-flight job_run_id',
     `last_job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last finished job_run_id',
     `last_measured_snapshot_id` BIGINT(20) NULL COMMENT 'snapshot id at last evaluate',
     `claim_lease_expires_at` BIGINT(20) NULL COMMENT 'claim lease expiry, epoch millis',
     `submission_idempotency_key` VARCHAR(64) NULL COMMENT 'idempotency key before job submit',
     PRIMARY KEY (`metalake_id`, `table_identifier`, `policy_id`),
+    KEY `idx_due_state` (`next_due_at`, `state`),
     KEY `idx_state_updated` (`state`, `updated_at`),
     KEY `idx_table_identifier` (`table_identifier`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'TMS per-policy claim and job state';
+  COMMENT 'TMS per-policy due time, claim, and job state';
 ```
 
 ### 6.3 `table_maintenance_event` — not in this design
@@ -617,7 +643,7 @@ Earlier drafts INSERTed one `table_maintenance_event` row per commit. That table
 | Need | Mechanism |
 | ---- | --------- |
 | Minimum time between runs | Per-type `minIntervalMs` + `last_job_id` → `job_run_meta.job_finished_at` (§8.3) |
-| Time-driven maintenance without commits | External Cron → `scheduled-run` (§5.3) |
+| Time-driven maintenance without commits | `MaintenancePoller` + `next_due_at` (§5.3) |
 | Compaction after write | Commit path compaction (§5.4) |
 | Recovery | Table state + `last_measured_snapshot_id` (§10.2) — not a per-commit log |
 
@@ -647,7 +673,7 @@ On job finish, TMS updates `last_job_id`, clears in-flight `job_id`, and records
 
 ## 7. Optimizer CLI replacement APIs
 
-The commit path and `scheduled-run` do **not** call these routes. They replace the
+The commit path and poller do **not** call these routes. They replace the
 `gravitino-optimizer` CLI for operators and scripts on the main webserver (**8090**).
 
 | CLI `--type` | Method | Path |
@@ -674,13 +700,17 @@ The commit path and `scheduled-run` do **not** call these routes. They replace t
 | `gravitino.maintenance.claimLeaseMs` | `300000` | Claim lease; reclaim `RUNNING` after expiry (§10.3). |
 | `gravitino.maintenance.executor.threads` | `4` | Bounded executor worker threads (§5.4). |
 | `gravitino.maintenance.executor.queueSize` | `10000` | Bounded executor queue depth. |
-| `gravitino.maintenance.scheduled.maxConcurrentJobs` | `10` | Max concurrent maintenance Spark jobs per round. |
-| `gravitino.maintenance.scheduled.maintenanceWindow` | none | Optional UTC window for `scheduled-run` submissions. |
+| `gravitino.maintenance.poller.enabled` | `true` | Enable `MaintenancePoller` worker loops (§5.3). |
+| `gravitino.maintenance.poller.workerThreads` | `2` | Poller worker threads per node (like `ASYNC_CLEANUP_WORKER_THREADS`). |
+| `gravitino.maintenance.poller.pollIntervalSecs` | `30` | Sleep when no due row claimed (like `ASYNC_CLEANUP_POLL_INTERVAL_SECS`). |
+| `gravitino.maintenance.poller.heartbeatTimeoutSecs` | `300` | Reclaim stale `RUNNING` rows (like `ASYNC_CLEANUP_HEARTBEAT_TIMEOUT_SECS`). |
+| `gravitino.maintenance.poller.candidateWindow` | `8` | Max due rows considered per `takePendingDue` call. |
+| `gravitino.maintenance.poller.maxConcurrentJobs` | `10` | Max concurrent maintenance Spark jobs cluster-wide. |
+| `gravitino.maintenance.poller.maintenanceWindow` | none | Optional UTC window; poller skips submit outside window. |
 | `gravitino.maintenance.orphan.olderThanMinMs` | `259200000` | Server-side minimum `olderThan` (3 days) for orphan cleanup (§5.6). |
 
-There is **no** `gravitino.maintenance.scheduler.enabled` or `scheduler.intervalMs`. Timing for
-scheduled maintenance is configured on the **K8s CronJob** (`schedule` field) or equivalent external
-cron.
+Per-table cadence is **`minIntervalMs`** on each policy row (`next_due_at`), not the poller interval.
+The poller only controls how often nodes **look** for due work.
 
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
@@ -688,7 +718,10 @@ gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.claimTimeoutMs = 300000
 gravitino.maintenance.executor.threads = 4
-gravitino.maintenance.scheduled.maxConcurrentJobs = 10
+gravitino.maintenance.poller.enabled = true
+gravitino.maintenance.poller.workerThreads = 2
+gravitino.maintenance.poller.pollIntervalSecs = 30
+gravitino.maintenance.poller.maxConcurrentJobs = 10
 ```
 
 ### 8.2 Iceberg REST → TMS in-process event keys
@@ -720,21 +753,24 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 | Phase | Work item | Notes |
 | ----- | --------- | ----- |
 | 1 | In-process plugin + bounded executor | Feature, compaction callback (§5.4). |
-| 2 | State table + claim + precedence | `table_maintenance_state` (§6); nearest-wins (§5.2.3). |
-| 3 | `scheduled-run` API + scheduled service | Track A / B, worst-first, window (§5.3, §5.5–§5.6). |
+| 2 | State table + claim + precedence | `table_maintenance_state` + `next_due_at` (§6); nearest-wins (§5.2.3). |
+| 3 | `MaintenancePoller` | `takePendingDue`, worker loops, heartbeats (§5.3); mirror `IcebergCleanupManager`. |
 | 4 | Commit-path compaction pipeline | Claim, interval, Recommender → submit (§5.4). |
-| 5 | Maintenance profile API | `standard` one-step setup (§5.2.2). |
-| 6 | Ops APIs | §7. |
-| 7 | Hardening + deployment docs | K8s CronJob example (§5.3.2), metrics, fault tolerance (§10). |
+| 5 | Track A / B orchestration | Hot pipeline + orphan ranking (§5.5–§5.6). |
+| 6 | Maintenance profile API | `standard` one-step setup (§5.2.2). |
+| 7 | Ops APIs | §7. |
+| 8 | Hardening | Multi-node claim tests, metrics, fault tolerance (§10). |
 
 #### Phase 3 checklist
 
-- [ ] `POST …/maintenance/scheduled-run` resource (§5.3.1).
-- [ ] `ScheduledMaintenanceService`: candidate scan, stats refresh, ranking.
+- [ ] `MaintenancePoller`: worker loops, `pollIntervalSecs`, `workerThreads` (§5.3.1).
+- [ ] `TableMaintenanceStateStore.takePendingDue` — CAS claim like `IcebergCleanupJobStore.takePendingJob`.
+- [ ] `refreshClaimHeartbeats` + stale `RUNNING` reclaim (§6.1).
+- [ ] `next_due_at` lifecycle on attach / job finish (§5.3.2).
 - [ ] Hot pipeline order: `manifests → expire` (§5.5).
 - [ ] Orphan track: per-table `minIntervalMs`, oldest-cleanup-first (§5.6).
-- [ ] `maxConcurrentJobs`; tables not reached defer to next Cron invocation.
-- [ ] Document K8s CronJob manifest and non-K8s cron equivalent.
+- [ ] `maxConcurrentJobs`; unclaimed due rows remain for next poll on any node.
+- [ ] Multi-node tests: two nodes poll; one row claimed once; heartbeat reclaim after node kill.
 
 #### Phase 4 checklist
 
@@ -746,15 +782,15 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 
 | Area | Checklist |
 | ---- | --------- |
-| Deployment | `extensionPackages`; IRC colocated in same JVM. Ops + `scheduled-run` on **8090**. |
+| Deployment | `extensionPackages`; IRC colocated in same JVM. Ops on **8090** (§7). |
 | Policy | Four built-in types; precedence nearest-wins (§5.2); profile is convenience only. |
-| Trigger | Commit → **compaction only** (§5.4); timed → **K8s CronJob** → `scheduled-run` (§5.3). |
-| No HA scheduler | **No** in-process scheduler lease (§4.5); peer replicas + per-policy claim (§6). |
+| Trigger | Commit → **compaction only** (§5.4); timed → **`MaintenancePoller`** + `next_due_at` (§5.3). |
+| Multi-node | **No** cluster lease (§4.5); per-row `takePendingDue` like `IcebergCleanupManager` (§4.6). |
 | Executor | Bounded; evaluation **off** commit thread (§5.4). |
 | Durability | `table_maintenance_state` only; **no** per-commit event log (§6.3). |
-| Orchestration | Scheduled hot pipeline `manifests → expire` (§5.5); orphan separate track (§5.6). |
-| Industry | §4.7–§4.8 document scheduled vs commit triggers with external references. |
-| Fault tolerance | Scheduled: at-least-once latest-state; commit: best effort (§10). |
+| Orchestration | Hot pipeline `manifests → expire` (§5.5); orphan separate track (§5.6). |
+| Industry | §4.8–§4.9 document scheduled vs commit triggers with external references. |
+| Fault tolerance | Poller: at-least-once latest-state; commit: best effort (§10). |
 
 ---
 
@@ -765,13 +801,14 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 | Model | TMS target |
 | ----- | ---------- |
 | Best effort | **Commit compaction path** (§5.4) |
-| At-least-once latest-state | **`scheduled-run` path** — recovery from table state, not event rows |
+| At-least-once latest-state | **`MaintenancePoller` path** — recovery from table state, not event rows |
 | Exactly-once job effect | **Not required** — claims + idempotency key bound duplicates |
 
 **Commit path:** a lost enqueue delays compaction until the next commit or manual run. Manifest,
-expire, and orphan are unaffected because they run on `scheduled-run`.
+expire, and orphan are unaffected because they run on the poller.
 
-**Scheduled path:** coalescing is acceptable — maintenance acts on the table's **current** state.
+**Poller path:** coalescing is acceptable — maintenance acts on the table's **current** state.
+A due row stays due (`next_due_at` unchanged) until a worker successfully claims and completes it.
 
 ### 10.2 Recovery is driven by table state, not event rows
 
@@ -786,8 +823,8 @@ Recovery uses:
 | Boundary | Behavior |
 | -------- | -------- |
 | Commit durable before executor runs compaction | Signal lost → compaction waits for next commit |
-| Node fails holding a claim | `claim_lease_expires_at` reclaims `RUNNING`; next pass retries |
-| Cron fires while prior round still running | `concurrencyPolicy: Forbid` on CronJob; or TMS returns deferred |
+| Node fails holding a claim | `claim_lease_expires_at` / heartbeat timeout reclaims `RUNNING`; peer `takePendingDue` retries |
+| All workers at `maxConcurrentJobs` | Due rows remain; next poll on any node retries |
 | Job accepted before `job_id` recorded | `submission_idempotency_key` written before submit |
 
 ---
@@ -810,3 +847,5 @@ Recovery uses:
 14. [Databricks OPTIMIZE frequency guidance](https://docs.databricks.com/aws/en/tables/operations/optimize)
 15. [OpenHouse architecture (Jobs Scheduler / CronJob)](https://github.com/linkedin/openhouse/blob/main/ARCHITECTURE.md)
 16. [Apache Iceberg REST Catalog OpenAPI](https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml)
+17. Gravitino `IcebergCleanupManager` / `IcebergCleanupJobStore.takePendingJob`
+    (`iceberg/iceberg-rest-server/src/main/java/org/apache/gravitino/iceberg/service/cleanup/`)
