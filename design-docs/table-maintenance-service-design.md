@@ -69,8 +69,8 @@ poller only. Multi-node coordination is **per-(table, policy) row** claim (no ma
    **poller** at wall-clock schedule (§5.4.2). **Manifest rewrite, snapshot expiry, and orphan
    cleanup** use the poller only (§5.5–§5.6). Policy **schedule** drives `next_due_at` for the
    **poller only** (§5.2.4).
-5. **Wall-clock schedules in Gravitino**: Policy schedules live in Gravitino (not K8s CronJob) and
-   are read by the poller, not by the commit hook.
+5. **Wall-clock schedules in Gravitino**: Policy schedules live in Gravitino and are read by the
+   poller, not by the commit hook.
 6. **Reuse existing optimizer execution core**: Both paths invoke the same `Updater` /
    `Recommender` / job-submit paths in `maintenance/optimizer` as **in-process methods**.
 7. **Job framework compatibility**: Spark maintenance work continues to use the Gravitino job
@@ -445,8 +445,7 @@ Only **one** policy per maintenance type is evaluated for a table.
 #### 5.2.4 Policy schedule (UI: Daily · 02:00, Sun · 03:00, Weekly, Paused)
 
 Each maintenance policy instance stores a **schedule** in `policy_meta.content` (surfaced in the
-maintenance policy UI). TMS computes **`next_due_at`** from the schedule — wall-clock aligned, not
-K8s CronJob.
+maintenance policy UI). TMS computes **`next_due_at`** from the schedule — wall-clock aligned.
 
 **Illustrative UI rows and content:**
 
