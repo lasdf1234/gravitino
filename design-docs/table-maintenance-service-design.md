@@ -47,11 +47,6 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
   claim). When `next_due_at` is reached, any node may claim and run that policy. **All four policy
   types** use this path (§10: at-least-once latest-state).
 
-When commit and poller collide on the same compaction row, they share **`table_maintenance_state`**
-and the same per-row **claim** so only one submission wins (§5.4.3, §6.1). Scheduling lives in the
-poller only. Multi-node coordination is **per-(table, policy) row** claim (no maintenance leader;
-§4.5–§4.6), matching `IcebergCleanupJobStore.takePendingJob`.
-
 ---
 
 ## 2. Goals
