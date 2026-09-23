@@ -431,10 +431,20 @@ Every submission creates a `job_run_meta` row. On finish: update `last_job_id`, 
 
 ### 7.1 Enablement keys (`gravitino.conf`)
 
-|             | `gravitino.server.rest.extensionPackages` | `gravitino.auxService.names`           | `gravitino.maintenance.scheduler.enabled` | `gravitino.maintenance.scheduler.workerThreads` | `gravitino.maintenance.scheduler.pollIntervalSecs` | `gravitino.maintenance.scheduler.discoveryIntervalSecs`  | `gravitino.maintenance.scheduler.discoveryBatchSize` | `gravitino.maintenance.scheduler.heartbeatTimeoutSecs` | `gravitino.maintenance.scheduler.candidateWindow` | `gravitino.maintenance.scheduler.maxConcurrentJobs` | `gravitino.maintenance.scheduler.maintenanceWindow` | `gravitino.maintenance.orphan.olderThanMinMs` |
-| ----------- | ----------------------------------------- | -------------------------------------- | ----------------------------------------- | ----------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------- |
-| Default     | none                                      | none                                   | `true`                                    | `2`                                             | `300`                                              | `3600`                                                   | `500`                                                | `300`                                                  | `8`                                               | `10`                                                | none                                                | `259200000`                                   |
-| Description | TMS Feature package.                      | Include `iceberg-rest` when using IRC. | Enable `MaintenanceScheduler` (§5.3).     | Scheduler workers per node.                     | Sleep when no due row claimed.                     | Discovery interval for above-table attachments (§5.3.1). | Max tables per discovery round.                      | Stale `heartbeat_at` → reclaim `RUNNING` (§6.1).       | Max candidates per `selectDueWork`.              | Cap: COUNT `RUNNING` + `job_id` (§7.1).           | Optional UTC window; skip submit outside.           | Min `olderThan` (3 days) for orphan (§5.6).   |
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `gravitino.server.rest.extensionPackages` | none | TMS Feature package. |
+| `gravitino.auxService.names` | none | Include `iceberg-rest` when using IRC. |
+| `gravitino.maintenance.scheduler.enabled` | `true` | Enable `MaintenanceScheduler` (§5.3). |
+| `gravitino.maintenance.scheduler.workerThreads` | `2` | Scheduler workers per node. |
+| `gravitino.maintenance.scheduler.pollIntervalSecs` | `300` | Sleep when no due row claimed. |
+| `gravitino.maintenance.scheduler.discoveryIntervalSecs` | `3600` | Discovery interval for above-table attachments (§5.3.1). |
+| `gravitino.maintenance.scheduler.discoveryBatchSize` | `500` | Max tables per discovery round. |
+| `gravitino.maintenance.scheduler.heartbeatTimeoutSecs` | `300` | Stale `heartbeat_at` → reclaim `RUNNING` (§6.1). |
+| `gravitino.maintenance.scheduler.candidateWindow` | `8` | Max candidates per `selectDueWork`. |
+| `gravitino.maintenance.scheduler.maxConcurrentJobs` | `10` | Cap: COUNT `RUNNING` + `job_id` (§7.1). |
+| `gravitino.maintenance.scheduler.maintenanceWindow` | none | Optional UTC window; skip submit outside. |
+| `gravitino.maintenance.orphan.olderThanMinMs` | `259200000` | Min `olderThan` (3 days) for orphan (§5.6). |
 
 Per-table **schedule cadence** is **`next_due_at`** (from policy crontab). `minIntervalMs` is only the
 min-gap gate before claim (§7.3). `pollIntervalSecs` = claim frequency; `discoveryIntervalSecs` =
