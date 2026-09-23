@@ -363,16 +363,16 @@ MaintenancePoller (every Gravitino node — §5.3)
         │     e.g. nightly_compaction Daily · 02:00 — inactive / catch-up tables
         │
         ├─ Track A — hot pipeline (§5.5):
-        │     due rows: manifest / expire (e.g. Daily · 04:00, Sun · 03:00)
-        │     refresh statistics (Updater); worst-first in batch
-        │     per table: manifests → expire (Recommender → SQL)
+        │     due rows: one claim per policy (manifest | expire)
+        │     soft order: prefer manifest before expire for the same table
+        │     refresh statistics (Updater); worst-first within Track A
         │
         ├─ Track B — orphan cleanup (§5.6):
         │     due rows: orphan policy (e.g. Weekly)
         │     oldest-cleanup-first; olderThan enforced server-side
         │
         ├─ shared: maintenance window (optional) + maxConcurrentJobs
-        │     (unclaimed due rows remain for next poll on any node)
+        │     (count RUNNING state rows with job_id; unclaimed due rows wait)
         v
 Gravitino Job framework + job_run_meta (every run — §6.5)
 ```
@@ -523,11 +523,15 @@ On TMS plugin start (when `gravitino.maintenance.poller.enabled=true`, §8.1):
 
 1. Start `workerThreads` worker loops (daemon threads, like `iceberg-cleanup-worker`).
 2. Start one scheduler thread for **heartbeat renewal** on owned rows (`refreshClaimHeartbeats`).
+   The renewer covers **both** poller workers and commit-path executor tasks that hold a claim
+   (§5.4.1, §6.1) via a shared in-process claim registry.
 3. Start one **discovery** loop / scheduled task (§5.3.5) on `discoveryIntervalSecs`.
 4. Each worker iteration:
-   - `TableMaintenanceStateStore.takePendingDue(now, heartbeatTimeoutMs, candidateWindow)`
-   - If a row is claimed (`rows_affected = 1`): run `MaintenanceEvaluateSubmitPipeline` for that
-     `(table, policy)` (refresh stats for hot-pipeline types, Recommender, submit).
+   - If cluster in-flight jobs ≥ `maxConcurrentJobs` (§5.3.3): `sleep(pollIntervalMs)` and continue.
+   - `TableMaintenanceStateStore.takePendingDue(now, heartbeatTimeoutMs, candidateWindow)` —
+     one **track** per call (compaction / Track A / Track B), see §5.3.2.
+   - If a row is claimed (`rows_affected = 1`): register the claim with the heartbeat renewer;
+     run `MaintenanceEvaluateSubmitPipeline` for that `(table, policy)`.
    - If nothing due: `sleep(pollIntervalMs)`.
 5. On plugin shutdown: stop workers and discovery; in-flight claims expire via `heartbeatTimeoutMs`
    and are reclaimed by peers.
@@ -556,27 +560,69 @@ Each `table_maintenance_state` row for an **attached, enabled** policy carries:
 - **All four policy types** — including compaction — are eligible for `takePendingDue` when
   `next_due_at <= now` and `enabled = true`.
 
-**Candidate selection SQL (illustrative):** ranking columns such as `health_score` /
-`last_orphan_success_at` are derived or joined for ordering — they are not required columns of
-`table_maintenance_state` (§6.2).
+**Candidate selection:** run **separate** `takePendingDue` queries per track so ranking does not mix
+signals. Ranking columns such as `health_score` / `last_orphan_success_at` are derived or joined —
+they are not required columns of `table_maintenance_state` (§6.2).
 
 ```sql
+-- Compaction track
 SELECT … FROM table_maintenance_state s
- JOIN policy_meta p ON …
- WHERE s.next_due_at <= :now
-   AND p.enabled = true
-   AND (s.state = 'IDLE'
-        OR (s.state = 'RUNNING' AND s.claim_lease_expires_at < :heartbeatExpiry))
+ JOIN policy_meta p ON … AND p.policy_type = 'system_iceberg_compaction'
+ WHERE … /* due + IDLE or stale RUNNING */
+ ORDER BY health_score DESC
+ LIMIT :candidateWindow
+
+-- Track A (manifest + expire): soft order — prefer manifest over expire for the same table
+SELECT … FROM table_maintenance_state s
+ JOIN policy_meta p ON … AND p.policy_type IN (
+   'system_iceberg_rewrite_manifests', 'system_iceberg_snapshot_expiration')
+ WHERE … /* due + IDLE or stale RUNNING */
+   AND NOT (
+     /* skip expire while this table still has a due or RUNNING manifest row */
+     p.policy_type = 'system_iceberg_snapshot_expiration'
+     AND EXISTS (
+       SELECT 1 FROM table_maintenance_state m
+        JOIN policy_meta pm ON pm.policy_id = m.policy_id
+       WHERE m.metalake_id = s.metalake_id
+         AND m.table_identifier = s.table_identifier
+         AND pm.policy_type = 'system_iceberg_rewrite_manifests'
+         AND (m.next_due_at <= :now OR m.state = 'RUNNING')
+     )
+   )
  ORDER BY
-   /* compaction + hot-pipeline: worst-first */
-   health_score DESC,
-   /* orphan track: oldest cleanup first */
-   last_orphan_success_at ASC
+   CASE p.policy_type
+     WHEN 'system_iceberg_rewrite_manifests' THEN 0 ELSE 1 END,
+   health_score DESC
+ LIMIT :candidateWindow
+
+-- Track B (orphan)
+SELECT … FROM table_maintenance_state s
+ JOIN policy_meta p ON … AND p.policy_type = 'system_iceberg_orphan_file_removal'
+ WHERE … /* due + IDLE or stale RUNNING */
+ ORDER BY last_orphan_success_at ASC
  LIMIT :candidateWindow
 ```
 
-Then for each row: `UPDATE … SET state='RUNNING', claim_lease_expires_at=… WHERE … AND state='IDLE'`
-(same CAS pattern as `IcebergCleanupJobStore.takePendingJob` / `markRunning`).
+Then for each candidate row, CAS claim (same predicate as the SELECT eligibility):
+
+```sql
+UPDATE table_maintenance_state
+   SET state = 'RUNNING',
+       claimed_by = :nodeId,
+       claim_lease_expires_at = :now + :leaseMs,
+       updated_at = :now
+ WHERE metalake_id = ? AND table_identifier = ? AND policy_id = ?
+   AND (state = 'IDLE'
+        OR (state = 'RUNNING' AND claim_lease_expires_at < :now))
+```
+
+(`IcebergCleanupJobStore.takePendingJob` / `markRunning` pattern.)
+
+**After claim — interval gate:** if `minIntervalMs` has not elapsed since `last_job_id` finished,
+do **not** submit. Release the row to `IDLE` and set
+`next_due_at = max(nextOccurrence(schedule, after = now), last_finished_at + minIntervalMs)`
+so the poller does not immediately re-claim the same row. Applies to all policy types on the
+poller path (including orphan, §5.6).
 
 #### 5.3.3 Multi-node behavior
 
@@ -589,8 +635,17 @@ Node D worker claims table4.orphan policy row
 Node A dies mid-run → heartbeat expires → Node B takePendingDue reclaims table1 row
 ```
 
-`maxConcurrentJobs` (§8.1) caps **cluster-wide** in-flight Spark submissions; workers stop claiming
-new rows when the cap is reached until slots free up.
+`maxConcurrentJobs` (§8.1) caps **cluster-wide** in-flight maintenance Spark jobs. Before claiming
+or submitting, each worker reads:
+
+```sql
+SELECT COUNT(*) FROM table_maintenance_state
+ WHERE state = 'RUNNING' AND job_id IS NOT NULL
+```
+
+If `COUNT >= maxConcurrentJobs`, the worker does not claim new rows (and does not submit) until a
+slot frees. This is approximate under races but bounds load without a separate leader or lock
+service; overshoot of a few jobs is acceptable for maintenance.
 
 #### 5.3.4 Optional external trigger (non-default)
 
@@ -616,7 +671,9 @@ only in HMS/Iceberg must still receive state rows for scheduled maintenance.
 3. For each table: policy_id = effective_policy(table, type)   // nearest-wins
 4. If no table_maintenance_state row for (table, policy_id):
      INSERT … next_due_at = nextOccurrence(schedule)
-5. Optional: drop or reconcile rows whose effective policy was removed or replaced
+5. Reconcile (required): for each table in scope, DELETE state rows whose policy_id is no longer
+   the effective policy for that maintenance type (replaced or detached); DROP rows for tables
+   that left the scope when the attachment was removed
 6. Cap work with discoveryBatchSize per round
 ```
 
@@ -657,9 +714,10 @@ IRC commit succeeded (same JVM)
                     UPSERT table_maintenance_state if missing
                       (next_due_at = nextOccurrence(schedule); so claim works before discovery)
                     minIntervalMs gate (event.created_at, last_job_id — §6.3)
-                    claim compaction state row (§6.1)
+                    claim compaction state row (§6.1): set claimed_by; register with
+                      shared refreshClaimHeartbeats renewer for the hold duration
                     Recommender → submit builtin-iceberg-compaction
-                    record job_run_meta (§6.5)
+                    record job_run_meta (§6.5); clear claimed_by on release to IDLE
                     // do not advance next_due_at — poller owns schedule (§5.2.4)
 ```
 
@@ -696,23 +754,27 @@ scheduling logic is required.
 
 ### 5.5 Hot pipeline (scheduled — Track A)
 
-When the poller claims a table for **Track A**, enabled operations run in this **fixed order**:
+Track A covers **manifest rewrite** and **snapshot expiry**. Each type still has its own
+`table_maintenance_state` row and is claimed **independently** as one `(table, policy)` — there is
+**no** atomic multi-policy claim.
 
-```text
-1. manifests         Recommender → rewrite manifests SQL
-2. expire            Recommender → expire snapshots SQL
-```
+**Soft order (desired, not a single pipeline claim):**
 
-Compaction due rows are claimed **separately** (§5.4.2), not as steps inside this pipeline.
+1. Prefer claiming **manifest** before **expire** for the same table (§5.3.2 Track A query): skip an
+   expire candidate while that table still has a due or `RUNNING` manifest row.
+2. Operators should schedule manifest earlier than expire when both attach to the same scope
+   (for example Daily · 04:00 manifests, later expire).
 
-**Why this order:**
+Compaction due rows are claimed on the compaction track (§5.4.2), not as Track A steps.
+
+**Why prefer manifest before expire:**
 
 - Rewrite manifests after the file set has stabilized (often after compaction on the write path or
   the compaction poller).
 - Expire snapshots after manifest rewrite so metadata reflects the current file set.
 
-Each type has its own **`minIntervalMs`** (§8.3). Track A ranks tables **worst-first** using refreshed
-statistics.
+Each type has its own **`minIntervalMs`** (§8.3). Within Track A, candidates rank **worst-first**
+using refreshed statistics.
 
 ---
 
@@ -729,7 +791,9 @@ Orphan cleanup runs on a **separate track**, not as step 3 of the hot pipeline.
 
 **Per-table eligibility:** a table becomes eligible again only after **`minIntervalMs`** since its
 last successful orphan run (default seven days — §8.3). Listings spread across nights instead of one
-global orphan night.
+global orphan night. If the poller claims an orphan row whose interval has not elapsed, it **releases**
+the claim and pushes `next_due_at` forward (§5.3.2 interval gate) — it does not leave the row
+immediately re-claimable.
 
 **`olderThan` server-side enforcement:** TMS enforces a **minimum floor** on every evaluate and
 policy write (§8.1).
@@ -798,21 +862,26 @@ table.
 ```text
 Node A / Node B — both poll due rows
         │
-        ├─ both SELECT candidate rows (next_due_at <= now, IDLE or stale RUNNING)
+        ├─ both SELECT candidate rows (next_due_at <= now, IDLE or stale RUNNING) per track
         ├─ both attempt per-row claim:
-        │     UPDATE … SET state=RUNNING, claim_lease_expires_at=now+leaseMs, updated_at=now
+        │     UPDATE … SET state=RUNNING, claimed_by=:nodeId,
+        │                 claim_lease_expires_at=now+leaseMs, updated_at=now
         │     WHERE metalake_id=? AND table_identifier=? AND policy_id=?
         │       AND (state=IDLE OR (state=RUNNING AND claim_lease_expires_at < now))
-        │     ├─ Node A: rows_affected = 1 → evaluate → submit → IDLE, set next_due_at
+        │     ├─ Node A: rows_affected = 1 → register with refreshClaimHeartbeats
+        │     │          → evaluate → submit → IDLE, clear claimed_by, set next_due_at
+        │     │          (or interval gate fail → IDLE + push next_due_at, §5.3.2)
         │     └─ Node B: 0 rows → try next candidate
         v
-refreshClaimHeartbeats on owned rows (peer cannot finish with stale heartbeat token)
+refreshClaimHeartbeats on owned rows (poller + commit executor; peer cannot steal while lease fresh)
 ```
 
 **Commit compaction path** (driven by `table_maintenance_event` + in-process callback) uses the same
-`state` / `claim_lease_expires_at` columns and the same CAS as the poller before submit. It does
-**not** read `next_due_at` and does **not** update `next_due_at` after a run — only the poller
-advances `next_due_at` from the policy schedule (§5.2.4).
+`state` / `claimed_by` / `claim_lease_expires_at` columns and the same CAS as the poller before
+submit. While the bounded executor holds the claim, it **must** register the row with the shared
+`refreshClaimHeartbeats` renewer (same thread as §5.3.1) so peers do not reclaim mid-evaluate.
+It does **not** read `next_due_at` and does **not** update `next_due_at` after a successful run —
+only the poller advances `next_due_at` from the policy schedule (§5.2.4).
 
 On multiple IRC replicas, each successful commit INSERTs an event row; claim + `minIntervalMs`
 still bound duplicate submissions for the same `(table, compaction_policy)`.
@@ -834,6 +903,7 @@ Gate checks alone are insufficient (read race). **Claim is the write lock** for 
 | `job_id`                     | `BIGINT UNSIGNED NULL`     | In-flight job (`job_run_meta.job_run_id`)                          |
 | `last_job_id`                | `BIGINT UNSIGNED NULL`     | Last finished job; `job_finished_at` drives min-interval           |
 | `last_measured_snapshot_id`  | `BIGINT NULL`              | Snapshot id at last successful evaluate (§10.3)                    |
+| `claimed_by`                 | `VARCHAR(128) NULL`        | Node / worker id holding `RUNNING`; cleared on release (§6.1)      |
 | `claim_lease_expires_at`     | `BIGINT NULL`              | Epoch millis; reclaim `RUNNING` after expiry (§10.3)               |
 | `submission_idempotency_key` | `VARCHAR(64) NULL`         | Written before job submit; dedupe boundary (§10.3)                 |
 
@@ -852,6 +922,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
     `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'in-flight job_run_id',
     `last_job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last finished job_run_id',
     `last_measured_snapshot_id` BIGINT(20) NULL COMMENT 'snapshot id at last evaluate',
+    `claimed_by` VARCHAR(128) NULL COMMENT 'node/worker holding RUNNING claim',
     `claim_lease_expires_at` BIGINT(20) NULL COMMENT 'claim lease expiry, epoch millis',
     `submission_idempotency_key` VARCHAR(64) NULL COMMENT 'idempotency key before job submit',
     PRIMARY KEY (`metalake_id`, `table_identifier`, `policy_id`),
@@ -895,12 +966,13 @@ table_maintenance_event e
     ON s.metalake_id = e.metalake_id
    AND s.table_identifier = e.table_identifier
    AND s.policy_id = :compaction_policy_id
-  JOIN job_run_meta j
+  LEFT JOIN job_run_meta j
     ON j.job_run_id = s.last_job_id
 ```
 
-`j.job_finished_at` is the end time of that policy's previous finished job. Resolve `minIntervalMs`
-for the policy's task type (§8.3). When `s.last_job_id` is **null**, the interval gate passes. When
+`j.job_finished_at` is the end time of that policy's previous finished job (`NULL` when
+`last_job_id` is null). Resolve `minIntervalMs` for the policy's task type (§8.3). When
+`s.last_job_id` is **null** (LEFT JOIN yields no job row), the interval gate **passes**. When
 `s.job_id` is null, `s.last_job_id` is set, and `e.created_at - j.job_finished_at > minIntervalMs`,
 the policy has not completed another run after the interval elapsed. A non-null `s.job_id` means a
 job is still in flight.
@@ -971,23 +1043,23 @@ The commit path and poller do **not** call these routes. They replace the
 
 ### 8.1 Enablement keys (`gravitino.conf`)
 
-| Key                                                  | Default     | Description                                                                   |
-| ---------------------------------------------------- | ----------- | ----------------------------------------------------------------------------- |
-| `gravitino.server.rest.extensionPackages`            | none        | TMS Feature package.                                                          |
-| `gravitino.auxService.names`                         | none        | Must include `iceberg-rest` when using IRC.                                   |
-| `gravitino.maintenance.claimLeaseMs`                 | `300000`    | Claim lease length; sets `claim_lease_expires_at` (§6.1, §10.3).              |
-| `gravitino.maintenance.executor.threads`             | `4`         | Bounded executor worker threads (§5.4.1).                                     |
-| `gravitino.maintenance.executor.queueSize`           | `10000`     | Bounded executor queue depth.                                                 |
-| `gravitino.maintenance.poller.enabled`               | `true`      | Enable `MaintenancePoller` worker loops (§5.3).                               |
-| `gravitino.maintenance.poller.workerThreads`         | `2`         | Poller worker threads per node (like `ASYNC_CLEANUP_WORKER_THREADS`).         |
-| `gravitino.maintenance.poller.pollIntervalSecs`      | `30`        | Sleep when no due row claimed (like `ASYNC_CLEANUP_POLL_INTERVAL_SECS`).      |
-| `gravitino.maintenance.poller.discoveryIntervalSecs` | `3600`      | How often discovery expands above-table attachments into state rows (§5.3.5). |
-| `gravitino.maintenance.poller.discoveryBatchSize`    | `500`       | Max new/reconciled tables per discovery round.                                |
-| `gravitino.maintenance.poller.heartbeatTimeoutSecs`  | `300`       | Reclaim stale `RUNNING` rows (like `ASYNC_CLEANUP_HEARTBEAT_TIMEOUT_SECS`).   |
-| `gravitino.maintenance.poller.candidateWindow`       | `8`         | Max due rows considered per `takePendingDue` call.                            |
-| `gravitino.maintenance.poller.maxConcurrentJobs`     | `10`        | Max concurrent maintenance Spark jobs cluster-wide.                           |
-| `gravitino.maintenance.poller.maintenanceWindow`     | none        | Optional UTC window; poller skips submit outside window.                      |
-| `gravitino.maintenance.orphan.olderThanMinMs`        | `259200000` | Server-side minimum `olderThan` (3 days) for orphan cleanup (§5.6).           |
+| Key                                                  | Default     | Description                                                                        |
+| ---------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------- |
+| `gravitino.server.rest.extensionPackages`            | none        | TMS Feature package.                                                               |
+| `gravitino.auxService.names`                         | none        | Must include `iceberg-rest` when using IRC.                                        |
+| `gravitino.maintenance.claimLeaseMs`                 | `300000`    | Claim lease length; sets `claim_lease_expires_at` (§6.1, §10.3).                   |
+| `gravitino.maintenance.executor.threads`             | `4`         | Bounded executor worker threads (§5.4.1).                                          |
+| `gravitino.maintenance.executor.queueSize`           | `10000`     | Bounded executor queue depth.                                                      |
+| `gravitino.maintenance.poller.enabled`               | `true`      | Enable `MaintenancePoller` worker loops (§5.3).                                    |
+| `gravitino.maintenance.poller.workerThreads`         | `2`         | Poller worker threads per node (like `ASYNC_CLEANUP_WORKER_THREADS`).              |
+| `gravitino.maintenance.poller.pollIntervalSecs`      | `30`        | Sleep when no due row claimed (like `ASYNC_CLEANUP_POLL_INTERVAL_SECS`).           |
+| `gravitino.maintenance.poller.discoveryIntervalSecs` | `3600`      | How often discovery expands above-table attachments into state rows (§5.3.5).      |
+| `gravitino.maintenance.poller.discoveryBatchSize`    | `500`       | Max new/reconciled tables per discovery round.                                     |
+| `gravitino.maintenance.poller.heartbeatTimeoutSecs`  | `300`       | Reclaim stale `RUNNING` rows (like `ASYNC_CLEANUP_HEARTBEAT_TIMEOUT_SECS`).        |
+| `gravitino.maintenance.poller.candidateWindow`       | `8`         | Max due rows considered per `takePendingDue` call.                                 |
+| `gravitino.maintenance.poller.maxConcurrentJobs`     | `10`        | Max cluster in-flight jobs: count `state=RUNNING AND job_id IS NOT NULL` (§5.3.3). |
+| `gravitino.maintenance.poller.maintenanceWindow`     | none        | Optional UTC window; poller skips submit outside window.                           |
+| `gravitino.maintenance.orphan.olderThanMinMs`        | `259200000` | Server-side minimum `olderThan` (3 days) for orphan cleanup (§5.6).                |
 
 Per-table cadence is **`minIntervalMs`** / schedule-driven **`next_due_at`** on each state row, not
 the poller interval. `pollIntervalSecs` only controls how often nodes **claim due work**;
@@ -1060,10 +1132,12 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 - [ ] `refreshClaimHeartbeats` + stale `RUNNING` reclaim (§6.1).
 - [ ] `next_due_at` from policy schedule on materialize / job finish (§5.2.4, §5.3.2).
 - [ ] Poller claims compaction due rows alongside manifest / expire / orphan (§5.4.2).
-- [ ] Hot pipeline order: `manifests → expire` (§5.5).
-- [ ] Orphan track: per-table `minIntervalMs`, oldest-cleanup-first (§5.6).
-- [ ] `maxConcurrentJobs`; unclaimed due rows remain for next poll on any node.
+- [ ] Hot pipeline soft order: prefer manifest before expire; per-policy claims (§5.5).
+- [ ] Orphan track: oldest-cleanup-first; interval gate releases claim and pushes `next_due_at` (§5.3.2, §5.6).
+- [ ] `maxConcurrentJobs` via COUNT of RUNNING+`job_id`; unclaimed due rows remain for next poll.
 - [ ] Multi-node tests: two nodes poll; one row claimed once; heartbeat reclaim after node kill.
+- [ ] Commit path registers claims with shared `refreshClaimHeartbeats` (§5.4.1, §6.1).
+- [ ] Discovery reconcile deletes stale `(table, policy)` rows (§5.3.5).
 
 #### Phase 4 checklist
 
@@ -1084,7 +1158,7 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 | Multi-node      | **No** cluster lease (§4.5); per-row `takePendingDue` like `IcebergCleanupManager` (§4.6).                           |
 | Executor        | Bounded; evaluation **off** commit thread (§5.4.1).                                                                  |
 | Durability      | IRC hook INSERTs `table_maintenance_event` per commit (§6.3); `table_maintenance_state` for claim / schedule (§6.2). |
-| Orchestration   | Hot pipeline `manifests → expire` (§5.5); orphan separate track (§5.6).                                              |
+| Orchestration   | Track A soft order manifest before expire (§5.5); orphan separate track (§5.6).                                      |
 | Industry        | §4.8–§4.9 scheduled vs commit; §4.10 discovery; §4.11 multi-node patterns (row CAS chosen).                          |
 | Fault tolerance | Poller: at-least-once latest-state; commit: best effort (§10).                                                       |
 
@@ -1121,6 +1195,7 @@ A due row stays due (`next_due_at` unchanged) until a worker successfully claims
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Event INSERT ok before executor runs compaction | Event row kept; next commit or poller schedule retries                                         |
 | Node fails holding a claim                      | `claim_lease_expires_at` / heartbeat timeout reclaims `RUNNING`; peer `takePendingDue` retries |
+| Interval gate fails after claim                 | Release to `IDLE`; push `next_due_at` forward (§5.3.2) — no tight re-claim loop                |
 | All workers at `maxConcurrentJobs`              | Due rows remain; next poll on any node retries                                                 |
 | Job accepted before `job_id` recorded           | `submission_idempotency_key` written before submit                                             |
 
