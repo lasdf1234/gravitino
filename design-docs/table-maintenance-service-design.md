@@ -45,7 +45,7 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
   only** (§5.4.1).
 - **Scheduled path** — each Gravitino node runs a **`MaintenancePoller`** (`takePendingDue` per-row
   claim). When `next_due_at` is reached, any node may claim and run that policy. **All four policy
-  types**, including compaction, use this path (§10: at-least-once latest-state).
+  types** use this path (§10: at-least-once latest-state).
 
 When commit and poller collide on the same compaction row, they share **`table_maintenance_state`**
 and the same per-row **claim** so only one submission wins (§5.4.3, §6.1). Scheduling lives in the
@@ -209,8 +209,8 @@ Every Gravitino node (same JVM as TMS plugin):
   global scan — acceptable for maintenance throughput.
 - Above-table policies need **discovery** to materialize due rows (§4.10).
 
-**Decision:** **Chosen** for the scheduled path of **all four** policy types in 2.0 (including
-compaction). Industry pattern comparison: §4.11.
+**Decision:** **Chosen** for the scheduled path of **all four** policy types in 2.0. Industry
+pattern comparison: §4.11.
 
 ### 4.7 Option G: K8s CronJob / external `run-due` as the clock (Rejected)
 
@@ -270,7 +270,7 @@ run on every commit.
 
 **TMS decision (option B):** IRC commit path runs **`system_iceberg_compaction` only** (§5.4.1) — IRC
 INSERTs `table_maintenance_event`, then TMS handles compaction asynchronously. The
-**`MaintenancePoller`** also runs **all four policy types** — including compaction — when their
+**`MaintenancePoller`** also runs **all four policy types** when their
 wall-clock schedule fires (§5.4.2, §5.2.4). Manifest / expire / orphan are **poller-only** (not on
 the commit path). Nightly compaction covers tables that stop receiving commits.
 
@@ -548,7 +548,7 @@ Each `table_maintenance_state` row for an **attached, enabled** policy carries:
 
 - When a state row is materialized (table attach or discovery, §5.2.5): `next_due_at = nextOccurrence(schedule)`.
 - After successful maintenance: `next_due_at = nextOccurrence(schedule, after = job_finished_at)`.
-- **All four policy types** — including compaction — are eligible for `takePendingDue` when
+- **All four policy types** are eligible for `takePendingDue` when
   `next_due_at <= now` and `enabled = true`.
 
 **Candidate selection:** run **separate** `takePendingDue` queries per track so ranking does not mix
