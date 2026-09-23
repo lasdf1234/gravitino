@@ -38,12 +38,11 @@ jobs stay on the Gravitino job framework (`jobId` boundary unchanged).
 
 TMS uses a **dual trigger model** (§5.4–§5.6):
 
-- **Commit path** — after each successful Iceberg commit, the IRC post-commit hook **INSERTs** one
-  `table_maintenance_event` row (§6.3), then invokes an in-process TMS callback for **compaction
-  only** (§5.4.1).
+- **Commit path** — after each successful Iceberg commit, the IRC post-commit hook asynchronously
+  invokes an in-process TMS callback for **compaction only** (§5.4.1).
 - **Scheduled path** — each node runs a **`MaintenanceScheduler`** (`selectDueWork` per-row claim).
   When `next_due_at` is due, any node may claim and run that policy. **All four policy types** use
-  this path (§10: at-least-once latest-state).
+  this path (§9: at-least-once latest-state).
 
 ---
 
@@ -51,8 +50,7 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
 
 1. **In-process plugin on the main server**: Load TMS via
    `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same as IdP) so the IRC callback is
-   in the main JVM. Commit path does **not** use HTTP. Ops APIs that replace the optimizer CLI are
-   in **§7**.
+   in the main JVM. Commit path does **not** use HTTP.
 2. **Maintenance profile**: A profile such as `standard` creates and attaches all four policies with
    defaults in one step. Profiles are **not** a fifth policy type (§5.2).
 3. **Precedence per type**: For each type, the **nearest** attachment along
@@ -63,16 +61,15 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
    (§5.2.4).
 5. **Wall-clock schedules in Gravitino**: Schedules live in Gravitino and are read by the scheduler,
    not by the commit hook.
-6. **Reuse optimizer core**: Both paths call the same `Updater` / `Recommender` / job-submit paths
-   as **in-process methods**.
+6. **Reuse optimizer core**: Compaction submits one job that runs update-stats, decision, and
+   rewrite in-process to the Spark job; other types reuse `Updater` / `Recommender` / submit as
+   needed.
 7. **Job framework compatibility**: Spark work stays on the job framework. TMS records `jobId` but
    does not own job status.
 8. **Govern Policy reuse**: Policies stay on `policy_meta` and metalake Policy APIs. No parallel
    policy store or `/api/maintenance/table/policies` CRUD.
-9. **Multi-node safe**: Shared DB **per-policy claims** so only one replica runs evaluate → submit
+9. **Multi-node safe**: Shared DB **per-policy claims** so only one replica runs claim → submit
    for a `(table, policy)` (§6). Replicas stay **peers**; no maintenance **leader** (§5.3).
-10. **Commit log**: IRC post-commit hook **INSERTs** one `table_maintenance_event` per successful
-    commit (`table_identifier`, `created_at`) (§6.3).
 
 ---
 
@@ -90,7 +87,7 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
 6. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, no Kafka.
    Commit handling is **in-process only** (§5.1.1).
 7. **External clock APIs**: No `POST …/maintenance/run-due` (or CronJob) as an alternate timed clock.
-   The built-in `MaintenanceScheduler` is the only schedule driver; §7 is for manual / CLI runs only.
+   The built-in `MaintenanceScheduler` is the only schedule driver.
 
 ---
 
@@ -149,11 +146,11 @@ Products close the gap from catalog/scope defaults to runnable table work differ
 | How  | Copy catalog default to table on Create/Update                                       | Runtime-merge catalog settings into managed tables                   | Each cron tick lists tables in scope and runs                       |
 | Cons | Catalog changes do not re-arm tables that already have table-level optimizers        | Tables not yet in AMS / unseen by the scheduler do not run           | Work waits for the next tick; each tick re-lists the scope          |
 
-**TMS decision — discovery (§5.2.5, §5.3.3):**
+**TMS decision — discovery (§5.2.5, §5.3.1):**
 
 1. **Create/Update/Drop hooks:** on IRC `createTable` / `updateTable` / `dropTable`, refresh or purge
    that table's maintenance state (nearest-wins → `table_maintenance_state` / `next_due_at`; drop
-   deletes state rows — §6.4).
+   deletes state rows — §6.3).
 2. **Periodic discovery:** call IRC/Iceberg catalog APIs on an interval to reconcile scope —
    INSERT missing state rows, UPDATE wrong ones, DELETE stale — for tables that never went through
    IRC APIs.
@@ -170,28 +167,26 @@ Spark / Flink / Trino → Iceberg REST commit
         v
 Gravitino IRC (:9001, same JVM as main server)
         └─ post-commit hook (§5.1.1, §5.4.1)
-                ├─ INSERT table_maintenance_event (§6.3)
                 └─ async IcebergCommitEventHandler → compaction only
 
 MaintenanceScheduler (every node — §5.3)
-        selectDueWork → claim → evaluate → submit
-        ├─ Compaction due (§5.4.2)
+        selectDueWork → claim → submit
+        ├─ Compaction due (§5.4.2)  // job: update-stats → decision → compaction
         ├─ Track A (§5.5): manifest | expire (soft: manifest before expire; worst-first)
         ├─ Track B (§5.6): orphan (oldest-cleanup-first; olderThan floor)
         └─ shared: optional maintenance window + maxConcurrentJobs
         v
-Gravitino Job framework + job_run_meta (§6.5)
+Gravitino Job framework + job_run_meta (§6.4)
 ```
 
 #### 5.1.1 In-process commit callback
 
-After a successful Iceberg commit, the IRC hook **INSERTs** one `table_maintenance_event` (§6.3)
-and asynchronously invokes `IcebergCommitEventHandler` (§5.4.1). No non-compaction policy resolve,
-Recommender, or submit on the IRC thread.
+After a successful Iceberg commit, the IRC hook asynchronously invokes `IcebergCommitEventHandler`
+(§5.4.1). No non-compaction policy resolve, Recommender, or submit on the IRC thread.
 
 |        | Deployment                             | Transport                                    | Payload                                           | Commit scope                                   | IRC thread cost                                              |
 | ------ | -------------------------------------- | -------------------------------------------- | ------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
-| Detail | IRC and main server share **one JVM**. | In-process only — **no** HTTP, **no** Kafka. | Normalized `table_identifier`; event row in §6.3. | **`system_iceberg_compaction` only** (§5.4.1). | One event `INSERT` + async hand-off to `IcebergCommitEventHandler`. |
+| Detail | IRC and main server share **one JVM**. | In-process only — **no** HTTP, **no** Kafka. | Normalized `table_identifier`.                    | **`system_iceberg_compaction` only** (§5.4.1). | Async hand-off to `IcebergCommitEventHandler`.               |
 
 ---
 
@@ -247,7 +242,7 @@ Each policy stores a **schedule** in `policy_meta.content`; TMS sets wall-clock 
 
 |                             | Table                                                            | **Above table** (schema / catalog / metalake)                                                      |
 | --------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| When state rows are written | **Immediately** on policy change; IRC `createTable` / `updateTable`; detach deletes | **Timed discovery** (§5.3.3)                                                                       |
+| When state rows are written | **Immediately** on policy change; IRC `createTable` / `updateTable`; detach deletes | **Timed discovery** (§5.3.1)                                                                       |
 | Behavior                    | O(1) UPSERT/DELETE; set `next_due_at = nextOccurrence(schedule)` | Bind association only; discovery lists scope, nearest-wins, INSERT / UPDATE / DELETE state rows |
 
 ```text
@@ -260,8 +255,8 @@ UPSERT table_maintenance_state
 
 Only **one** state row per `(table, maintenance_type)` effective policy.
 
-**IRC table lifecycle hooks (§5.3.3, §6.4):** `createTable` and `updateTable` UPSERT / refresh state
-for effective (ancestor) policies; `dropTable` purges state (and events). Tables that never call IRC
+**IRC table lifecycle hooks (§5.3.1, §6.3):** `createTable` and `updateTable` UPSERT / refresh state
+for effective (ancestor) policies; `dropTable` purges state. Tables that never call IRC
 APIs rely on discovery.
 
 ---
@@ -275,86 +270,7 @@ APIs rely on discovery.
 | Config           | `gravitino.maintenance.scheduler.pollIntervalSecs` (default **300**)                | `gravitino.maintenance.scheduler.discoveryIntervalSecs` (default **3600**)                         |
 | Work             | Select existing state rows with `next_due_at <= now`                                | Reconcile scope: **INSERT** missing, **UPDATE** wrong (`policy_id` / `next_due_at`), **DELETE** stale |
 
-#### 5.3.1 Due rows (`next_due_at`)
-
-Each `table_maintenance_state` row for an attached, enabled policy carries:
-
-|      | `next_due_at`                                                                           | `state`                                                         | `claim_lease_expires_at` / heartbeat                            |
-| ---- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
-| Role | Epoch millis when this row becomes eligible for `selectDueWork` (from §5.2.4 schedule) | `IDLE` (claimable) or `RUNNING` (a node owns evaluate → submit) | Reclaim stale `RUNNING` like `iceberg_cleanup_job.heartbeat_at` |
-
-**When `next_due_at` is written:** policy change; IRC `createTable` / `updateTable`; discovery
-INSERT/UPDATE when reconciling (§5.3.3). Not after job success or on the commit path. All four types
-are due when `next_due_at <= now` and enabled.
-
-**Candidate selection:** separate `selectDueWork` per track. `health_score` /
-`last_orphan_success_at` are derived/joined, not required state columns (§6.2).
-
-```sql
--- Compaction
-SELECT … FROM table_maintenance_state s
- JOIN policy_meta p ON … AND p.policy_type = 'system_iceberg_compaction'
- WHERE … /* due + IDLE or stale RUNNING */
- ORDER BY health_score DESC LIMIT :candidateWindow
-
--- Track A: prefer manifest over expire for the same table
-SELECT … FROM table_maintenance_state s
- JOIN policy_meta p ON … AND p.policy_type IN (
-   'system_iceberg_rewrite_manifests', 'system_iceberg_snapshot_expiration')
- WHERE … /* due + IDLE or stale RUNNING */
-   AND NOT (
-     p.policy_type = 'system_iceberg_snapshot_expiration'
-     AND EXISTS (
-       SELECT 1 FROM table_maintenance_state m
-        JOIN policy_meta pm ON pm.policy_id = m.policy_id
-       WHERE m.metalake_id = s.metalake_id AND m.table_identifier = s.table_identifier
-         AND pm.policy_type = 'system_iceberg_rewrite_manifests'
-         AND (m.next_due_at <= :now OR m.state = 'RUNNING')
-     )
-   )
- ORDER BY CASE p.policy_type WHEN 'system_iceberg_rewrite_manifests' THEN 0 ELSE 1 END,
-          health_score DESC
- LIMIT :candidateWindow
-
--- Track B
-SELECT … FROM table_maintenance_state s
- JOIN policy_meta p ON … AND p.policy_type = 'system_iceberg_orphan_file_removal'
- WHERE … /* due + IDLE or stale RUNNING */
- ORDER BY last_orphan_success_at ASC LIMIT :candidateWindow
-```
-
-CAS claim (same eligibility predicate):
-
-```sql
-UPDATE table_maintenance_state
-   SET state = 'RUNNING', claimed_by = :nodeId,
-       claim_lease_expires_at = :now + :leaseMs, updated_at = :now
- WHERE metalake_id = ? AND table_identifier = ? AND policy_id = ?
-   AND (state = 'IDLE' OR (state = 'RUNNING' AND claim_lease_expires_at < :now))
-```
-
-(`IcebergCleanupJobStore.takePendingJob` / `markRunning`.)
-
-**After claim — interval gate:** if `minIntervalMs` not elapsed since `last_job_id` finished, release
-to `IDLE` without changing `next_due_at` (retry on a later `selectDueWork` once the interval passes).
-
-#### 5.3.2 Multi-node behavior
-
-```text
-Node A/B/C/D claim different (table, policy) rows in parallel — no leader
-Node A dies → heartbeat expires → peer reclaim via selectDueWork
-```
-
-`maxConcurrentJobs` (§8.1) caps cluster in-flight Spark jobs:
-
-```sql
-SELECT COUNT(*) FROM table_maintenance_state
- WHERE state = 'RUNNING' AND job_id IS NOT NULL
-```
-
-If `COUNT >= maxConcurrentJobs`, do not claim (small race overshoot OK).
-
-#### 5.3.3 Scope discovery (above-table attachments)
+#### 5.3.1 Scope discovery (above-table attachments)
 
 Discovery expands schema / catalog / metalake attachments into **table-level** state rows (§5.2.5).
 It does **not** replace `selectDueWork`.
@@ -375,7 +291,7 @@ It does **not** replace `selectDueWork`.
 ```
 
 **IRC table lifecycle hooks:** `createTable` / `updateTable` UPSERT or refresh ancestor state;
-`dropTable` purges state and events (§6.4). Tables that never call IRC APIs rely on discovery.
+`dropTable` purges state (§6.3). Tables that never call IRC APIs rely on discovery.
 
 ---
 
@@ -388,41 +304,37 @@ Compaction is the **only** type with two wake sources: IRC commit (§5.4.1) and 
 
 ```text
 IRC commit succeeded → post-commit hook (§5.1.1)
-  ├─ INSERT table_maintenance_event (§6.3)   ← never UPDATE
   └─ async IcebergCommitEventHandler:
         resolve effective compaction policy (§5.2.3); skip if disabled
         skip if state row missing (hooks / discovery own `next_due_at` — §5.2.5, §5.3.1)
-        minIntervalMs gate (event.created_at, last_job_id — §6.3)
-        claim row (§6.1) + register refreshClaimHeartbeats
-        Recommender → submit; record job_run_meta (§6.5); release to IDLE
-        // do not read or write next_due_at — §5.2.4, §5.3.1
+        minIntervalMs gate (last_job_id — §7.3)
+        claim row (§6.1) + register heartbeats
+        submit one job; record job_run_meta (§6.4); release to IDLE when job finishes
+        // job body: update-stats → decision → compaction (same Spark job)
+        // do not read or write next_due_at — §5.2.4, §5.2.5
 ```
 
-IRC thread: event INSERT + async hand-off only. No `next_due_at` check; `minIntervalMs` + Recommender
-decide submit. Missing state → skip (no commit-path write of `next_due_at`). Async failure → best
-effort (§10); next commit or scheduler can still drive. Multi-node: claim (§6.1) prevents
+IRC thread: async hand-off only. No `next_due_at` check. Order: **`minIntervalMs` → claim →
+submit** (one job: **update-stats → decision → compaction**). Missing state → skip. Async failure →
+best effort (§9); next commit or scheduler can still drive. Multi-node: claim (§6.1) prevents
 double-submit.
 
 #### 5.4.2 Scheduler path (scheduled compaction)
 
-Scheduler claims compaction rows with `next_due_at <= now`, then evaluate → submit; after success
-release to `IDLE` without changing `next_due_at` (§5.3.1). Inactive tables still compact when
-`next_due_at` is due; active ones may no-op via `minIntervalMs` + Recommender. Manifest / expire /
-orphan: **scheduler only**.
-
-#### 5.4.3 When commit and scheduler meet
-
-Same row: **claim** + `minIntervalMs` + in-flight `job_id` prevent duplicate Spark jobs (§6.1).
+Scheduler: `minIntervalMs` → claim rows with `next_due_at <= now` → submit the **same** one-job
+pipeline (update-stats → decision → compaction); after success release to `IDLE` without changing
+`next_due_at` (§5.2.5). Inactive tables still run when due; active ones may no-op inside the job
+after update-stats. Manifest / expire / orphan: **scheduler only**.
 
 ---
 
 ### 5.5 Hot pipeline (scheduled — Track A)
 
-Track A: **manifest** and **expire**, each with its own state row / claim — **no** multi-policy claim.
-Soft order (§5.3.1): prefer manifest before expire; skip expire while that table has a due/RUNNING
-manifest. Schedule manifest earlier when both attach. Compaction uses the compaction track (§5.4.2).
-Prefer rewrite after the file set stabilizes, then expire. Per-type `minIntervalMs` (§8.3); rank
-worst-first.
+Track A: **manifest** and **expire** as **separate** policies — each has its own state row / claim.
+With separate policies, TMS **cannot** guarantee true serial execution (manifest must succeed, then
+expire). At best it can **soft-order**: prefer manifest before expire; skip expire while that table
+has a due/RUNNING manifest; schedule manifest earlier when both attach. Compaction uses the
+compaction track (§5.4.2). Per-type `minIntervalMs` (§7.3); rank worst-first.
 
 ---
 
@@ -430,47 +342,23 @@ worst-first.
 
 Orphan is a **separate track**, not step 3 of Track A.
 
-| Aspect           | Track A (hot pipeline)               | Track B (orphan)                                               |
-| ---------------- | ------------------------------------ | -------------------------------------------------------------- |
-| Operations       | manifest rewrite, snapshot expire    | `remove_orphan_files` only                                     |
-| Candidate signal | metrics / time due (`minIntervalMs`) | per-table `minIntervalMs` since last **successful** orphan job |
-| Queue order      | worst-first (health score)           | **oldest cleanup first**                                       |
-| Shared limits    | `maxConcurrentJobs` (§8.1)           | same                                                           |
-
-Eligible again only after `minIntervalMs` since last success (default 7d — §8.3); if claimed early,
-release to `IDLE` without changing `next_due_at` (§5.3.1). Enforce `olderThan` floor on evaluate and
-policy write (§8.1).
-
 ---
 
-### 5.7 Internal structure
+### 5.7 User process
 
-|                | `TableMaintenanceRESTFeature`                                                 | `IcebergCommitEventHandler`                                                     | `MaintenanceScheduler`                                                             | `MaintenanceEvaluateSubmitPipeline`                                     | `TableMaintenanceEventStore`                                                      | `TableMaintenanceStateStore`                                                   | `IcebergTableLifecycleHook`                                    | Existing optimizer classes                           |
-| -------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------- | ---------------------------------------------------- |
-| Responsibility | Jersey 2 `Feature`; commit callback, scheduler lifecycle, ops resources (§7). | Async in-process callback; runs compaction pipeline (§5.4.1). | Worker loops + heartbeat + discovery; `selectDueWork` → evaluate → submit (§5.3). | Interval gate → Recommender → submit for one claimed `(table, policy)`. | IRC hook INSERT for `table_maintenance_event`; rename / drop rewrite (§6.3–§6.4). | `table_maintenance_state` upsert / `selectDueWork` / heartbeat / rename (§6). | IRC rename/drop: rewrite or purge state and event rows (§6.4). | `Updater`, `Recommender`, providers, `JobSubmitter`. |
-
-Pattern: `IcebergCleanupManager` / `takePendingJob` (§5.3).
-
----
-
-### 5.8 User process
-
-1. Enable TMS plugin + `iceberg-rest` in the same JVM; turn on in-process callbacks (§5.1.1 / §8.2).
+1. Enable TMS plugin + `iceberg-rest` in the same JVM; turn on IRC hooks (§5.1.1 / §7.2).
 2. Apply `standard` profile or create/attach four policies; set schedules (§5.2.4).
-3. Enable scheduler (`gravitino.maintenance.scheduler.enabled=true`, §8.1).
-4. IRC commits INSERT events + compaction callback (§5.4.1); scheduler claims due rows (§5.3).
-5. Observe via Jobs APIs; manual runs via §7.
+3. Enable scheduler (`gravitino.maintenance.scheduler.enabled=true`, §7.1).
+4. IRC commits trigger compaction callback (§5.4.1); scheduler claims due rows (§5.3).
+5. Observe via Jobs APIs.
 
 ---
 
 ## 6. Multi-node coordination (shared claim)
 
 Shared `table_maintenance_state` in the entity DB; identity is `table_identifier`
-(`catalog.schema.table`), not `table_meta.table_id`.
-
-|      | `table_maintenance_event`                                        | `table_maintenance_state`                                                               |
-| ---- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Role | **Commit log** — one INSERT per successful Iceberg commit (§6.3) | Multi-node **claim**, in-flight `job_id`, finished `last_job_id` per policy (§6.1–§6.2) |
+(`catalog.schema.table`), not `table_meta.table_id`. Multi-node **claim**, in-flight `job_id`,
+finished `last_job_id` per policy (§6.1–§6.2).
 
 Every node polls; **per-row CAS** picks the winner. PK: `(metalake_id, table_identifier, policy_id)`.
 
@@ -480,26 +368,25 @@ Every node polls; **per-row CAS** picks the winner. PK: `(metalake_id, table_ide
 
 ```text
 Both nodes SELECT due candidates → both CAS claim (IDLE or stale RUNNING):
-  UPDATE … SET state=RUNNING, claimed_by=:nodeId, claim_lease_expires_at=…
-  WHERE … AND (state=IDLE OR (state=RUNNING AND claim_lease_expires_at < now))
-  winner (rows_affected=1) → heartbeat → evaluate → submit → IDLE
-  (or interval gate fail → IDLE, §5.3.1)
+  UPDATE … SET state=RUNNING, heartbeat_at=:now
+  WHERE … AND (state=IDLE OR (state=RUNNING AND heartbeat_at < :heartbeatExpiry))
+  winner (rows_affected=1) → heartbeat → submit → IDLE when job finishes
   loser → next candidate
-refreshClaimHeartbeats covers scheduler + commit-path claims
+Heartbeats cover scheduler + commit-path claims (same pattern as iceberg_cleanup_job.heartbeat_at)
 ```
 
 **Commit path** uses the same CAS and **must** register heartbeats; it does **not** read/advance
-`next_due_at`. Claim + `minIntervalMs` bound duplicates; **claim is the write lock** (gates alone
-race).
+`next_due_at`. Gate with `minIntervalMs` **before** claim; **claim is the write lock**. Submitted
+compaction job runs **update-stats → decision → compaction** in one Spark job (§5.4.1).
 
 ### 6.2 State table (shared store)
 
 **Table name:** `table_maintenance_state`
 
-|       | `metalake_id`              | `table_identifier`                | `policy_id`                | `state`                | `next_due_at`                              | `updated_at`                | `job_id`               | `last_job_id`                      | `last_measured_snapshot_id`       | `claimed_by`                  | `claim_lease_expires_at`            | `submission_idempotency_key`  |
-| ----- | -------------------------- | --------------------------------- | -------------------------- | ---------------------- | ------------------------------------------ | --------------------------- | ---------------------- | ---------------------------------- | --------------------------------- | ----------------------------- | ----------------------------------- | ----------------------------- |
-| Type  | `BIGINT UNSIGNED NOT NULL` | `VARCHAR(512) NOT NULL`           | `BIGINT UNSIGNED NOT NULL` | `VARCHAR(16) NOT NULL` | `BIGINT NOT NULL`                          | `BIGINT NOT NULL`           | `BIGINT UNSIGNED NULL` | `BIGINT UNSIGNED NULL`             | `BIGINT NULL`                     | `VARCHAR(128) NULL`           | `BIGINT NULL`                       | `VARCHAR(64) NULL`            |
-| Notes | Metalake owning the policy | Normalized `catalog.schema.table` | `policy_meta.policy_id`    | `IDLE` / `RUNNING`     | Scheduler eligibility, epoch millis (§5.3) | Claim / reclaim / heartbeat | In-flight `job_run_id` | Last finished; drives min-interval | Snapshot at last evaluate (§10.3) | Node holding `RUNNING` (§6.1) | Lease expiry; reclaim after (§10.3) | Written before submit (§10.3) |
+|       | `metalake_id`              | `table_identifier`                | `policy_id`                | `state`                | `next_due_at`                              | `job_id`               | `last_job_id`                      | `heartbeat_at`                                      |
+| ----- | -------------------------- | --------------------------------- | -------------------------- | ---------------------- | ------------------------------------------ | ---------------------- | ---------------------------------- | --------------------------------------------------- |
+| Type  | `BIGINT UNSIGNED NOT NULL` | `VARCHAR(512) NOT NULL`           | `BIGINT UNSIGNED NOT NULL` | `VARCHAR(16) NOT NULL` | `BIGINT NOT NULL`                          | `BIGINT UNSIGNED NULL` | `BIGINT UNSIGNED NULL`             | `BIGINT NOT NULL`                                    |
+| Notes | Metalake owning the policy | Normalized `catalog.schema.table` | `policy_meta.policy_id`    | `IDLE` / `RUNNING`     | Scheduler eligibility, epoch millis (§5.3) | In-flight `job_run_id` | Last finished; drives min-interval | Last worker heartbeat; stale `RUNNING` reclaimable |
 
 **Primary key:** (`metalake_id`, `table_identifier`, `policy_id`).
 
@@ -512,105 +399,46 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
     `state` VARCHAR(16) NOT NULL COMMENT 'IDLE|RUNNING',
     `next_due_at` BIGINT(20) NOT NULL COMMENT 'scheduler eligibility time, epoch millis',
-    `updated_at` BIGINT(20) NOT NULL COMMENT 'last state/heartbeat upsert, epoch millis',
     `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'in-flight job_run_id',
     `last_job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last finished job_run_id',
-    `last_measured_snapshot_id` BIGINT(20) NULL COMMENT 'snapshot id at last evaluate',
-    `claimed_by` VARCHAR(128) NULL COMMENT 'node/worker holding RUNNING claim',
-    `claim_lease_expires_at` BIGINT(20) NULL COMMENT 'claim lease expiry, epoch millis',
-    `submission_idempotency_key` VARCHAR(64) NULL COMMENT 'idempotency key before job submit',
+    `heartbeat_at` BIGINT(20) NOT NULL COMMENT 'last heartbeat from worker, 0 when not running',
     PRIMARY KEY (`metalake_id`, `table_identifier`, `policy_id`),
     KEY `idx_due_state` (`next_due_at`, `state`),
-    KEY `idx_state_updated` (`state`, `updated_at`),
     KEY `idx_table_identifier` (`table_identifier`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
   COMMENT 'TMS per-policy due time, claim, and job state';
 ```
 
-### 6.3 Commit log (`table_maintenance_event`)
-
-IRC INSERTs one row per successful commit (TMS never UPDATEs). Keyed by `table_identifier` string,
-not `table_meta.table_id`. Records that a commit happened; no `snapshot_id`.
-
-```text
-IRC post-commit hook → INSERT event → async IcebergCommitEventHandler (§5.4.1)
-```
-
-|       | `event_id`                    | `metalake_id`                     | `table_identifier`                | `created_at`              |
-| ----- | ----------------------------- | --------------------------------- | --------------------------------- | ------------------------- |
-| Type  | `BIGINT UNSIGNED NOT NULL`    | `BIGINT UNSIGNED NOT NULL`        | `VARCHAR(512) NOT NULL`           | `BIGINT NOT NULL`         |
-| Notes | Surrogate PK (auto-increment) | Metalake from config / resolution | Normalized `catalog.schema.table` | Insert time, epoch millis |
-
-**Primary key:** (`event_id`). **Index:** (`metalake_id`, `table_identifier`, `created_at`).
-
-Claim / `job_id` / `last_job_id` prevent double-submit. Interval join:
-
-```text
-event e JOIN state s ON … AND s.policy_id = :compaction_policy_id
-  LEFT JOIN job_run_meta j ON j.job_run_id = s.last_job_id
-```
-
-Null `last_job_id` → gate passes; non-null `job_id` → in flight. Compare
-`e.created_at - j.job_finished_at` to `minIntervalMs` (§8.3).
-
-```sql
-CREATE TABLE IF NOT EXISTS `table_maintenance_event` (
-    `event_id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'commit event id',
-    `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
-    `table_identifier` VARCHAR(512) NOT NULL COMMENT 'normalized catalog.schema.table',
-    `created_at` BIGINT(20) NOT NULL COMMENT 'insert time epoch millis',
-    PRIMARY KEY (`event_id`),
-    KEY `idx_table_created` (`metalake_id`, `table_identifier`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'TMS commit log; one INSERT per Iceberg commit';
-```
-
-**Retention:** append-only; cleaner may DELETE old rows. Decisions use state + `job_run_meta`.
-
-### 6.4 Table rename / drop lifecycle (required with string keys)
+### 6.3 Table rename / drop lifecycle (required with string keys)
 
 String keys need rewrite/purge via `IcebergTableLifecycleHook` (§5.1.1).
 
 #### Rename
 
 1. **`table_maintenance_state`:** `UPDATE … SET table_identifier = new WHERE … = old`.
-2. **`table_maintenance_event`:** same rewrite for the metalake.
 
 #### Drop
 
 1. **`table_maintenance_state`:** `DELETE` all rows for `(metalake_id, table_identifier)`.
-2. **`table_maintenance_event`:** `DELETE` rows for `(metalake_id, table_identifier)`.
 
-### 6.5 Job run history (`job_run_meta`)
+### 6.4 Job run history (`job_run_meta`)
 
-Every submission creates a `job_run_meta` row. On finish: update `last_job_id`, clear `job_id`, set
-`last_measured_snapshot_id` when evaluate completes (§10.3).
-
+Every submission creates a `job_run_meta` row. On finish: update `last_job_id`, clear `job_id`
+(§9.3).
 ---
 
-## 7. Optimizer CLI replacement APIs
+## 7. Configuration
 
-Commit path and scheduler do **not** call these routes. They replace the `gravitino-optimizer` CLI on
-**8090**.
+### 7.1 Enablement keys (`gravitino.conf`)
 
-|        | `submit-strategy-jobs`                     | `submit-update-stats-job`                      | `update-statistics`                     | `append-metrics`                     | `monitor-metrics`                            | `list-table-metrics`                        | `list-job-metrics`                        |
-| ------ | ------------------------------------------ | ---------------------------------------------- | --------------------------------------- | ------------------------------------ | -------------------------------------------- | ------------------------------------------- | ----------------------------------------- |
-| Method | `POST`                                     | `POST`                                         | `POST`                                  | `POST`                               | `POST`                                       | `GET`                                       | `GET`                                     |
-| Path   | `/api/maintenance/table/ops/strategy-jobs` | `/api/maintenance/table/ops/update-stats-jobs` | `/api/maintenance/table/ops/statistics` | `/api/maintenance/table/ops/metrics` | `/api/maintenance/table/ops/metrics/monitor` | `/api/maintenance/table/ops/metrics/tables` | `/api/maintenance/table/ops/metrics/jobs` |
+|             | `gravitino.server.rest.extensionPackages` | `gravitino.auxService.names`           | `gravitino.maintenance.scheduler.enabled` | `gravitino.maintenance.scheduler.workerThreads` | `gravitino.maintenance.scheduler.pollIntervalSecs` | `gravitino.maintenance.scheduler.discoveryIntervalSecs`  | `gravitino.maintenance.scheduler.discoveryBatchSize` | `gravitino.maintenance.scheduler.heartbeatTimeoutSecs` | `gravitino.maintenance.scheduler.candidateWindow` | `gravitino.maintenance.scheduler.maxConcurrentJobs` | `gravitino.maintenance.scheduler.maintenanceWindow` | `gravitino.maintenance.orphan.olderThanMinMs` |
+| ----------- | ----------------------------------------- | -------------------------------------- | ----------------------------------------- | ----------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------- |
+| Default     | none                                      | none                                   | `true`                                    | `2`                                             | `300`                                              | `3600`                                                   | `500`                                                | `300`                                                  | `8`                                               | `10`                                                | none                                                | `259200000`                                   |
+| Description | TMS Feature package.                      | Include `iceberg-rest` when using IRC. | Enable `MaintenanceScheduler` (§5.3).     | Scheduler workers per node.                     | Sleep when no due row claimed.                     | Discovery interval for above-table attachments (§5.3.1). | Max tables per discovery round.                      | Stale `heartbeat_at` → reclaim `RUNNING` (§6.1).       | Max candidates per `selectDueWork`.              | Cap: COUNT `RUNNING` + `job_id` (§7.1).           | Optional UTC window; skip submit outside.           | Min `olderThan` (3 days) for orphan (§5.6).   |
 
----
-
-## 8. Configuration
-
-### 8.1 Enablement keys (`gravitino.conf`)
-
-|             | `gravitino.server.rest.extensionPackages` | `gravitino.auxService.names`           | `gravitino.maintenance.claimLeaseMs`           | `gravitino.maintenance.scheduler.enabled` | `gravitino.maintenance.scheduler.workerThreads` | `gravitino.maintenance.scheduler.pollIntervalSecs` | `gravitino.maintenance.scheduler.discoveryIntervalSecs`  | `gravitino.maintenance.scheduler.discoveryBatchSize` | `gravitino.maintenance.scheduler.heartbeatTimeoutSecs` | `gravitino.maintenance.scheduler.candidateWindow` | `gravitino.maintenance.scheduler.maxConcurrentJobs` | `gravitino.maintenance.scheduler.maintenanceWindow` | `gravitino.maintenance.orphan.olderThanMinMs` |
-| ----------- | ----------------------------------------- | -------------------------------------- | ---------------------------------------------- | ----------------------------------------- | ----------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------- |
-| Default     | none                                      | none                                   | `300000`                                       | `true`                                    | `2`                                             | `300`                                              | `3600`                                                   | `500`                                                | `300`                                                  | `8`                                               | `10`                                                | none                                                | `259200000`                                   |
-| Description | TMS Feature package.                      | Include `iceberg-rest` when using IRC. | Claim lease → `claim_lease_expires_at` (§6.1). | Enable `MaintenanceScheduler` (§5.3).     | Scheduler workers per node.                     | Sleep when no due row claimed.                     | Discovery interval for above-table attachments (§5.3.3). | Max tables per discovery round.                      | Reclaim stale `RUNNING`.                               | Max candidates per `selectDueWork`.              | Cap: COUNT `RUNNING` + `job_id` (§5.3.2).           | Optional UTC window; skip submit outside.           | Min `olderThan` (3 days) for orphan (§5.6).   |
-
-Per-table cadence is **`minIntervalMs`** / **`next_due_at`**. `pollIntervalSecs` = claim frequency;
-`discoveryIntervalSecs` = expansion frequency.
+Per-table **schedule cadence** is **`next_due_at`** (from policy crontab). `minIntervalMs` is only the
+min-gap gate before claim (§7.3). `pollIntervalSecs` = claim frequency; `discoveryIntervalSecs` =
+expansion frequency.
 
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
@@ -620,39 +448,50 @@ gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.maxConcurrentJobs = 10
 ```
 
-### 8.2 Iceberg REST → TMS in-process event keys
+### 7.2 IRC hooks
 
 |             | `gravitino.iceberg-rest.tableMaintenance.inProcess` |
 | ----------- | --------------------------------------------------- |
 | Default     | `false`                                             |
-| Description | IRC invokes compaction callback after commit.       |
+| Description | Master switch for IRC → TMS hooks (§5.1.1).         |
 
-### 8.3 Task types and minimum interval (per policy type)
+When `true`:
 
-Each type has its own `minIntervalMs`, compared per `(table, policy_id)` via
-`last_job_id` → `job_run_meta.job_finished_at`. Null `last_job_id` → gate passes.
+| Hook | IRC API | Effect |
+| ---- | ------- | ------ |
+| Post-commit | successful Iceberg commit | Async `IcebergCommitEventHandler` → compaction only (§5.4.1) |
+| Lifecycle | `createTable` / `updateTable` | UPSERT / refresh `table_maintenance_state` (`next_due_at`, §5.2.5) |
+| Lifecycle | `dropTable` | `DELETE` state rows (§6.3) |
+
+When `false`, commit and lifecycle hooks are off; above-table scope still relies on discovery (§5.3.1).
+
+### 7.3 Task types and minimum interval (per policy type)
+
+`minIntervalMs` is the **minimum gap between consecutive runs** of the same `(table, policy_id)`
+(compared via `last_job_id` → `job_run_meta.job_finished_at`). It is **not** the scheduler poll /
+`next_due_at` cadence. Null `last_job_id` → gate passes. Code default for every type: **1 hour**.
 
 |                              | `compaction`                | `snapshot-expiry`                    | `manifest-rewrite`                 | `orphan-cleanup`                     |
 | ---------------------------- | --------------------------- | ------------------------------------ | ---------------------------------- | ------------------------------------ |
 | Policy type                  | `system_iceberg_compaction` | `system_iceberg_snapshot_expiration` | `system_iceberg_rewrite_manifests` | `system_iceberg_orphan_file_removal` |
-| Code default `minIntervalMs` | `3600000` (1 hour)          | `86400000` (1 day)                   | `86400000` (1 day)                 | `604800000` (7 days)                 |
+| Code default `minIntervalMs` | `3600000` (1 hour)          | `3600000` (1 hour)                   | `3600000` (1 hour)                 | `3600000` (1 hour)                   |
 
 **Resolution order:** table property override → global `gravitino.conf` key → code default.
 
 ---
 
-## 9. Work Plan and Checklist
+## 8. Work Plan and Checklist
 
-### 9.1 Suggested Work Plan
+### 8.1 Suggested Work Plan
 
 |           | 1                                                         | 2                                                      | 3                                               | 4                                                  | 5                                 | 6–8                           |
 | --------- | --------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------- | -------------------------------------------------- | --------------------------------- | ----------------------------- |
-| Work item | In-process plugin + commit event                          | State + event tables + claim                           | `MaintenanceScheduler` + discovery              | Compaction on scheduler schedule                   | Track A / B                       | Profile API, ops APIs, harden |
-| Notes     | Feature; IRC INSERT + async `IcebergCommitEventHandler` (§5.4.1) | Event + state materialization; nearest-wins (§5.2, §6) | `selectDueWork` + Iceberg/HMS discovery (§5.3) | Scheduler compaction; commit path unchanged (§5.4) | Hot pipeline + orphan (§5.5–§5.6) | §5.2.2, §7, §10               |
+| Work item | In-process plugin + commit callback                   | State table + claim                                    | `MaintenanceScheduler` + discovery              | Compaction on scheduler schedule                   | Track A / B                       | Profile API, harden |
+| Notes     | Feature; IRC async `IcebergCommitEventHandler` (§5.4.1) | State materialization; nearest-wins (§5.2, §6)         | `selectDueWork` + Iceberg/HMS discovery (§5.3) | Scheduler compaction; commit path unchanged (§5.4) | Hot pipeline + orphan (§5.5–§5.6) | §5.2.2, §9               |
 
 #### Phase 1–4 checklist
 
-- [ ] Phase 1: event migration; IRC INSERT + async `IcebergCommitEventHandler` (§5.4.1, §6.3, §8.2).
+- [ ] Phase 1: IRC async `IcebergCommitEventHandler` (§5.4.1, §7.2).
 - [ ] Phase 3: scheduler workers; discovery from Iceberg/HMS; immediate table attach; CAS
       `selectDueWork`; heartbeats; `next_due_at`; all four types; Track A soft order; orphan
       oldest-first + interval gate; `maxConcurrentJobs`; multi-node claim tests; commit-path
@@ -660,41 +499,40 @@ Each type has its own `minIntervalMs`, compared per `(table, policy_id)` via
 - [ ] Phase 4: commit path does not write `next_due_at`; claim +
       `minIntervalMs` vs double-submit; commit ignores non-compaction (§5.4).
 
-### 9.2 Review Checklist
+### 8.2 Review Checklist
 
 |           | Deployment                                               | Policy                                                                          | Trigger                                                                           | Discovery                                                        | Multi-node                                                        | Commit callback                                            | Durability                                                       | Orchestration                                    | Industry                             | Fault tolerance                                                 |
 | --------- | -------------------------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------ | --------------------------------------------------------------- |
-| Checklist | `extensionPackages`; IRC same JVM; ops on **8090** (§7). | Four types; nearest-wins; table attach immediate; above-table discovery (§5.2). | Compaction: commit + scheduler; others: scheduler + `next_due_at` (§5.4, §5.2.4). | Iceberg/HMS list; separate from `selectDueWork` (§5.3.3, §4.4). | No leader; per-row CAS like `IcebergCleanupManager` (§5.3, §4.3). | Async `IcebergCommitEventHandler` (§5.4.1).                | Event INSERT per commit (§6.3); state for claim/schedule (§6.2). | Track A soft order; orphan separate (§5.5–§5.6). | §4.2 / §4.3 / §4.4 (row CAS chosen). | Scheduler at-least-once latest-state; commit best effort (§10). |
+| Checklist | `extensionPackages`; IRC same JVM on **8090**. | Four types; nearest-wins; table attach immediate; above-table discovery (§5.2). | Compaction: commit + scheduler; others: scheduler + `next_due_at` (§5.4, §5.2.4). | Iceberg/HMS list; separate from `selectDueWork` (§5.3.1, §4.4). | No leader; per-row CAS like `IcebergCleanupManager` (§5.3, §4.3). | Async `IcebergCommitEventHandler` (§5.4.1).                | State for claim/schedule (§6.2).                                 | Track A soft order; orphan separate (§5.5–§5.6). | §4.2 / §4.3 / §4.4 (row CAS chosen). | Scheduler at-least-once latest-state; commit best effort (§9). |
 
 ---
 
-## 10. Fault tolerance and delivery guarantees
+## 9. Fault tolerance and delivery guarantees
 
-### 10.1 Delivery models
+### 9.1 Delivery models
 
 |            | Best effort                         | At-least-once latest-state                                                  | Exactly-once job effect                                      |
 | ---------- | ----------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| TMS target | **Commit compaction path** (§5.4.1) | **`MaintenanceScheduler` path** — recovery from table state, not event rows | **Not required** — claims + idempotency key bound duplicates |
+| TMS target | **Commit compaction path** (§5.4.1) | **`MaintenanceScheduler` path** — recovery from table state | **Not required** — claim + `job_id` bound duplicates |
 
-**Commit path:** durable after event INSERT; async handler failure → next commit or scheduler. Manifest /
+**Commit path:** best effort after async hand-off; handler failure → next commit or scheduler. Manifest /
 expire / orphan are scheduler-only.
 
 **Scheduler path:** coalescing OK — act on **current** state; due row stays due until claim + complete.
 
-### 10.2 Recovery is driven by table state
+### 9.2 Recovery is driven by table state
 
-Recovery / interval gates use current snapshot vs `last_measured_snapshot_id`, per-policy
-`last_job_id` / `job_id`, and `minIntervalMs` (commit path joins `event.created_at` — §6.3).
+Recovery / interval gates use per-policy `last_job_id` / `job_id`, and `minIntervalMs` (§7.3).
 
-### 10.3 Recovery at failure boundaries
+### 9.3 Recovery at failure boundaries
 
-|          | Event INSERT ok before async handler runs compaction      | Node fails holding a claim                                                                     | Interval gate fails after claim                                                 | All workers at `maxConcurrentJobs`                    | Job accepted before `job_id` recorded              |
+|          | Async handler fails before claim                          | Node fails holding a claim                                                                     | `minIntervalMs` gate fails before claim                                         | All workers at `maxConcurrentJobs`                    | Job accepted before `job_id` recorded              |
 | -------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------- |
-| Behavior | Event row kept; next commit or scheduler schedule retries | `claim_lease_expires_at` / heartbeat timeout reclaims `RUNNING`; peer `selectDueWork` retries | Release to `IDLE` without changing `next_due_at` (§5.3.1) — no tight re-claim until `minIntervalMs` | Due rows remain; next claim cycle on any node retries | `submission_idempotency_key` written before submit |
+| Behavior | Next commit or scheduler schedule retries                 | Stale `heartbeat_at` reclaims `RUNNING`; peer `selectDueWork` retries                          | Skip claim; retry later when interval elapsed                                   | Due rows remain; next claim cycle on any node retries | Claim + `job_id` bound duplicates                  |
 
 ---
 
-## 11. References
+## 10. References
 
 1. [Gravitino Iceberg REST](../docs/iceberg-rest-service.md); [policies](../docs/manage-policies-in-gravitino.md); [compaction policy](../docs/iceberg-compaction-policy.md)
 2. [Expire](./iceberg-expire-snapshots-maintenance-job.md) / [rewrite-manifests](./iceberg-rewrite-manifests-job.md) / [remove-orphan](./iceberg-remove-orphan-files-maintenance-job.md) design docs
