@@ -145,24 +145,7 @@ listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 
 **Decision:** Rejected. Prefer Option B.
 
-### 4.5 Industry survey: scheduled maintenance clocks
-
-Most lakehouse maintenance products treat **snapshot expiry, manifest rewrite, and orphan cleanup** as
-**time-driven** (scheduler, cron, or platform optimizer interval), not as post-commit hooks.
-
-| Product                                                                                                | Clock mechanism                                                              | Typical cadence                                                                     | Operations on schedule                                                                                       |
-| ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| [AWS Glue table optimizers](https://docs.aws.amazon.com/glue/latest/dg/table-optimizers.html)          | Managed optimizer runs per table                                             | Default **24h** (`runRateInHours`)                                                  | Compaction, snapshot **retention**, **orphan file deletion** — each optimizer type has its own interval      |
-| [Floe](https://github.com/nssalian/floe)                                                               | Per-policy `cronExpression` / `interval` **or** `POST …/maintenance/trigger` | Per-op schedules (e.g. compact every 4h, expire daily)                              | Compaction, expire snapshots, orphan cleanup, rewrite manifests — **independent schedules per operation**    |
-| [Apache Amoro](https://amoro.apache.org/docs/latest/configurations/)                                   | AMS `PeriodicTableScheduler` executors                                       | Snapshot expire default **1h**; orphan clean **7d**; dangling deletes **24h**       | Snapshot expiration, orphan files, dangling delete files — **separate periodic executors**, not commit hooks |
-| [OpenHouse](https://github.com/linkedin/openhouse/blob/main/ARCHITECTURE.md)                           | K8s **CronJob** data services                                                | Operator-defined                                                                    | Table maintenance jobs triggered by platform cron                                                            |
-| [Databricks OPTIMIZE / VACUUM guidance](https://docs.databricks.com/aws/en/tables/operations/optimize) | Scheduled jobs or predictive optimization                                    | **Daily** recommended starting point for `OPTIMIZE`; predictive layer for UC tables | File layout (`OPTIMIZE`) and vacuum are **scheduled / platform-driven**, separate from write path            |
-
-**Takeaway for TMS:** timed maintenance is **time-driven** in industry; TMS implements that with a
-built-in poller plus per-row `next_due_at` / `minIntervalMs`. External cron clocks (Floe trigger API,
-OpenHouse CronJob) are surveyed for context only — TMS does **not** adopt them.
-
-### 4.6 Industry survey: commit / write-path triggers
+### 4.5 Industry survey: commit / write-path triggers
 
 **Compaction** (rewrite data files, small-file consolidation) is the operation most often tied to
 **writes or commits**. Manifest rewrite, snapshot expiry, and orphan cleanup are usually **not**
@@ -192,7 +175,7 @@ INSERTs `table_maintenance_event`, then TMS handles compaction asynchronously. T
 wall-clock schedule fires (§5.4.2, §5.2.4). Manifest / expire / orphan are **poller-only** (not on
 the commit path). Nightly compaction covers tables that stop receiving commits.
 
-### 4.7 Industry: how defaults reach tables, and why TMS uses discovery
+### 4.6 Industry: how defaults reach tables, and why TMS uses discovery
 
 Products that support catalog- or scope-level maintenance defaults still have a **gap** before every
 table is actually on the schedule. They close that gap differently:
@@ -229,7 +212,7 @@ Discovery accepts a bounded lag (default one hour) before a newly visible table 
 same class of gap Glue / Amoro / cron products already have — while keeping due-work execution
 scalable and aligned with per-row claims.
 
-### 4.8 Industry: multi-node schedule coordination without HA
+### 4.7 Industry: multi-node schedule coordination without HA
 
 Products that run timed work on **several peer nodes** (no maintenance leader) typically use one of
 four patterns. Patterns **1** and **2** coordinate at **policy / job** grain (one lock or trigger per
@@ -245,7 +228,7 @@ Trigger and execution are decoupled, but the install must bring those components
 | **3. Due rows + row-level CAS**               | TMS / `IcebergCleanupManager`; Temporal lease; Hangfire; db-scheduler; SQS visibility timeout (analogy) | No leader; **row-level** parallelism; lease reclaim on crash; fits large table counts | Needs a **state table** + lease; needs **materialization / discovery** for above-table policies                                 | **Chosen** (§5.3). Matches in-tree cleanup; poller and commit path share the same `(table, policy)` claim; scales with due rows, not with a single job lock.    |
 | **4. External cron enqueue + multi-consumer** | OpenHouse CronJob; Floe; cloud Cron → SQS                                                               | Decouples trigger from execution; consumers scale on the **external** queue           | Requires **extra components** (external Cron and/or message queue); duplicate-enqueue and consumer **idempotency** still needed | **Rejected.** TMS must not introduce other runtime components beyond Gravitino and its entity DB. Pattern **3** keeps coordination in-process + existing store. |
 
-**TMS mapping:** discovery (§4.7 / §5.3.5) materializes due rows; `takePendingDue` + CAS is
+**TMS mapping:** discovery (§4.6 / §5.3.5) materializes due rows; `takePendingDue` + CAS is
 pattern **3** (same choice as §5.3).
 
 ---
@@ -566,7 +549,7 @@ remain for manual / CLI-replacement runs, not for replacing the poller.
 
 Discovery expands schema / catalog / metalake policy attachments into **table-level** state rows
 (§5.2.5). It does **not** replace `takePendingDue`. **Why discovery (vs Glue copy / Amoro merge /
-cron full-scope scan):** §4.7.
+cron full-scope scan):** §4.6.
 
 **Catalog source:** list tables from the **Iceberg catalog backend** used by IRC (for example the
 same Hive Metastore). Do **not** limit discovery to Gravitino `table_meta` alone — tables that exist
@@ -1064,11 +1047,11 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 | Policy          | Four built-in types; precedence nearest-wins (§5.2); table attach immediate; above-table via discovery (§5.2.5).     |
 | Trigger         | Compaction: **commit + poller** (§5.4); others: **poller** + schedule / `next_due_at` (§5.2.4, §5.3).                |
 | Discovery       | Iceberg/HMS list; separate from `takePendingDue` (§5.3.5).                                                           |
-| Multi-node      | **No** maintenance leader; per-row `takePendingDue` like `IcebergCleanupManager` (§5.3, §4.8).                       |
+| Multi-node      | **No** maintenance leader; per-row `takePendingDue` like `IcebergCleanupManager` (§5.3, §4.7).                       |
 | Executor        | Bounded; evaluation **off** commit thread (§5.4.1).                                                                  |
 | Durability      | IRC hook INSERTs `table_maintenance_event` per commit (§6.3); `table_maintenance_state` for claim / schedule (§6.2). |
 | Orchestration   | Track A soft order manifest before expire (§5.5); orphan separate track (§5.6).                                      |
-| Industry        | §4.5–§4.6 scheduled vs commit; §4.7 discovery; §4.8 multi-node patterns (row CAS chosen).                            |
+| Industry        | §4.5 commit vs schedule; §4.6 discovery; §4.7 multi-node patterns (row CAS chosen).                                  |
 | Fault tolerance | Poller: at-least-once latest-state; commit: best effort (§10).                                                       |
 
 ---
