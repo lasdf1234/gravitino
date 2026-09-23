@@ -93,8 +93,8 @@ poller only. Multi-node coordination is **per-(table, policy) row** claim (no ma
 2. **Dedicated auxiliary HTTP listener**: No `GravitinoAuxiliaryService`, no isolated
    `gravitino.maintenance.classpath`, and no dedicated TMS port (for example **9301**). TMS is not
    a dedicated listener like `iceberg-rest` / `lance-rest`.
-3. **Cluster-wide scheduler lease**: No single-node leader that scans all tables each tick (§4.5).
-   Timed maintenance uses **per-node pollers** and **per-row claims** instead (§4.6).
+3. **No maintenance leader node**: No single node that scans all tables each tick (§4.5). Timed
+   maintenance uses **per-node pollers** and **per-row claims** instead (§4.6).
 4. **K8s CronJob as the default clock**: Not required for 2.0; optional external `run-due` API only
    (§4.7).
 5. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
