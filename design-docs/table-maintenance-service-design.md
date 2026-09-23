@@ -281,10 +281,46 @@ run on every commit.
 
 **TMS decision (option B):** IRC commit path runs **`system_iceberg_compaction` only** (§5.4.1) — IRC
 INSERTs `table_maintenance_event`, then TMS handles compaction asynchronously. The
-**`MaintenancePoller`** also runs **all four policy types**
-types** — including compaction — when their wall-clock schedule fires (§5.4.2, §5.2.4). Manifest /
-expire / orphan are **poller-only** on the commit path. Nightly compaction covers tables that stop
-receiving commits.
+**`MaintenancePoller`** also runs **all four policy types** — including compaction — when their
+wall-clock schedule fires (§5.4.2, §5.2.4). Manifest / expire / orphan are **poller-only** on the
+commit path. Nightly compaction covers tables that stop receiving commits.
+
+### 4.10 Industry: how defaults reach tables, and why TMS uses discovery
+
+Products that support catalog- or scope-level maintenance defaults still have a **gap** before every
+table is actually on the schedule. They close that gap differently:
+
+| Product | How a catalog / scope default becomes runnable work |
+| ------- | --------------------------------------------------- |
+| **AWS Glue** | Catalog stores a **default template**. A table is not optimized until a **table-level optimizer** exists — usually copied from the catalog on **CreateTable / UpdateTable**. Enabling catalog defaults does **not** instantly arm every existing table. |
+| **Apache Amoro** | Catalog `self-optimizing.*` (and related) settings are **merged at runtime** into table config for tables AMS already manages. A table that is not yet in AMS / not yet seen by the periodic scheduler does not run expire / orphan. Catalog changes apply on the next config read for tables **without** table-level overrides (table props win). |
+| **Floe / CronJob** | On each **cron tick**, the service **lists tables in the policy scope** from an external catalog (metadata need not live in Floe) and runs work. Tables or policies created between ticks wait for the **next** tick. |
+
+**Gravitino constraint:** maintenance **policies** live in Gravitino, but the Iceberg **table inventory**
+for an IRC Hive backend may live only in **HMS** (tables created outside IRC never appear in
+`table_meta`). TMS therefore cannot assume Amoro-style “runtime merge over a complete in-process
+table list,” and cannot rely on Glue-style Create/Update alone (bypassed creates would never copy).
+
+**Alternatives considered for above-table attachments:**
+
+| Approach | Pros | Cons for Gravitino |
+| -------- | ---- | ------------------ |
+| Cron tick: list whole schema/catalog, resolve policy, submit | Conceptually simple (Floe-like) | Every due cycle re-lists large scopes; multi-node needs a leader or duplicate submits; hard to share claim/`next_due_at` with the commit path |
+| Glue-like copy on Create/Update only | Cheap when all creates go through one API | Misses HMS-only tables; existing tables not re-armed when catalog policy changes |
+| Amoro-like runtime merge over Gravitino entities only | No discovery table | Incomplete inventory when metadata is outside Gravitino |
+
+**TMS decision — discovery mode (§5.2.5, §5.3.5):**
+
+1. **Table attachment:** write `table_maintenance_state` immediately (O(1)).
+2. **Above-table attachment:** periodic **discovery** lists the attachment scope from the
+   **Iceberg/HMS** backend, resolves nearest-wins `effective_policy`, and UPSERTs missing state rows
+   with `next_due_at`.
+3. **`takePendingDue`:** cheap indexed claim on existing state rows (multi-node safe), separate from
+   the slower discovery interval.
+
+Discovery accepts a bounded lag (default one hour) before a newly visible table is scheduled — the
+same class of gap Glue / Amoro / cron products already have — while keeping due-work execution
+scalable and aligned with per-row claims.
 
 ---
 
@@ -547,7 +583,8 @@ no K8s CronJob requirement.
 #### 5.3.5 Scope discovery (above-table attachments)
 
 Discovery expands schema / catalog / metalake policy attachments into **table-level** state rows
-(§5.2.5). It does **not** replace `takePendingDue`.
+(§5.2.5). It does **not** replace `takePendingDue`. **Why discovery (vs Glue copy / Amoro merge /
+cron full-scope scan):** §4.10.
 
 **Catalog source:** list tables from the **Iceberg catalog backend** used by IRC (for example the
 same Hive Metastore). Do **not** limit discovery to Gravitino `table_meta` alone — tables that exist
@@ -1028,7 +1065,7 @@ Each maintenance policy type has its own `minIntervalMs`, compared per `(table, 
 | Executor | Bounded; evaluation **off** commit thread (§5.4.1). |
 | Durability | IRC hook INSERTs `table_maintenance_event` per commit (§6.3); `table_maintenance_state` for claim / schedule (§6.2). |
 | Orchestration | Hot pipeline `manifests → expire` (§5.5); orphan separate track (§5.6). |
-| Industry | §4.8–§4.9 document scheduled vs commit triggers with external references. |
+| Industry | §4.8–§4.9 scheduled vs commit; §4.10 why discovery (Glue / Amoro / Floe). |
 | Fault tolerance | Poller: at-least-once latest-state; commit: best effort (§10). |
 
 ---
