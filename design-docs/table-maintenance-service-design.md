@@ -149,10 +149,6 @@ Products close the gap from catalog/scope defaults to runnable table work differ
 | How  | Copy catalog default to table on Create/Update                                       | Runtime-merge catalog settings into managed tables                   | Each cron tick lists tables in scope and runs                       |
 | Cons | Catalog changes do not re-arm tables that already have table-level optimizers        | Tables not yet in AMS / unseen by the scheduler do not run           | Work waits for the next tick; each tick re-lists the scope          |
 
-**Gravitino constraint:** policies live in Gravitino, but Iceberg inventory for an IRC Hive backend
-may live only in **HMS** (tables outside IRC never appear in `table_meta`). TMS cannot assume a
-complete in-process table list or Create/Update-only copy.
-
 **TMS decision — discovery (§5.2.5, §5.3.5):**
 
 1. **Create/Update hooks:** on IRC table create or update, immediately refresh that table's
@@ -161,9 +157,6 @@ complete in-process table list or Create/Update-only copy.
    missing state rows for tables the hooks never saw (e.g. HMS-only).
 3. **Discovery stays separate from the schedule loop:** discovery only fills missing state rows;
    the scheduler (`takePendingDue`) only claims already-due rows and runs work.
-
-Bounded lag (default 1h) applies mainly to tables that bypass IRC create/update; due-work stays
-scalable with per-row claims.
 
 
 ## 5. Proposal
