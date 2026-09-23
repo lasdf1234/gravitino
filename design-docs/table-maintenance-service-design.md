@@ -78,9 +78,8 @@ claim, matching `iceberg_cleanup_job` / `IcebergCleanupJobStore.takePendingJob` 
    **and** on the **poller** at wall-clock schedule (§5.4.2). **Manifest rewrite, snapshot expiry,
    and orphan cleanup** use the poller only (§5.5–§5.6). Policy **schedule** drives `next_due_at`
    for the **poller only** (§5.2.4).
-6. **Wall-clock schedules in Gravitino**: Operators configure **Daily · 02:00**, **Sun · 03:00**,
-   **Weekly**, and **Paused** on policies without K8s CronJob. Schedules are read by the poller, not
-   by the commit hook.
+6. **Wall-clock schedules in Gravitino**: Policy schedules live in Gravitino (not K8s CronJob).
+   Schedules are read by the poller, not by the commit hook.
 7. **Reuse existing optimizer execution core**: Both paths invoke the same `Updater` /
    `Recommender` / job-submit paths in `maintenance/optimizer` as **in-process methods**.
 8. **Job framework compatibility**: Spark maintenance work continues to use the Gravitino job
