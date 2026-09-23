@@ -95,13 +95,11 @@ poller only. Multi-node coordination is **per-(table, policy) row** claim (no ma
    a dedicated listener like `iceberg-rest` / `lance-rest`.
 3. **No maintenance leader node**: No single node that scans all tables each tick (§4.5). Timed
    maintenance uses **per-node pollers** and **per-row claims** instead (§4.6).
-4. **K8s CronJob as the default clock**: Not required for 2.0; optional external `run-due` API only
-   (§4.7).
-5. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
+4. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
    `StatisticsProvider`, `StrategyProvider`, `TableMetadataProvider`, or `JobSubmitter` contracts.
-6. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
+5. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
    for the commit compaction path.
-7. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, and no Kafka
+6. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, and no Kafka
    produce/consume path. Commit handling is **in-process only** (§5.1.1).
 
 ---
@@ -215,19 +213,20 @@ Every Gravitino node (same JVM as TMS plugin):
 **Decision:** **Chosen** for the scheduled path of **all four** policy types in 2.0 (including
 compaction). Industry pattern comparison: §4.11.
 
-### 4.7 Option G: K8s CronJob as the default clock (Rejected for 2.0)
+### 4.7 Option G: K8s CronJob / external `run-due` as the clock (Rejected)
 
-A CronJob calls `POST …/maintenance/scheduled-run` (or `run-due`) on a cadence.
+A CronJob (or similar external timer) calls `POST …/maintenance/scheduled-run` (or `run-due`) on a
+cadence.
 
 **Cons:**
 
 - Does not work for non-Kubernetes installs without an external cron script.
 - Puts the schedule in K8s manifests where the Gravitino UI cannot show or change it.
 - Duplicates what a built-in poller already provides.
+- Introduces an external clock dependency TMS does not want.
 
-**Decision:** **Rejected as the 2.0 default.** Optional follow-up: expose
-`POST …/maintenance/run-due` that runs **one poller cycle** for operators who prefer an external
-clock. Built-in `MaintenancePoller` remains the default.
+**Decision:** **Rejected.** Built-in `MaintenancePoller` is the only timed clock. Do not add an
+external CronJob or `run-due` API as an alternate scheduler.
 
 ### 4.8 Industry survey: scheduled maintenance clocks
 
@@ -243,8 +242,8 @@ Most lakehouse maintenance products treat **snapshot expiry, manifest rewrite, a
 | [Databricks OPTIMIZE / VACUUM guidance](https://docs.databricks.com/aws/en/tables/operations/optimize) | Scheduled jobs or predictive optimization                                    | **Daily** recommended starting point for `OPTIMIZE`; predictive layer for UC tables | File layout (`OPTIMIZE`) and vacuum are **scheduled / platform-driven**, separate from write path            |
 
 **Takeaway for TMS:** timed maintenance is **time-driven** in industry; TMS implements that with a
-built-in poller plus per-row `next_due_at` / `minIntervalMs`. External cron (Floe trigger API,
-OpenHouse CronJob) is optional, not the 2.0 default.
+built-in poller plus per-row `next_due_at` / `minIntervalMs`. External cron clocks (Floe trigger API,
+OpenHouse CronJob) are surveyed for context only — TMS does **not** adopt them (§4.7).
 
 ### 4.9 Industry survey: commit / write-path triggers
 
@@ -640,11 +639,11 @@ If `COUNT >= maxConcurrentJobs`, the worker does not claim new rows (and does no
 slot frees. This is approximate under races but bounds load without a separate leader or lock
 service; overshoot of a few jobs is acceptable for maintenance.
 
-#### 5.3.4 Optional external trigger (non-default)
+#### 5.3.4 External clock APIs (out of scope)
 
-`POST /api/metalakes/{metalake}/maintenance/run-due` may be added later: runs **one poller cycle**
-(process due rows now) for operators who want an external clock. **2.0 default:** built-in poller only;
-no K8s CronJob requirement.
+Do **not** expose `POST …/maintenance/run-due` (or CronJob-driven scheduled-run) as an alternate
+timed clock. The built-in `MaintenancePoller` is the only schedule driver (§4.7). Ops APIs in §7
+remain for manual / CLI-replacement runs, not for replacing the poller.
 
 #### 5.3.5 Scope discovery (above-table attachments)
 
