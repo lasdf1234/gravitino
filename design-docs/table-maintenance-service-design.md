@@ -82,7 +82,7 @@ poller only. Multi-node coordination is **per-(table, policy) row** claim (no ma
    evaluate → submit for a given `(table, policy)` at a time (§6). Gravitino replicas remain **peers**
    for IRC and commit-path compaction; there is no maintenance **leader node** (§4.5).
 10. **Commit log**: The IRC post-commit hook **INSERTs** one `table_maintenance_event` row per
-    successful commit (`table_identifier`, `created_at`). TMS does not write that table (§6.3).
+    successful commit (`table_identifier`, `created_at`) (§6.3).
 11. **Bounded executor on commit path**: After the event INSERT and in-process callback, TMS runs
     evaluate → submit on a bounded executor — **not** on the IRC commit thread (§5.4.1).
 
