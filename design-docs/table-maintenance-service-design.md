@@ -61,33 +61,29 @@ poller only. Multi-node coordination is **per-(table, policy) row** claim (no ma
    `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP) so the IRC
    callback is registered in the main JVM. The commit path does **not** use HTTP. Operator calls that
    replace the optimizer CLI are the ops APIs in **§7**.
-2. **Four independent maintenance policies**: One built-in policy **type** per activity
-   (`compaction`, `rewrite-manifests`, `snapshot-expiry`, `orphan-removal`). Each attaches and
-   schedules on its own grain (for example snapshot retention at catalog, compaction per table).
-   No combined `system_iceberg_table_maintenance` storage model (§5.2).
-3. **Maintenance profile (convenience)**: A profile such as `standard` creates and attaches all four
+2. **Maintenance profile (convenience)**: A profile such as `standard` creates and attaches all four
    policies with sensible defaults in one step. Profiles are **not** a fifth policy type (§5.2).
-4. **Precedence per maintenance type**: For each maintenance type, the **nearest** attachment along
+3. **Precedence per maintenance type**: For each maintenance type, the **nearest** attachment along
    `table → schema → catalog → metalake` wins. Policies are **not** additive for maintenance (§5.2).
-5. **Dual trigger model (option B)**: **Compaction** on **commit** (§5.4.1) **and** on the
+4. **Dual trigger model (option B)**: **Compaction** on **commit** (§5.4.1) **and** on the
    **poller** at wall-clock schedule (§5.4.2). **Manifest rewrite, snapshot expiry, and orphan
    cleanup** use the poller only (§5.5–§5.6). Policy **schedule** drives `next_due_at` for the
    **poller only** (§5.2.4).
-6. **Wall-clock schedules in Gravitino**: Policy schedules live in Gravitino (not K8s CronJob) and
+5. **Wall-clock schedules in Gravitino**: Policy schedules live in Gravitino (not K8s CronJob) and
    are read by the poller, not by the commit hook.
-7. **Reuse existing optimizer execution core**: Both paths invoke the same `Updater` /
+6. **Reuse existing optimizer execution core**: Both paths invoke the same `Updater` /
    `Recommender` / job-submit paths in `maintenance/optimizer` as **in-process methods**.
-8. **Job framework compatibility**: Spark maintenance work continues to use the Gravitino job
+7. **Job framework compatibility**: Spark maintenance work continues to use the Gravitino job
    framework. TMS returns or records submitted `jobId` values but does not own job status.
-9. **Govern Policy reuse**: Maintenance policies stay on existing `policy_meta` and metalake Policy
+8. **Govern Policy reuse**: Maintenance policies stay on existing `policy_meta` and metalake Policy
    APIs (create / alter / enable / disable / associate). TMS does **not** introduce a parallel policy
    store or `/api/maintenance/table/policies` CRUD.
-10. **Multi-node safe processing**: Shared DB **per-policy claims** so only one TMS replica runs
+9. **Multi-node safe processing**: Shared DB **per-policy claims** so only one TMS replica runs
    evaluate → submit for a given `(table, policy)` at a time (§6). Gravitino replicas remain **peers**
    for IRC and commit-path compaction; there is no maintenance **leader node** (§4.5).
-11. **Commit log**: The IRC post-commit hook **INSERTs** one `table_maintenance_event` row per
+10. **Commit log**: The IRC post-commit hook **INSERTs** one `table_maintenance_event` row per
     successful commit (`table_identifier`, `created_at`). TMS does not write that table (§6.3).
-12. **Bounded executor on commit path**: After the event INSERT and in-process callback, TMS runs
+11. **Bounded executor on commit path**: After the event INSERT and in-process callback, TMS runs
     evaluate → submit on a bounded executor — **not** on the IRC commit thread (§5.4.1).
 
 ---
