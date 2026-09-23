@@ -181,12 +181,14 @@ Gravitino Job framework + job_run_meta (§6.4)
 
 #### 5.1.1 In-process commit callback
 
-After a successful Iceberg commit, the IRC hook asynchronously invokes `IcebergCommitEventHandler`
-(§5.4.1). No non-compaction policy resolve, Recommender, or submit on the IRC thread.
+After a successful Iceberg commit, IRC dispatches post-events on the shared `EventBus`. The TMS
+`EventListenerPlugin` registered as `gravitino.eventListener.tms-commit.class`
+(`IcebergCommitEventHandler`, §7.2) handles them asynchronously (§5.4.1). No non-compaction policy
+resolve, Recommender, or submit on the IRC thread.
 
 |        | Deployment                             | Transport                                    | Payload                                           | Commit scope                                   | IRC thread cost                                              |
 | ------ | -------------------------------------- | -------------------------------------------- | ------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
-| Detail | IRC and main server share **one JVM**. | In-process only — **no** HTTP, **no** Kafka. | Normalized `table_identifier`.                    | **`system_iceberg_compaction` only** (§5.4.1). | Async hand-off to `IcebergCommitEventHandler`.               |
+| Detail | IRC and main server share **one JVM**. | In-process `EventBus` only — **no** HTTP, **no** Kafka. | Normalized `table_identifier`.                    | **`system_iceberg_compaction` only** (§5.4.1). | Async `EventListenerPlugin` (`ASYNC_*` mode).               |
 
 ---
 
@@ -411,7 +413,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
 
 ### 6.3 Table rename / drop lifecycle (required with string keys)
 
-String keys need rewrite/purge via `IcebergTableLifecycleHook` (§5.1.1).
+String keys need rewrite/purge via `IcebergTableLifecycleHook` (§7.2).
 
 #### Rename
 
@@ -453,27 +455,32 @@ expansion frequency.
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
 gravitino.auxService.names = iceberg-rest
-gravitino.iceberg-rest.tableMaintenance.inProcess = true
+gravitino.eventListener.names = tms-commit,tms-lifecycle
+gravitino.eventListener.tms-commit.class = org.apache.gravitino.maintenance.IcebergCommitEventHandler
+gravitino.eventListener.tms-lifecycle.class = org.apache.gravitino.maintenance.IcebergTableLifecycleHook
 gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.maxConcurrentJobs = 10
 ```
 
-### 7.2 IRC hooks
+### 7.2 IRC hooks (`EventListenerPlugin`)
 
-|             | `gravitino.iceberg-rest.tableMaintenance.inProcess` |
-| ----------- | --------------------------------------------------- |
-| Default     | `false`                                             |
-| Description | Master switch for IRC → TMS hooks (§5.1.1).         |
+IRC shares the main-server `EventBus` (`GravitinoEnv`). Register TMS hooks the same way as other
+listeners ([Event listener configuration](../docs/gravitino-server-config.md#event-listener-configuration)):
+**listener name + implementing class FQCN** — not a boolean.
 
-When `true`:
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `gravitino.eventListener.names` | (empty) | Comma-separated names; include `tms-commit` / `tms-lifecycle` (or one combined name). |
+| `gravitino.eventListener.tms-commit.class` | (none) | FQCN of `EventListenerPlugin` for post-commit compaction (`IcebergCommitEventHandler`). |
+| `gravitino.eventListener.tms-lifecycle.class` | (none) | FQCN of `EventListenerPlugin` for create/update/drop/rename (`IcebergTableLifecycleHook`). |
 
-| Hook | IRC API | Effect |
-| ---- | ------- | ------ |
-| Post-commit | successful Iceberg commit | Async `IcebergCommitEventHandler` → compaction only (§5.4.1) |
-| Lifecycle | `createTable` / `updateTable` | UPSERT / refresh `table_maintenance_state` (`next_due_at`, §5.2.5) |
-| Lifecycle | `dropTable` | `DELETE` state rows (§6.3) |
+| Listener | Handles (post-events) | Effect |
+| -------- | --------------------- | ------ |
+| `tms-commit` | Iceberg table update / commit success events | Async hand-off → compaction only (`mode()` = `ASYNC_ISOLATED` or `ASYNC_SHARED`, §5.4.1) |
+| `tms-lifecycle` | `IcebergCreateTableEvent` / `IcebergUpdateTableEvent` / `IcebergDropTableEvent` / rename | UPSERT / refresh / `DELETE` `table_maintenance_state` (§5.2.5, §6.3) |
 
-When `false`, commit and lifecycle hooks are off; above-table scope still relies on discovery (§5.3.1).
+Omit the names (or leave `names` empty of TMS entries) → no IRC → TMS hooks; above-table scope still
+relies on discovery (§5.3.1).
 
 ### 7.3 Task types and minimum interval (per policy type)
 
