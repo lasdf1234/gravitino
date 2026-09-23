@@ -96,14 +96,39 @@ TMS uses a **dual trigger model** (§5.4–§5.6):
 
 ## 4. Solution Investigations
 
-### 4.1–4.4 Deployment options
+### 4.1 Deployment options
 
-| Approach                          | Pros                         | Cons / why rejected                                      | Decision   |
-| --------------------------------- | ---------------------------- | -------------------------------------------------------- | ---------- |
-| A: Process-local only             | Simple; no new listener      | No IRC target; no central automated maintenance          | Rejected   |
-| C: Separate TMS process           | Full JVM isolation           | Extra deployable; duplicates main-server plugin patterns | Rejected   |
-| D: Aux Jetty listener (:9301)     | Classpath isolation like IRC | Extra port; diverges from **8090** `extensionPackages`   | Rejected   |
-| **B: In-process plugin (Chosen)** | See below                    | —                                                        | **Chosen** |
+**A: Process-local only**
+
+| Field               | Value                                           |
+| ------------------- | ----------------------------------------------- |
+| Pros                | Simple; no new listener                         |
+| Cons / why rejected | No IRC target; no central automated maintenance |
+| Decision            | Rejected                                        |
+
+**C: Separate TMS process**
+
+| Field               | Value                                                    |
+| ------------------- | -------------------------------------------------------- |
+| Pros                | Full JVM isolation                                       |
+| Cons / why rejected | Extra deployable; duplicates main-server plugin patterns |
+| Decision            | Rejected                                                 |
+
+**D: Aux Jetty listener (:9301)**
+
+| Field               | Value                                                  |
+| ------------------- | ------------------------------------------------------ |
+| Pros                | Classpath isolation like IRC                           |
+| Cons / why rejected | Extra port; diverges from **8090** `extensionPackages` |
+| Decision            | Rejected                                               |
+
+**B: In-process plugin (Chosen)**
+
+| Field               | Value      |
+| ------------------- | ---------- |
+| Pros                | See below  |
+| Cons / why rejected | —          |
+| Decision            | **Chosen** |
 
 **Option B (Chosen):** Register TMS as a Jersey 2 `Feature` via
 `gravitino.server.rest.extensionPackages` (same as IdP) inside the main server. Commit path does
@@ -114,34 +139,93 @@ submit on a bounded executor (§5.4.1). Timed work uses `MaintenancePoller` on e
 **Pros:** No extra process or port; no remote hop on commit; reuses Policy + Jobs; peers stay equal
 (no maintenance leader).
 
-### 4.5 Industry survey: commit / write-path triggers
+### 4.2 Industry survey: commit / write-path triggers
 
 **Compaction** is most often tied to **writes/commits**. Manifest rewrite, expire, and orphan usually
 are **not** run on every commit.
 
-| Product                                                                                                                           | Write / commit trigger                                                                                                                                          | What runs on the write path                                                  | What stays scheduled                                                                                                                                |
-| --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Databricks Iceberg auto compaction](https://docs.databricks.com/aws/en/tables/tune-file-size)                                    | After a **successful write** when small-file thresholds are met                                                                                                 | **Compaction only** (`OPTIMIZE` with `operationParameters.auto = true`)      | Larger `OPTIMIZE`, manifest work, expire, vacuum — **scheduled or predictive**                                                                      |
-| [Apache Amoro self-optimizing](https://amoro.apache.org/docs/latest/configurations/)                                              | **Minor** optimization when fragment + equality-delete file count **or** time interval threshold is met (planning is continuous; commit produces new snapshots) | Compaction tiers (minor / major / full)                                      | Snapshot expiration (`SnapshotsExpiringExecutor`), orphan clean (`OrphanFilesCleaningExecutor`), dangling deletes — **separate periodic executors** |
-| [Amoro AIP-3](https://cwiki.apache.org/confluence/display/AMORO/AIP-3%3A+Event-Triggered+Optimization+of+Iceberg+Tables+in+Amoro) | Event-triggered **optimization** (file-count / metric signals)                                                                                                  | Compaction-style self-optimizing                                             | Expire / orphan remain lifecycle tasks outside the event path                                                                                       |
-| [Floe `triggerConditions`](https://github.com/nssalian/floe/blob/main/docs/policies.md)                                           | Optional **health-based** triggers (`smallFilePercentageAbove`, `snapshotCountAbove`, …) with `minIntervalMinutes`                                              | Any enabled op **when conditions fire** (often compaction-first in examples) | Default path is still **cron per operation**; conditions augment, not replace, schedules                                                            |
-| [AWS Glue compaction optimizer](https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-table-optimizers.html)                    | Threshold-based (`minInputFiles`, `deleteFileThreshold`) inside **scheduled** optimizer runs                                                                    | Compaction during optimizer run, not inline on catalog commit                | Retention and orphan optimizers are **separate scheduled types**                                                                                    |
+**[Databricks Iceberg auto compaction](https://docs.databricks.com/aws/en/tables/tune-file-size)**
+
+| Field                       | Value                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| Write / commit trigger      | After a **successful write** when small-file thresholds are met                |
+| What runs on the write path | **Compaction only** (`OPTIMIZE` with `operationParameters.auto = true`)        |
+| What stays scheduled        | Larger `OPTIMIZE`, manifest work, expire, vacuum — **scheduled or predictive** |
+
+**[Apache Amoro self-optimizing](https://amoro.apache.org/docs/latest/configurations/)**
+
+| Field                       | Value                                                                                                                                                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Write / commit trigger      | **Minor** optimization when fragment + equality-delete file count **or** time interval threshold is met (planning is continuous; commit produces new snapshots) |
+| What runs on the write path | Compaction tiers (minor / major / full)                                                                                                                         |
+| What stays scheduled        | Snapshot expiration (`SnapshotsExpiringExecutor`), orphan clean (`OrphanFilesCleaningExecutor`), dangling deletes — **separate periodic executors**             |
+
+**[Amoro AIP-3](https://cwiki.apache.org/confluence/display/AMORO/AIP-3%3A+Event-Triggered+Optimization+of+Iceberg+Tables+in+Amoro)**
+
+| Field                       | Value                                                          |
+| --------------------------- | -------------------------------------------------------------- |
+| Write / commit trigger      | Event-triggered **optimization** (file-count / metric signals) |
+| What runs on the write path | Compaction-style self-optimizing                               |
+| What stays scheduled        | Expire / orphan remain lifecycle tasks outside the event path  |
+
+**[Floe `triggerConditions`](https://github.com/nssalian/floe/blob/main/docs/policies.md)**
+
+| Field                       | Value                                                                                                              |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Write / commit trigger      | Optional **health-based** triggers (`smallFilePercentageAbove`, `snapshotCountAbove`, …) with `minIntervalMinutes` |
+| What runs on the write path | Any enabled op **when conditions fire** (often compaction-first in examples)                                       |
+| What stays scheduled        | Default path is still **cron per operation**; conditions augment, not replace, schedules                           |
+
+**[AWS Glue compaction optimizer](https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-table-optimizers.html)**
+
+| Field                       | Value                                                                                        |
+| --------------------------- | -------------------------------------------------------------------------------------------- |
+| Write / commit trigger      | Threshold-based (`minInputFiles`, `deleteFileThreshold`) inside **scheduled** optimizer runs |
+| What runs on the write path | Compaction during optimizer run, not inline on catalog commit                                |
+| What stays scheduled        | Retention and orphan optimizers are **separate scheduled types**                             |
 
 **Why TMS limits the commit path to compaction:**
 
-| Concern            | Compaction on commit                                          | Manifest / expire / orphan on commit                                                     |
-| ------------------ | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Commit latency     | Acceptable when bounded (executor + claim + async job submit) | Unacceptable — listing, expire, and orphan scans are heavy                               |
-| Inactive tables    | Still benefit when they resume writes                         | **Never maintained** if commits stop                                                     |
-| Failed writes      | N/A                                                           | **Orphan files** appear **without** a successful commit                                  |
-| Stale metrics      | Recommender can use pre-commit statistics for compaction debt | Expire / orphan need **fresh** table-wide metadata; scheduler pass refreshes stats first |
-| Industry alignment | Databricks auto-compact; Amoro minor optimizing               | Glue, Amoro, Floe schedule expire / orphan / manifest separately                         |
+**Commit latency**
+
+| Field                                | Value                                                         |
+| ------------------------------------ | ------------------------------------------------------------- |
+| Compaction on commit                 | Acceptable when bounded (executor + claim + async job submit) |
+| Manifest / expire / orphan on commit | Unacceptable — listing, expire, and orphan scans are heavy    |
+
+**Inactive tables**
+
+| Field                                | Value                                 |
+| ------------------------------------ | ------------------------------------- |
+| Compaction on commit                 | Still benefit when they resume writes |
+| Manifest / expire / orphan on commit | **Never maintained** if commits stop  |
+
+**Failed writes**
+
+| Field                                | Value                                                   |
+| ------------------------------------ | ------------------------------------------------------- |
+| Compaction on commit                 | N/A                                                     |
+| Manifest / expire / orphan on commit | **Orphan files** appear **without** a successful commit |
+
+**Stale metrics**
+
+| Field                                | Value                                                                                    |
+| ------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Compaction on commit                 | Recommender can use pre-commit statistics for compaction debt                            |
+| Manifest / expire / orphan on commit | Expire / orphan need **fresh** table-wide metadata; scheduler pass refreshes stats first |
+
+**Industry alignment**
+
+| Field                                | Value                                                            |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| Compaction on commit                 | Databricks auto-compact; Amoro minor optimizing                  |
+| Manifest / expire / orphan on commit | Glue, Amoro, Floe schedule expire / orphan / manifest separately |
 
 **TMS decision:** IRC commit path runs **`system_iceberg_compaction` only** (§5.4.1). Poller runs
 **all four** types on schedule (§5.4.2, §5.2.4). Manifest / expire / orphan are **poller-only**.
 Nightly compaction covers tables that stop receiving commits.
 
-### 4.6 Industry: how defaults reach tables, and why TMS uses discovery
+### 4.3 Industry: how defaults reach tables, and why TMS uses discovery
 
 Products close the gap from catalog/scope defaults to runnable table work differently:
 
@@ -157,11 +241,26 @@ complete in-process table list or Create/Update-only copy.
 
 **Alternatives considered for above-table attachments:**
 
-| Approach                                                     | Pros                                      | Cons for Gravitino                                                                                                                            |
-| ------------------------------------------------------------ | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cron tick: list whole schema/catalog, resolve policy, submit | Conceptually simple (Floe-like)           | Every due cycle re-lists large scopes; multi-node needs a leader or duplicate submits; hard to share claim/`next_due_at` with the commit path |
-| Glue-like copy on Create/Update only                         | Cheap when all creates go through one API | Misses HMS-only tables; existing tables not re-armed when catalog policy changes                                                              |
-| Amoro-like runtime merge over Gravitino entities only        | No separate discovery loop                | Incomplete inventory when metadata is outside Gravitino                                                                                       |
+**Cron tick: list whole schema/catalog, resolve policy, submit**
+
+| Field              | Value                                                                                                                                         |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pros               | Conceptually simple (Floe-like)                                                                                                               |
+| Cons for Gravitino | Every due cycle re-lists large scopes; multi-node needs a leader or duplicate submits; hard to share claim/`next_due_at` with the commit path |
+
+**Glue-like copy on Create/Update only**
+
+| Field              | Value                                                                            |
+| ------------------ | -------------------------------------------------------------------------------- |
+| Pros               | Cheap when all creates go through one API                                        |
+| Cons for Gravitino | Misses HMS-only tables; existing tables not re-armed when catalog policy changes |
+
+**Amoro-like runtime merge over Gravitino entities only**
+
+| Field              | Value                                                   |
+| ------------------ | ------------------------------------------------------- |
+| Pros               | No separate discovery loop                              |
+| Cons for Gravitino | Incomplete inventory when metadata is outside Gravitino |
 
 **TMS decision — discovery (§5.2.5, §5.3.5):**
 
@@ -173,19 +272,48 @@ complete in-process table list or Create/Update-only copy.
 Bounded lag (default 1h) before a new table is scheduled is the same class of gap other products
 have, while due-work stays scalable with per-row claims.
 
-### 4.7 Industry: multi-node schedule coordination without HA
+### 4.4 Industry: multi-node schedule coordination without HA
 
 Peer nodes typically use one of four patterns: **1–2** = policy/job grain; **3** = row grain;
 **4** = external Cron + queue.
 
-| Pattern                                       | Typical products                                                                                        | Pros                                                                                  | Cons                                                                                                                            | Chosen? Reason                                                                                                                                                  |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1. Per-node cron + distributed lock**       | ShedLock; Spring + Redis/DB lock                                                                        | Simple; no leader election; prevents double runs of the same job                      | Often a **single lock for the whole job** — hard to parallelize **per table**                                                   | **Rejected.** Coarse lock serializes all tables under one policy/job; TMS must run many tables concurrently across peers.                                       |
-| **2. Shared DB compete for trigger**          | Quartz JDBC Cluster                                                                                     | Mature; peers share work **by job**; one winner per fire                              | Trigger is typically **policy/job-scoped**; locking can bottleneck many short fires; heavier stack                              | **Rejected.** Same grain as pattern 1: winner then lists the policy scope. Does not give per-table claim shared with the commit path.                           |
-| **3. Due rows + row-level CAS**               | TMS / `IcebergCleanupManager`; Temporal lease; Hangfire; db-scheduler; SQS visibility timeout (analogy) | No leader; **row-level** parallelism; lease reclaim on crash; fits large table counts | Needs a **state table** + lease; needs **materialization / discovery** for above-table policies                                 | **Chosen** (§5.3). Matches in-tree cleanup; poller and commit path share the same `(table, policy)` claim; scales with due rows, not with a single job lock.    |
-| **4. External cron enqueue + multi-consumer** | OpenHouse CronJob; Floe; cloud Cron → SQS                                                               | Decouples trigger from execution; consumers scale on the **external** queue           | Requires **extra components** (external Cron and/or message queue); duplicate-enqueue and consumer **idempotency** still needed | **Rejected.** TMS must not introduce other runtime components beyond Gravitino and its entity DB. Pattern **3** keeps coordination in-process + existing store. |
+**1. Per-node cron + distributed lock**
 
-**TMS mapping:** discovery (§4.6 / §5.3.5) materializes due rows; `takePendingDue` + CAS is
+| Field            | Value                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Typical products | ShedLock; Spring + Redis/DB lock                                                                                          |
+| Pros             | Simple; no leader election; prevents double runs of the same job                                                          |
+| Cons             | Often a **single lock for the whole job** — hard to parallelize **per table**                                             |
+| Chosen? Reason   | **Rejected.** Coarse lock serializes all tables under one policy/job; TMS must run many tables concurrently across peers. |
+
+**2. Shared DB compete for trigger**
+
+| Field            | Value                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Typical products | Quartz JDBC Cluster                                                                                                                   |
+| Pros             | Mature; peers share work **by job**; one winner per fire                                                                              |
+| Cons             | Trigger is typically **policy/job-scoped**; locking can bottleneck many short fires; heavier stack                                    |
+| Chosen? Reason   | **Rejected.** Same grain as pattern 1: winner then lists the policy scope. Does not give per-table claim shared with the commit path. |
+
+**3. Due rows + row-level CAS**
+
+| Field            | Value                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Typical products | TMS / `IcebergCleanupManager`; Temporal lease; Hangfire; db-scheduler; SQS visibility timeout (analogy)                                                      |
+| Pros             | No leader; **row-level** parallelism; lease reclaim on crash; fits large table counts                                                                        |
+| Cons             | Needs a **state table** + lease; needs **materialization / discovery** for above-table policies                                                              |
+| Chosen? Reason   | **Chosen** (§5.3). Matches in-tree cleanup; poller and commit path share the same `(table, policy)` claim; scales with due rows, not with a single job lock. |
+
+**4. External cron enqueue + multi-consumer**
+
+| Field            | Value                                                                                                                                                           |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Typical products | OpenHouse CronJob; Floe; cloud Cron → SQS                                                                                                                       |
+| Pros             | Decouples trigger from execution; consumers scale on the **external** queue                                                                                     |
+| Cons             | Requires **extra components** (external Cron and/or message queue); duplicate-enqueue and consumer **idempotency** still needed                                 |
+| Chosen? Reason   | **Rejected.** TMS must not introduce other runtime components beyond Gravitino and its entity DB. Pattern **3** keeps coordination in-process + existing store. |
+
+**TMS mapping:** discovery (§4.3 / §5.3.5) materializes due rows; `takePendingDue` + CAS is
 pattern **3**.
 
 ---
@@ -218,12 +346,12 @@ After a successful Iceberg commit, the IRC hook **INSERTs** one `table_maintenan
 and invokes `IcebergCommitEventHandler`, which enqueues compaction on the bounded executor (§5.4.1).
 No non-compaction policy resolve, Recommender, or submit on the IRC thread.
 
-| Requirement     | Detail                                                                          |
-| --------------- | ------------------------------------------------------------------------------- |
-| Deployment      | IRC and main server share **one JVM**.                                          |
-| Transport       | In-process only — **no** HTTP, **no** Kafka.                                    |
-| Payload         | Normalized `table_identifier`; event row in §6.3.                               |
-| Commit scope    | **`system_iceberg_compaction` only** (§5.4.1).                                  |
+| Requirement     | Detail                                                                           |
+| --------------- | -------------------------------------------------------------------------------- |
+| Deployment      | IRC and main server share **one JVM**.                                           |
+| Transport       | In-process only — **no** HTTP, **no** Kafka.                                     |
+| Payload         | Normalized `table_identifier`; event row in §6.3.                                |
+| Commit scope    | **`system_iceberg_compaction` only** (§5.4.1).                                   |
 | IRC thread cost | One event `INSERT` + callback hand-off; evaluate/submit on the bounded executor. |
 
 ---
@@ -235,12 +363,41 @@ No non-compaction policy resolve, Recommender, or submit on the IRC thread.
 Each activity is a **separate** built-in policy type with its own `content`, `minIntervalMs`, and
 attachment grain:
 
-| Maintenance type | Illustrative policy type             | Built-in job template                 | Typical attachment | Trigger path                              |
-| ---------------- | ------------------------------------ | ------------------------------------- | ------------------ | ----------------------------------------- |
-| Compaction       | `system_iceberg_compaction`          | `builtin-iceberg-compaction`          | Table / pattern    | **Commit** (§5.4.1) **+ Poller** (§5.4.2) |
-| Manifest rewrite | `system_iceberg_rewrite_manifests`   | `builtin-iceberg-rewrite-manifests`   | Table / pattern    | **Poller** (§5.3, §5.5)                   |
-| Snapshot expiry  | `system_iceberg_snapshot_expiration` | `builtin-iceberg-expire-snapshots`    | Catalog / pattern  | **Poller** (§5.3, §5.5)                   |
-| Orphan cleanup   | `system_iceberg_orphan_file_removal` | `builtin-iceberg-remove-orphan-files` | Catalog / pattern  | **Poller** (§5.3, §5.6)                   |
+**Compaction**
+
+| Field                    | Value                                     |
+| ------------------------ | ----------------------------------------- |
+| Illustrative policy type | `system_iceberg_compaction`               |
+| Built-in job template    | `builtin-iceberg-compaction`              |
+| Typical attachment       | Table / pattern                           |
+| Trigger path             | **Commit** (§5.4.1) **+ Poller** (§5.4.2) |
+
+**Manifest rewrite**
+
+| Field                    | Value                               |
+| ------------------------ | ----------------------------------- |
+| Illustrative policy type | `system_iceberg_rewrite_manifests`  |
+| Built-in job template    | `builtin-iceberg-rewrite-manifests` |
+| Typical attachment       | Table / pattern                     |
+| Trigger path             | **Poller** (§5.3, §5.5)             |
+
+**Snapshot expiry**
+
+| Field                    | Value                                |
+| ------------------------ | ------------------------------------ |
+| Illustrative policy type | `system_iceberg_snapshot_expiration` |
+| Built-in job template    | `builtin-iceberg-expire-snapshots`   |
+| Typical attachment       | Catalog / pattern                    |
+| Trigger path             | **Poller** (§5.3, §5.5)              |
+
+**Orphan cleanup**
+
+| Field                    | Value                                 |
+| ------------------------ | ------------------------------------- |
+| Illustrative policy type | `system_iceberg_orphan_file_removal`  |
+| Built-in job template    | `builtin-iceberg-remove-orphan-files` |
+| Typical attachment       | Catalog / pattern                     |
+| Trigger path             | **Poller** (§5.3, §5.6)               |
 
 See [iceberg-compaction-policy](../docs/iceberg-compaction-policy.md),
 [expire](./iceberg-expire-snapshots-maintenance-job.md),
@@ -275,12 +432,41 @@ Each policy stores a **schedule** in `policy_meta.content`; TMS sets wall-clock 
 
 **Illustrative UI rows and content:**
 
-| Policy name (UI)         | Applies to   | Schedule (UI) | Status | `content.schedule` (stored)                                            |
-| ------------------------ | ------------ | ------------- | ------ | ---------------------------------------------------------------------- |
-| `nightly_compaction`     | All Iceberg… | Daily · 02:00 | Active | `{ "type": "daily", "at": "02:00", "timezone": "UTC" }`                |
-| `weekly_snapshot_expiry` | All Iceberg… | Sun · 03:00   | Active | `{ "type": "weekly", "day": "SUN", "at": "03:00", "timezone": "UTC" }` |
-| `manifest_rewrite`       | `events.*`   | Daily · 04:00 | Active | `{ "type": "daily", "at": "04:00", "timezone": "UTC" }`                |
-| `orphan_cleanup`         | All          | Weekly        | Paused | `{ "type": "weekly", "day": "SUN", "at": "04:00" }` + `enabled: false` |
+**`nightly_compaction`**
+
+| Field                       | Value                                                   |
+| --------------------------- | ------------------------------------------------------- |
+| Applies to                  | All Iceberg…                                            |
+| Schedule (UI)               | Daily · 02:00                                           |
+| Status                      | Active                                                  |
+| `content.schedule` (stored) | `{ "type": "daily", "at": "02:00", "timezone": "UTC" }` |
+
+**`weekly_snapshot_expiry`**
+
+| Field                       | Value                                                                  |
+| --------------------------- | ---------------------------------------------------------------------- |
+| Applies to                  | All Iceberg…                                                           |
+| Schedule (UI)               | Sun · 03:00                                                            |
+| Status                      | Active                                                                 |
+| `content.schedule` (stored) | `{ "type": "weekly", "day": "SUN", "at": "03:00", "timezone": "UTC" }` |
+
+**`manifest_rewrite`**
+
+| Field                       | Value                                                   |
+| --------------------------- | ------------------------------------------------------- |
+| Applies to                  | `events.*`                                              |
+| Schedule (UI)               | Daily · 04:00                                           |
+| Status                      | Active                                                  |
+| `content.schedule` (stored) | `{ "type": "daily", "at": "04:00", "timezone": "UTC" }` |
+
+**`orphan_cleanup`**
+
+| Field                       | Value                                                                  |
+| --------------------------- | ---------------------------------------------------------------------- |
+| Applies to                  | All                                                                    |
+| Schedule (UI)               | Weekly                                                                 |
+| Status                      | Paused                                                                 |
+| `content.schedule` (stored) | `{ "type": "weekly", "day": "SUN", "at": "04:00" }` + `enabled: false` |
 
 **`next_due_at` computation:**
 
@@ -299,10 +485,19 @@ on job finish: next_due_at = nextOccurrence(schedule, timezone, after = job_fini
 
 `next_due_at` lives only on table-level `table_maintenance_state` rows.
 
-| Attachment grain                              | When state rows are written                             | Behavior                                                                                          |
-| --------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| **Table**                                     | **Immediately** on associate / schedule change / detach | O(1) UPSERT/DELETE; set `next_due_at = nextOccurrence(schedule)`                                  |
-| **Above table** (schema / catalog / metalake) | **Timed discovery** (§5.3.5)                            | Bind association only; discovery lists scope, nearest-wins, UPSERT missing rows with `next_due_at` |
+**Table**
+
+| Field                       | Value                                                            |
+| --------------------------- | ---------------------------------------------------------------- |
+| When state rows are written | **Immediately** on associate / schedule change / detach          |
+| Behavior                    | O(1) UPSERT/DELETE; set `next_due_at = nextOccurrence(schedule)` |
+
+**Above table (schema / catalog / metalake)**
+
+| Field                       | Value                                                                                              |
+| --------------------------- | -------------------------------------------------------------------------------------------------- |
+| When state rows are written | **Timed discovery** (§5.3.5)                                                                       |
+| Behavior                    | Bind association only; discovery lists scope, nearest-wins, UPSERT missing rows with `next_due_at` |
 
 ```text
 effective_policy(table, type) → policy_id   // nearest Active along table → schema → catalog → metalake
@@ -332,10 +527,19 @@ Shutdown stops loops; stale claims expire via `heartbeatTimeoutMs`.
 
 `takePendingDue` vs discovery:
 
-| Loop           | Default interval                        | Work                                                       |
-| -------------- | --------------------------------------- | ---------------------------------------------------------- |
-| Claim due work | `pollIntervalSecs` = **30**             | Select existing state rows with `next_due_at <= now`       |
-| Discovery      | `discoveryIntervalSecs` = **3600** (1h) | List tables in attachment scope; INSERT missing state rows |
+**Claim due work**
+
+| Field            | Value                                                |
+| ---------------- | ---------------------------------------------------- |
+| Default interval | `pollIntervalSecs` = **30**                          |
+| Work             | Select existing state rows with `next_due_at <= now` |
+
+**Discovery**
+
+| Field            | Value                                                      |
+| ---------------- | ---------------------------------------------------------- |
+| Default interval | `discoveryIntervalSecs` = **3600** (1h)                    |
+| Work             | List tables in attachment scope; INSERT missing state rows |
 
 #### 5.3.2 Due rows (`next_due_at`)
 
@@ -427,7 +631,7 @@ the only schedule driver; §7 is for manual / CLI runs only.
 #### 5.3.5 Scope discovery (above-table attachments)
 
 Discovery expands schema / catalog / metalake attachments into **table-level** state rows (§5.2.5).
-It does **not** replace `takePendingDue`. **Why discovery:** §4.6.
+It does **not** replace `takePendingDue`. **Why discovery:** §4.3.
 
 **Catalog source:** list tables from the **Iceberg/HMS** backend used by IRC — not only Gravitino
 `table_meta`.
@@ -505,12 +709,33 @@ worst-first.
 
 Orphan is a **separate track**, not step 3 of Track A.
 
-| Aspect           | Track A (hot pipeline)               | Track B (orphan)                                               |
-| ---------------- | ------------------------------------ | -------------------------------------------------------------- |
-| Operations       | manifest rewrite, snapshot expire    | `remove_orphan_files` only                                     |
-| Candidate signal | metrics / time due (`minIntervalMs`) | per-table `minIntervalMs` since last **successful** orphan job |
-| Queue order      | worst-first (health score)           | **oldest cleanup first**                                       |
-| Shared limits    | `maxConcurrentJobs` (§8.1)           | same                                                           |
+**Operations**
+
+| Field                  | Value                             |
+| ---------------------- | --------------------------------- |
+| Track A (hot pipeline) | manifest rewrite, snapshot expire |
+| Track B (orphan)       | `remove_orphan_files` only        |
+
+**Candidate signal**
+
+| Field                  | Value                                                          |
+| ---------------------- | -------------------------------------------------------------- |
+| Track A (hot pipeline) | metrics / time due (`minIntervalMs`)                           |
+| Track B (orphan)       | per-table `minIntervalMs` since last **successful** orphan job |
+
+**Queue order**
+
+| Field                  | Value                      |
+| ---------------------- | -------------------------- |
+| Track A (hot pipeline) | worst-first (health score) |
+| Track B (orphan)       | **oldest cleanup first**   |
+
+**Shared limits**
+
+| Field                  | Value                      |
+| ---------------------- | -------------------------- |
+| Track A (hot pipeline) | `maxConcurrentJobs` (§8.1) |
+| Track B (orphan)       | same                       |
 
 Eligible again only after `minIntervalMs` since last success (default 7d — §8.3); if claimed early,
 release and push `next_due_at` (§5.3.2). Enforce `olderThan` floor on evaluate and policy write (§8.1).
@@ -578,20 +803,89 @@ race).
 
 **Table name:** `table_maintenance_state`
 
-| Column                       | Type                       | Notes                                    |
-| ---------------------------- | -------------------------- | ---------------------------------------- |
-| `metalake_id`                | `BIGINT UNSIGNED NOT NULL` | Metalake owning the policy               |
-| `table_identifier`           | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table`        |
-| `policy_id`                  | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                  |
-| `state`                      | `VARCHAR(16) NOT NULL`     | `IDLE` / `RUNNING`                       |
-| `next_due_at`                | `BIGINT NOT NULL`          | Poller eligibility, epoch millis (§5.3)  |
-| `updated_at`                 | `BIGINT NOT NULL`          | Claim / reclaim / heartbeat              |
-| `job_id`                     | `BIGINT UNSIGNED NULL`     | In-flight `job_run_id`                   |
-| `last_job_id`                | `BIGINT UNSIGNED NULL`     | Last finished; drives min-interval       |
-| `last_measured_snapshot_id`  | `BIGINT NULL`              | Snapshot at last evaluate (§10.3)        |
-| `claimed_by`                 | `VARCHAR(128) NULL`        | Node holding `RUNNING` (§6.1)            |
-| `claim_lease_expires_at`     | `BIGINT NULL`              | Lease expiry; reclaim after (§10.3)      |
-| `submission_idempotency_key` | `VARCHAR(64) NULL`         | Written before submit (§10.3)            |
+**`metalake_id`**
+
+| Field | Value                      |
+| ----- | -------------------------- |
+| Type  | `BIGINT UNSIGNED NOT NULL` |
+| Notes | Metalake owning the policy |
+
+**`table_identifier`**
+
+| Field | Value                             |
+| ----- | --------------------------------- |
+| Type  | `VARCHAR(512) NOT NULL`           |
+| Notes | Normalized `catalog.schema.table` |
+
+**`policy_id`**
+
+| Field | Value                      |
+| ----- | -------------------------- |
+| Type  | `BIGINT UNSIGNED NOT NULL` |
+| Notes | `policy_meta.policy_id`    |
+
+**`state`**
+
+| Field | Value                  |
+| ----- | ---------------------- |
+| Type  | `VARCHAR(16) NOT NULL` |
+| Notes | `IDLE` / `RUNNING`     |
+
+**`next_due_at`**
+
+| Field | Value                                   |
+| ----- | --------------------------------------- |
+| Type  | `BIGINT NOT NULL`                       |
+| Notes | Poller eligibility, epoch millis (§5.3) |
+
+**`updated_at`**
+
+| Field | Value                       |
+| ----- | --------------------------- |
+| Type  | `BIGINT NOT NULL`           |
+| Notes | Claim / reclaim / heartbeat |
+
+**`job_id`**
+
+| Field | Value                  |
+| ----- | ---------------------- |
+| Type  | `BIGINT UNSIGNED NULL` |
+| Notes | In-flight `job_run_id` |
+
+**`last_job_id`**
+
+| Field | Value                              |
+| ----- | ---------------------------------- |
+| Type  | `BIGINT UNSIGNED NULL`             |
+| Notes | Last finished; drives min-interval |
+
+**`last_measured_snapshot_id`**
+
+| Field | Value                             |
+| ----- | --------------------------------- |
+| Type  | `BIGINT NULL`                     |
+| Notes | Snapshot at last evaluate (§10.3) |
+
+**`claimed_by`**
+
+| Field | Value                         |
+| ----- | ----------------------------- |
+| Type  | `VARCHAR(128) NULL`           |
+| Notes | Node holding `RUNNING` (§6.1) |
+
+**`claim_lease_expires_at`**
+
+| Field | Value                               |
+| ----- | ----------------------------------- |
+| Type  | `BIGINT NULL`                       |
+| Notes | Lease expiry; reclaim after (§10.3) |
+
+**`submission_idempotency_key`**
+
+| Field | Value                         |
+| ----- | ----------------------------- |
+| Type  | `VARCHAR(64) NULL`            |
+| Notes | Written before submit (§10.3) |
 
 **Primary key:** (`metalake_id`, `table_identifier`, `policy_id`).
 
@@ -628,12 +922,33 @@ not `table_meta.table_id`. Records that a commit happened; no `snapshot_id`.
 IRC post-commit hook → INSERT event → callback → bounded executor (§5.4.1)
 ```
 
-| Column             | Type                       | Notes                             |
-| ------------------ | -------------------------- | --------------------------------- |
-| `event_id`         | `BIGINT UNSIGNED NOT NULL` | Surrogate PK (auto-increment)     |
-| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake from config / resolution |
-| `table_identifier` | `VARCHAR(512) NOT NULL`    | Normalized `catalog.schema.table` |
-| `created_at`       | `BIGINT NOT NULL`          | Insert time, epoch millis         |
+**`event_id`**
+
+| Field | Value                         |
+| ----- | ----------------------------- |
+| Type  | `BIGINT UNSIGNED NOT NULL`    |
+| Notes | Surrogate PK (auto-increment) |
+
+**`metalake_id`**
+
+| Field | Value                             |
+| ----- | --------------------------------- |
+| Type  | `BIGINT UNSIGNED NOT NULL`        |
+| Notes | Metalake from config / resolution |
+
+**`table_identifier`**
+
+| Field | Value                             |
+| ----- | --------------------------------- |
+| Type  | `VARCHAR(512) NOT NULL`           |
+| Notes | Normalized `catalog.schema.table` |
+
+**`created_at`**
+
+| Field | Value                     |
+| ----- | ------------------------- |
+| Type  | `BIGINT NOT NULL`         |
+| Notes | Insert time, epoch millis |
 
 **Primary key:** (`event_id`). **Index:** (`metalake_id`, `table_identifier`, `created_at`).
 
@@ -687,15 +1002,54 @@ Every submission creates a `job_run_meta` row. On finish: update `last_job_id`, 
 Commit path and poller do **not** call these routes. They replace the `gravitino-optimizer` CLI on
 **8090**.
 
-| CLI `--type`              | Method | Path                                           |
-| ------------------------- | ------ | ---------------------------------------------- |
-| `submit-strategy-jobs`    | `POST` | `/api/maintenance/table/ops/strategy-jobs`     |
-| `submit-update-stats-job` | `POST` | `/api/maintenance/table/ops/update-stats-jobs` |
-| `update-statistics`       | `POST` | `/api/maintenance/table/ops/statistics`        |
-| `append-metrics`          | `POST` | `/api/maintenance/table/ops/metrics`           |
-| `monitor-metrics`         | `POST` | `/api/maintenance/table/ops/metrics/monitor`   |
-| `list-table-metrics`      | `GET`  | `/api/maintenance/table/ops/metrics/tables`    |
-| `list-job-metrics`        | `GET`  | `/api/maintenance/table/ops/metrics/jobs`      |
+**`submit-strategy-jobs`**
+
+| Field  | Value                                      |
+| ------ | ------------------------------------------ |
+| Method | `POST`                                     |
+| Path   | `/api/maintenance/table/ops/strategy-jobs` |
+
+**`submit-update-stats-job`**
+
+| Field  | Value                                          |
+| ------ | ---------------------------------------------- |
+| Method | `POST`                                         |
+| Path   | `/api/maintenance/table/ops/update-stats-jobs` |
+
+**`update-statistics`**
+
+| Field  | Value                                   |
+| ------ | --------------------------------------- |
+| Method | `POST`                                  |
+| Path   | `/api/maintenance/table/ops/statistics` |
+
+**`append-metrics`**
+
+| Field  | Value                                |
+| ------ | ------------------------------------ |
+| Method | `POST`                               |
+| Path   | `/api/maintenance/table/ops/metrics` |
+
+**`monitor-metrics`**
+
+| Field  | Value                                        |
+| ------ | -------------------------------------------- |
+| Method | `POST`                                       |
+| Path   | `/api/maintenance/table/ops/metrics/monitor` |
+
+**`list-table-metrics`**
+
+| Field  | Value                                       |
+| ------ | ------------------------------------------- |
+| Method | `GET`                                       |
+| Path   | `/api/maintenance/table/ops/metrics/tables` |
+
+**`list-job-metrics`**
+
+| Field  | Value                                     |
+| ------ | ----------------------------------------- |
+| Method | `GET`                                     |
+| Path   | `/api/maintenance/table/ops/metrics/jobs` |
 
 ---
 
@@ -703,23 +1057,110 @@ Commit path and poller do **not** call these routes. They replace the `gravitino
 
 ### 8.1 Enablement keys (`gravitino.conf`)
 
-| Key                                                  | Default     | Description                                                         |
-| ---------------------------------------------------- | ----------- | ------------------------------------------------------------------- |
-| `gravitino.server.rest.extensionPackages`            | none        | TMS Feature package.                                                |
-| `gravitino.auxService.names`                         | none        | Include `iceberg-rest` when using IRC.                              |
-| `gravitino.maintenance.claimLeaseMs`                 | `300000`    | Claim lease → `claim_lease_expires_at` (§6.1).                      |
-| `gravitino.maintenance.executor.threads`             | `4`         | Bounded executor threads (§5.4.1).                                  |
-| `gravitino.maintenance.executor.queueSize`           | `10000`     | Bounded executor queue depth.                                       |
-| `gravitino.maintenance.poller.enabled`               | `true`      | Enable `MaintenancePoller` (§5.3).                                  |
-| `gravitino.maintenance.poller.workerThreads`         | `2`         | Poller workers per node.                                            |
-| `gravitino.maintenance.poller.pollIntervalSecs`      | `30`        | Sleep when no due row claimed.                                      |
-| `gravitino.maintenance.poller.discoveryIntervalSecs` | `3600`      | Discovery interval for above-table attachments (§5.3.5).            |
-| `gravitino.maintenance.poller.discoveryBatchSize`    | `500`       | Max tables per discovery round.                                     |
-| `gravitino.maintenance.poller.heartbeatTimeoutSecs`  | `300`       | Reclaim stale `RUNNING`.                                            |
-| `gravitino.maintenance.poller.candidateWindow`       | `8`         | Max candidates per `takePendingDue`.                                |
-| `gravitino.maintenance.poller.maxConcurrentJobs`     | `10`        | Cap: COUNT `RUNNING` + `job_id` (§5.3.3).                           |
-| `gravitino.maintenance.poller.maintenanceWindow`     | none        | Optional UTC window; skip submit outside.                           |
-| `gravitino.maintenance.orphan.olderThanMinMs`        | `259200000` | Min `olderThan` (3 days) for orphan (§5.6).                         |
+**`gravitino.server.rest.extensionPackages`**
+
+| Field       | Value                |
+| ----------- | -------------------- |
+| Default     | none                 |
+| Description | TMS Feature package. |
+
+**`gravitino.auxService.names`**
+
+| Field       | Value                                  |
+| ----------- | -------------------------------------- |
+| Default     | none                                   |
+| Description | Include `iceberg-rest` when using IRC. |
+
+**`gravitino.maintenance.claimLeaseMs`**
+
+| Field       | Value                                          |
+| ----------- | ---------------------------------------------- |
+| Default     | `300000`                                       |
+| Description | Claim lease → `claim_lease_expires_at` (§6.1). |
+
+**`gravitino.maintenance.executor.threads`**
+
+| Field       | Value                              |
+| ----------- | ---------------------------------- |
+| Default     | `4`                                |
+| Description | Bounded executor threads (§5.4.1). |
+
+**`gravitino.maintenance.executor.queueSize`**
+
+| Field       | Value                         |
+| ----------- | ----------------------------- |
+| Default     | `10000`                       |
+| Description | Bounded executor queue depth. |
+
+**`gravitino.maintenance.poller.enabled`**
+
+| Field       | Value                              |
+| ----------- | ---------------------------------- |
+| Default     | `true`                             |
+| Description | Enable `MaintenancePoller` (§5.3). |
+
+**`gravitino.maintenance.poller.workerThreads`**
+
+| Field       | Value                    |
+| ----------- | ------------------------ |
+| Default     | `2`                      |
+| Description | Poller workers per node. |
+
+**`gravitino.maintenance.poller.pollIntervalSecs`**
+
+| Field       | Value                          |
+| ----------- | ------------------------------ |
+| Default     | `30`                           |
+| Description | Sleep when no due row claimed. |
+
+**`gravitino.maintenance.poller.discoveryIntervalSecs`**
+
+| Field       | Value                                                    |
+| ----------- | -------------------------------------------------------- |
+| Default     | `3600`                                                   |
+| Description | Discovery interval for above-table attachments (§5.3.5). |
+
+**`gravitino.maintenance.poller.discoveryBatchSize`**
+
+| Field       | Value                           |
+| ----------- | ------------------------------- |
+| Default     | `500`                           |
+| Description | Max tables per discovery round. |
+
+**`gravitino.maintenance.poller.heartbeatTimeoutSecs`**
+
+| Field       | Value                    |
+| ----------- | ------------------------ |
+| Default     | `300`                    |
+| Description | Reclaim stale `RUNNING`. |
+
+**`gravitino.maintenance.poller.candidateWindow`**
+
+| Field       | Value                                |
+| ----------- | ------------------------------------ |
+| Default     | `8`                                  |
+| Description | Max candidates per `takePendingDue`. |
+
+**`gravitino.maintenance.poller.maxConcurrentJobs`**
+
+| Field       | Value                                     |
+| ----------- | ----------------------------------------- |
+| Default     | `10`                                      |
+| Description | Cap: COUNT `RUNNING` + `job_id` (§5.3.3). |
+
+**`gravitino.maintenance.poller.maintenanceWindow`**
+
+| Field       | Value                                     |
+| ----------- | ----------------------------------------- |
+| Default     | none                                      |
+| Description | Optional UTC window; skip submit outside. |
+
+**`gravitino.maintenance.orphan.olderThanMinMs`**
+
+| Field       | Value                                       |
+| ----------- | ------------------------------------------- |
+| Default     | `259200000`                                 |
+| Description | Min `olderThan` (3 days) for orphan (§5.6). |
 
 Per-table cadence is **`minIntervalMs`** / **`next_due_at`**. `pollIntervalSecs` = claim frequency;
 `discoveryIntervalSecs` = expansion frequency.
@@ -734,21 +1175,45 @@ gravitino.maintenance.poller.maxConcurrentJobs = 10
 
 ### 8.2 Iceberg REST → TMS in-process event keys
 
-| Key (illustrative)                                  | Default | Description                                   |
-| --------------------------------------------------- | ------- | --------------------------------------------- |
-| `gravitino.iceberg-rest.tableMaintenance.inProcess` | `false` | IRC invokes compaction callback after commit. |
+**`gravitino.iceberg-rest.tableMaintenance.inProcess`**
+
+| Field       | Value                                         |
+| ----------- | --------------------------------------------- |
+| Default     | `false`                                       |
+| Description | IRC invokes compaction callback after commit. |
 
 ### 8.3 Task types and minimum interval (per policy type)
 
 Each type has its own `minIntervalMs`, compared per `(table, policy_id)` via
 `last_job_id` → `job_run_meta.job_finished_at`. Null `last_job_id` → gate passes.
 
-| Task type          | Policy type                          | Code default `minIntervalMs` |
-| ------------------ | ------------------------------------ | ---------------------------- |
-| `compaction`       | `system_iceberg_compaction`          | `3600000` (1 hour)           |
-| `snapshot-expiry`  | `system_iceberg_snapshot_expiration` | `86400000` (1 day)           |
-| `manifest-rewrite` | `system_iceberg_rewrite_manifests`   | `86400000` (1 day)           |
-| `orphan-cleanup`   | `system_iceberg_orphan_file_removal` | `604800000` (7 days)         |
+**`compaction`**
+
+| Field                        | Value                       |
+| ---------------------------- | --------------------------- |
+| Policy type                  | `system_iceberg_compaction` |
+| Code default `minIntervalMs` | `3600000` (1 hour)          |
+
+**`snapshot-expiry`**
+
+| Field                        | Value                                |
+| ---------------------------- | ------------------------------------ |
+| Policy type                  | `system_iceberg_snapshot_expiration` |
+| Code default `minIntervalMs` | `86400000` (1 day)                   |
+
+**`manifest-rewrite`**
+
+| Field                        | Value                              |
+| ---------------------------- | ---------------------------------- |
+| Policy type                  | `system_iceberg_rewrite_manifests` |
+| Code default `minIntervalMs` | `86400000` (1 day)                 |
+
+**`orphan-cleanup`**
+
+| Field                        | Value                                |
+| ---------------------------- | ------------------------------------ |
+| Policy type                  | `system_iceberg_orphan_file_removal` |
+| Code default `minIntervalMs` | `604800000` (7 days)                 |
 
 **Resolution order:** table property override → global `gravitino.conf` key → code default.
 
@@ -758,14 +1223,47 @@ Each type has its own `minIntervalMs`, compared per `(table, policy_id)` via
 
 ### 9.1 Suggested Work Plan
 
-| Phase | Work item                        | Notes                                                          |
-| ----- | -------------------------------- | -------------------------------------------------------------- |
-| 1     | In-process plugin + commit event | Feature; IRC INSERT + callback; bounded executor (§5.4.1)      |
-| 2     | State + event tables + claim     | Event + state materialization; nearest-wins (§5.2, §6)         |
-| 3     | `MaintenancePoller` + discovery  | `takePendingDue` + Iceberg/HMS discovery (§5.3)                |
-| 4     | Compaction on poller schedule    | Poller compaction; commit path unchanged (§5.4)                |
-| 5     | Track A / B                      | Hot pipeline + orphan (§5.5–§5.6)                              |
-| 6–8   | Profile API, ops APIs, harden    | §5.2.2, §7, §10                                                |
+**1**
+
+| Field     | Value                                                     |
+| --------- | --------------------------------------------------------- |
+| Work item | In-process plugin + commit event                          |
+| Notes     | Feature; IRC INSERT + callback; bounded executor (§5.4.1) |
+
+**2**
+
+| Field     | Value                                                  |
+| --------- | ------------------------------------------------------ |
+| Work item | State + event tables + claim                           |
+| Notes     | Event + state materialization; nearest-wins (§5.2, §6) |
+
+**3**
+
+| Field     | Value                                           |
+| --------- | ----------------------------------------------- |
+| Work item | `MaintenancePoller` + discovery                 |
+| Notes     | `takePendingDue` + Iceberg/HMS discovery (§5.3) |
+
+**4**
+
+| Field     | Value                                           |
+| --------- | ----------------------------------------------- |
+| Work item | Compaction on poller schedule                   |
+| Notes     | Poller compaction; commit path unchanged (§5.4) |
+
+**5**
+
+| Field     | Value                             |
+| --------- | --------------------------------- |
+| Work item | Track A / B                       |
+| Notes     | Hot pipeline + orphan (§5.5–§5.6) |
+
+**6–8**
+
+| Field     | Value                         |
+| --------- | ----------------------------- |
+| Work item | Profile API, ops APIs, harden |
+| Notes     | §5.2.2, §7, §10               |
 
 #### Phase 1–4 checklist
 
@@ -779,18 +1277,18 @@ Each type has its own `minIntervalMs`, compared per `(table, policy_id)` via
 
 ### 9.2 Review Checklist
 
-| Area            | Checklist                                                                                         |
-| --------------- | ------------------------------------------------------------------------------------------------- |
-| Deployment      | `extensionPackages`; IRC same JVM; ops on **8090** (§7).                                          |
-| Policy          | Four types; nearest-wins; table attach immediate; above-table discovery (§5.2).                   |
-| Trigger         | Compaction: commit + poller; others: poller + `next_due_at` (§5.4, §5.2.4).                       |
-| Discovery       | Iceberg/HMS list; separate from `takePendingDue` (§5.3.5, §4.6).                                  |
-| Multi-node      | No leader; per-row CAS like `IcebergCleanupManager` (§5.3, §4.7).                                 |
-| Executor        | Bounded; evaluate **off** commit thread (§5.4.1).                                                 |
-| Durability      | Event INSERT per commit (§6.3); state for claim/schedule (§6.2).                                  |
-| Orchestration   | Track A soft order; orphan separate (§5.5–§5.6).                                                  |
-| Industry        | §4.5 / §4.6 / §4.7 (row CAS chosen).                                                              |
-| Fault tolerance | Poller at-least-once latest-state; commit best effort (§10).                                      |
+| Area            | Checklist                                                                       |
+| --------------- | ------------------------------------------------------------------------------- |
+| Deployment      | `extensionPackages`; IRC same JVM; ops on **8090** (§7).                        |
+| Policy          | Four types; nearest-wins; table attach immediate; above-table discovery (§5.2). |
+| Trigger         | Compaction: commit + poller; others: poller + `next_due_at` (§5.4, §5.2.4).     |
+| Discovery       | Iceberg/HMS list; separate from `takePendingDue` (§5.3.5, §4.3).                |
+| Multi-node      | No leader; per-row CAS like `IcebergCleanupManager` (§5.3, §4.4).               |
+| Executor        | Bounded; evaluate **off** commit thread (§5.4.1).                               |
+| Durability      | Event INSERT per commit (§6.3); state for claim/schedule (§6.2).                |
+| Orchestration   | Track A soft order; orphan separate (§5.5–§5.6).                                |
+| Industry        | §4.2 / §4.3 / §4.4 (row CAS chosen).                                            |
+| Fault tolerance | Poller at-least-once latest-state; commit best effort (§10).                    |
 
 ---
 
