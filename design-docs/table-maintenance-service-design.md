@@ -35,13 +35,12 @@ Today that core is not hosted as a long-running Gravitino service. Without a ser
 3. Each run creates its own runtime and provider instances instead of a shared service lifecycle.
 4. When Spark maintenance work is needed, submitted work already returns a `jobId` owned by the
    Gravitino job framework. That job-status boundary should stay.
-5. There is no **embedded time scheduler** for deferred evaluation (`minIntervalMs` reschedule)
-   or stale-claim reclaim after commit-driven wakes.
+5. There is no **embedded scheduler** for stale-claim reclaim on multi-node deployments.
 
 This design turns TMS into a **main-server REST plugin** on port **8090** (same pattern as IdP
 via `gravitino.server.rest.extensionPackages`) so colocated IRC can drive the
 evaluate → submit pipeline **in-process** after commits, while reusing the existing optimizer
-execution core. **Periodic and deferred wake-ups use [db-scheduler](https://github.com/kagkarlsson/db-scheduler)**
+execution core. **Fixed-interval reclaim uses [db-scheduler](https://github.com/kagkarlsson/db-scheduler)**
 embedded in the same JVM (§4.5, §5.5).
 
 ---
@@ -54,9 +53,8 @@ embedded in the same JVM (§4.5, §5.5).
    replace the optimizer CLI are the ops APIs in **§7**.
 2. **IRC in-process commit event**: After successful Iceberg commits via IRC, TMS receives a commit
    event through a **main-server-registered in-process callback / SPI** (IRC and main server share one JVM; see **§5.1.1**). The event handler schedules or runs gates, policy trigger evaluation, and job submission (see **§5.4**).
-3. **Embedded time scheduling with db-scheduler**: Use **db-scheduler** for cluster-safe deferred
-   wake-ups (`minIntervalMs` reschedule after evaluate) and stale-claim reclaim. Spark execution
-   stays in the Gravitino job framework (§5.5).
+3. **Embedded scheduler for reclaim only**: Use **db-scheduler** for cluster-safe recurring
+   stale-claim reclaim. Spark execution stays in the Gravitino job framework (§5.5).
 4. **Reuse existing optimizer execution core**: Event handling invokes the same `Updater` /
    `Recommender` / job-submit paths already present in `maintenance/optimizer`, as **in-process
    methods**, not as a second copy of the logic.
@@ -67,10 +65,9 @@ embedded in the same JVM (§4.5, §5.5).
    store or `/api/maintenance/table/policies` CRUD.
 7. **Multi-node safe event processing**: Use a shared DB claim on `table_maintenance_state` so only
    one TMS replica runs the evaluate → submit pipeline for a given `(table, policy)` at a time (§6).
-8. **Commit-driven schedule**: IRC commit resolves Active policies for that table, upserts
-   `table_maintenance_state`, and writes evaluate wake-ups into db-scheduler `scheduled_tasks`
-   (`execution_time = now`). After each evaluate, the next wake is rescheduled at
-   `last_finished + minIntervalMs` in the same `scheduled_tasks` table (§5.4–§5.5).
+8. **Commit-driven evaluate**: IRC commit resolves Active policies for that table, upserts
+   `table_maintenance_state`, and invokes `MaintenanceEvaluateSubmitPipeline` in-process (§5.4).
+   `minIntervalMs` is enforced only as a **runtime gate** inside the pipeline (§5.5).
 
 ---
 
@@ -90,10 +87,6 @@ embedded in the same JVM (§4.5, §5.5).
    produce/consume path. Commit handling is **in-process only** (§5.1.1). APIs that replace the
    optimizer CLI are **§7**, and they are not a commit ingress. Remote IRC / cross-JVM delivery is
    out of scope (follow-up if needed).
-6. **Separate scheduling server**: No XXL-JOB / PowerJob admin process. Scheduling is embedded via
-   db-scheduler in the main server JVM.
-7. **Replacing §6 with the scheduler library**: db-scheduler owns **when to wake**; `table_maintenance_state`
-   still owns **business mutex**, in-flight `job_id`, and `last_job_id`.
 
 ---
 
@@ -114,8 +107,8 @@ Continue running all optimizer work in ad hoc local processes, with no TMS servi
 Register Table Maintenance as a Jersey 2 `Feature` through
 `gravitino.server.rest.extensionPackages` (same pattern as IdP) so it runs inside the main server
 process. The commit path does **not** use HTTP. After each Iceberg commit, the **colocated** IRC hook
-invokes a main-server-registered **in-process** callback that upserts state, schedules evaluate
-tasks, and runs evaluate → submit through `MaintenanceEvaluateSubmitPipeline`.
+invokes a main-server-registered **in-process** callback that upserts state and runs evaluate →
+submit through `MaintenanceEvaluateSubmitPipeline`.
 
 **Pros:** No extra process or port; no remote event hop on the commit path; reuses Policy + Jobs on
 the same server; matches plugin packaging.
@@ -143,39 +136,42 @@ listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 
 **Decision:** Rejected. Prefer Option B.
 
-### 4.5 Periodic and deferred scheduling (db-scheduler — Chosen)
+### 4.5 Recurring reclaim scheduling (db-scheduler — Chosen)
 
-TMS needs **time-based wake-ups** in addition to commit events:
+TMS needs one **fixed-interval** background task in addition to commit events:
 
 - Reclaim stale `RUNNING` claims after `claimTimeoutMs`.
-- Re-evaluate after `minIntervalMs` elapses since the last finished job.
 
-These are **not** the same problem as Spark job execution (already owned by Gravitino Jobs) or
-per-policy mutual exclusion (owned by `table_maintenance_state` §6). They need a small, embeddable,
-cluster-safe **persistent scheduler**.
+This is **not** the same problem as Spark job execution (already owned by Gravitino Jobs) or
+per-policy mutual exclusion (owned by `table_maintenance_state` §6). Reclaim needs a small,
+embeddable, cluster-safe **recurring scheduler**.
 
 #### Industry and in-project alternatives
 
-| Approach                                                        | License                | Embed in main server | Cluster CAS / single-flight                                | Fits `execution_time` + dynamic per-(table,policy) | H2 unit-test path                                                    | Extra ops component       | Decision                                           |
-| --------------------------------------------------------------- | ---------------------- | -------------------- | ---------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- | ------------------------- | -------------------------------------------------- |
-| **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)** | Apache 2.0             | Yes                  | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`) | Yes (`schedule(instance, time)`)                   | Degraded: disable scheduler; run pipeline directly in tests (§5.5.4) | No                        | **Chosen**                                         |
-| [JobRunr](https://www.jobrunr.io/)                              | LGPL v3 (+ commercial) | Yes                  | Yes                                                        | Yes                                                | Better H2 story                                                      | Optional dashboard server | Rejected — license + overlaps Gravitino Jobs       |
-| [ShedLock](https://github.com/lukas-krecan/ShedLock)            | Apache 2.0             | Yes                  | Lock only                                                  | No per-task `execution_time`                       | Yes                                                                  | No                        | Rejected — not a scheduler                         |
-| [Quartz](https://www.quartz-scheduler.org/) JDBC cluster        | Apache 2.0             | Yes                  | Yes (`QRTZ_*` row locks)                                   | Awkward for many dynamic instances                 | RAMJobStore only in tests                                            | No                        | Rejected — ~11 tables, heavy for interval wake-ups |
+| | | | | |
+| --- | --- | --- | --- | --- |
+| | **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)** | [JobRunr](https://www.jobrunr.io/) | [ShedLock](https://github.com/lukas-krecan/ShedLock) | [Quartz](https://www.quartz-scheduler.org/) JDBC cluster |
+| License | Apache 2.0 | LGPL v3 (+ commercial) | Apache 2.0 | Apache 2.0 |
+| Embed in main server | Yes | Yes | Yes | Yes |
+| Cluster CAS / single-flight | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`) | Yes | Lock only | Yes (`QRTZ_*` row locks) |
+| Fits fixed recurring reclaim | Yes | Yes | Lock only (needs external cron) | Yes |
+| H2 unit-test path | Degraded: disable scheduler; run pipeline directly in tests (§5.5.3) | Better H2 story | Yes | RAMJobStore only in tests |
+| Extra ops component | No | Optional dashboard server | No | No |
+| Decision | **Chosen** | Rejected — license + overlaps Gravitino Jobs | Rejected — not a scheduler | Rejected — ~11 tables, heavy for interval wake-ups |
 
 #### Why db-scheduler
 
 1. **Apache License 2.0** — safe for an ASF project; JobRunr is LGPL v3.
 2. **Embeddable and light** — one `scheduled_tasks` table; no admin server; starts/stops with
    `TableMaintenanceRESTFeature` (same lifecycle as the TMS plugin).
-3. **Right abstraction** — `execution_time` + `task_instance` maps cleanly to
-   `(metalake_id, table_identifier, policy_id)` wake-ups without duplicating Gravitino Jobs.
-4. **Cluster coordination** — db-scheduler's DB pick is orthogonal to §6 business claim; together they
-   mirror the pattern already used by `iceberg_cleanup_job` + `IcebergCleanupManager`.
-5. **Clear boundary** — db-scheduler wakes the pipeline; `table_maintenance_state` decides whether submit
-   is allowed; Gravitino Jobs runs Spark.
+3. **Right abstraction** — one recurring `tms-reclaim-stale-claims` task; no per-(table,policy) schedule
+   state.
+4. **Cluster coordination** — db-scheduler's DB pick for reclaim is orthogonal to §6 business claim;
+   together they mirror the pattern already used by `iceberg_cleanup_job` + `IcebergCleanupManager`.
+5. **Clear boundary** — db-scheduler runs reclaim; commit invokes the pipeline; `table_maintenance_state`
+   decides whether submit is allowed; Gravitino Jobs runs Spark.
 
-**Decision:** **Chosen** — embed db-scheduler for time scheduling; keep §6 for business state and mutex.
+**Decision:** **Chosen** — embed db-scheduler for recurring reclaim only; keep §6 for business state and mutex.
 
 ---
 
@@ -183,9 +179,9 @@ cluster-safe **persistent scheduler**.
 
 ### 5.1 Architecture
 
-TMS is **commit-driven**. IRC commit creates or refreshes evaluate wake-ups in db-scheduler; after
-each evaluate the pipeline reschedules the next wake from `minIntervalMs`. **All crontab / next-run
-times live only in `scheduled_tasks`.** There is **no** periodic policy-reconcile job.
+TMS is **commit-driven**. IRC commit upserts `table_maintenance_state` and invokes
+`MaintenanceEvaluateSubmitPipeline` in-process. **db-scheduler** runs only the recurring
+`tms-reclaim-stale-claims` task (fixed interval from §8.4).
 
 ```text
 Spark / Flink / Trino
@@ -196,41 +192,34 @@ Gravitino IRC (:9001)
         └─ post-commit → IcebergCommitEventHandler (§5.4)
                 ├─ resolve Active policies for this table (policy_meta / relation)
                 ├─ upsert table_maintenance_state
-                └─ scheduleEvaluate(execution_time = now) → scheduled_tasks
-                        │
-                        v
-        ┌──────────────────────────────────────────────────────────────┐
-        │  scheduled_tasks (db-scheduler) — ONLY crontab / next-run store │
-        │  • one-time / rescheduled: tms-evaluate-policy per (table,policy) │
-        │  • recurring: tms-reclaim-stale-claims only                     │
-        │  • all nodes poll; one node wins each pick (CAS)                │
-        └──────────────────────────────────────────────────────────────┘
-                        │
-                        v
-                 MaintenanceEvaluateSubmitPipeline
+                └─ invoke MaintenanceEvaluateSubmitPipeline (in-process)
                         ├─ §6 CAS claim on table_maintenance_state
-                        ├─ gates: in-flight job_id / minIntervalMs
+                        ├─ gates: in-flight job_id / minIntervalMs (runtime only)
                         ├─ Recommender → JobSubmitter when trigger passes
-                        └─ reschedule next wake at last_finished + minIntervalMs
-                           (again into scheduled_tasks)
                         v
                  Gravitino Job framework (rewrite / cleanup / …)
+
+        ┌──────────────────────────────────────────────────────────────┐
+        │  scheduled_tasks (db-scheduler) — recurring reclaim only      │
+        │  • tms-reclaim-stale-claims (fixed interval)                  │
+        │  • all nodes poll; one node wins each pick (CAS)                │
+        └──────────────────────────────────────────────────────────────┘
 ```
 
 | Table                                  | Role                                                                      |
 | -------------------------------------- | ------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **What** to evaluate (read on commit / during evaluate) — **not** crontab |
+| `policy_meta` / `policy_relation_meta` | **What** to evaluate (read on commit / during evaluate)                   |
 | `table_maintenance_state`              | Business mutex + `job_id` / `last_job_id` (§6)                            |
-| `scheduled_tasks`                      | **Only** place for next-run / reclaim schedule                            |
+| `scheduled_tasks`                      | Recurring reclaim schedule only (§5.5.2)                                  |
 
 #### 5.1.1 In-process commit event
 
 Commit events are delivered **only in-process**. After a successful Iceberg commit, the **IRC
 post-commit hook** invokes a **main-server-registered callback / SPI** (for example on
-`GravitinoEnv`). That callback upserts `table_maintenance_state` and **schedules immediate
-db-scheduler one-time tasks** (or calls the pipeline directly when the scheduler is disabled —
-§5.5.4). TMS does **not** persist a separate row per commit; the committed `snapshot_id` remains
-in Iceberg table metadata.
+`GravitinoEnv`). That callback upserts `table_maintenance_state` and **invokes
+`MaintenanceEvaluateSubmitPipeline`** on a bounded executor (or synchronously in tests — §5.5.3).
+TMS does **not** persist a separate row per commit; the committed `snapshot_id` remains in Iceberg
+table metadata.
 
 | Requirement | Detail                                                                                                                                    |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -254,13 +243,13 @@ Deployment:
 | Part                                | Responsibility                                                                                                                               |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; starts/stops db-scheduler; registers in-process callback and ops resources (§7).      |
-| `TableMaintenanceScheduler`         | Wraps db-scheduler: reclaim recurring + evaluate one-time/reschedule; maps `(metalake, table, policy)` ↔ `task_instance`.                    |
-| `IcebergCommitEventHandler`         | IRC commit callback; upserts state; schedules immediate evaluate tasks (§5.4).                                                               |
-| `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`; reschedules next db-scheduler wake-up.                                            |
+| `TableMaintenanceScheduler`         | Wraps db-scheduler: recurring `tms-reclaim-stale-claims` only (§5.5.2).                                                                      |
+| `IcebergCommitEventHandler`         | IRC commit callback; upserts state; invokes evaluate pipeline (§5.4).                                                                        |
+| `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`.                                                                                   |
 | `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / drop (§6.1–§6.3).                                                  |
-| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: purge state rows; cancel db-scheduler instances for dropped tables (§6.3). Table rename is out of scope.       |
+| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: purge state rows (§6.3). Table rename is out of scope.                                                          |
 | Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for evaluate path.                                                 |
-| db-scheduler `scheduled_tasks`      | **Only place for crontab / next-run times** — evaluate wake-ups + reclaim. Not a substitute for `table_maintenance_state` or `job_run_meta`. |
+| db-scheduler `scheduled_tasks`      | Recurring reclaim only. Not a substitute for `table_maintenance_state` or `job_run_meta`.                                                    |
 
 ### 5.3 User process
 
@@ -289,13 +278,13 @@ Deployment:
 
 3. Engines write through Gravitino Iceberg REST. On commit success, the **IRC hook** invokes TMS
    **in-process** (§5.4): resolve Active policies for that table, upsert `table_maintenance_state`,
-   and schedule **immediate** evaluate tasks in `scheduled_tasks`.
-4. When an evaluate task fires, the winning node runs `MaintenanceEvaluateSubmitPipeline` (§6 claim →
-   gates → trigger → submit) and **reschedules** the next wake at `last_finished + minIntervalMs`.
+   and run `MaintenanceEvaluateSubmitPipeline`.
+4. The pipeline applies §6 claim → gates (in-flight `job_id`, `minIntervalMs` at runtime) → trigger →
+   submit.
 5. Operators observe runs in the Gravitino **Jobs** UI / APIs. Manual evaluate for tables without
    IRC commits uses the ops APIs in §7.
 
-### 5.4 Commit path — schedule evaluate
+### 5.4 Commit path — evaluate
 
 ```text
 IRC commit succeeded (same JVM)
@@ -308,51 +297,37 @@ IRC commit succeeded (same JVM)
               │
               ├─ resolve Active policies (StrategyProvider / listPolicies)
               ├─ upsert one state row per policy (§6.2)
-              └─ for each Active policy:
-                    TableMaintenanceScheduler.scheduleEvaluate(
-                        metalake, table_identifier, policy_id,
-                        execution_time = now())   ← db-scheduler one-time task
+              └─ invoke MaintenanceEvaluateSubmitPipeline (bounded executor)
 ```
 
-The IRC path **does not** block on Spark. It only upserts state and enqueues scheduler wake-ups.
-Evaluate → submit runs when db-scheduler picks the task (typically immediately after commit).
-Subsequent wakes come from **reschedule after evaluate**, not from a policy reconcile scan.
+The IRC path **does not** block on Spark. It upserts state and submits evaluate work to a bounded
+executor. Evaluate → submit runs in-process on the node that received the commit.
 
-### 5.5 Execute path — db-scheduler pick → evaluate → reschedule
+### 5.5 Execute path — evaluate pipeline
 
 ```text
-db-scheduler picks due task (one node via scheduled_tasks CAS)
-  └─ task_instance = "{metalake_id}:{table_identifier}:{policy_id}"
-        │
-        v
-  MaintenanceEvaluateSubmitPipeline
+MaintenanceEvaluateSubmitPipeline (commit or ops API)
         ├─ atomic claim: table_maintenance_state IDLE → RUNNING (§6.1)
         │     └─ claim failed → exit (another node holds §6 lock or stale reclaim pending)
         ├─ if job_id set and job finished: last_job_id = job_id; clear job_id
-        ├─ if job_id still QUEUED/STARTED → release claim; reschedule after poll interval
+        ├─ if job_id still QUEUED/STARTED → release claim; skip (next commit retries)
         ├─ else apply min-interval gate (last_job_id → job_finished_at vs minIntervalMs)
         ├─ Recommender.submitForStrategyName(...) → JobSubmitter when trigger passes
-        ├─ on submit: set job_id; release claim (state → IDLE)
-        └─ reschedule next evaluate task at:
-              max(now, last_job_finished_at + minIntervalMs)
-              (or skip reschedule when policy detached / table dropped)
+        └─ on submit: set job_id; release claim (state → IDLE)
 ```
 
-#### 5.5.1 Where crontab lives (db-scheduler only)
+#### 5.5.1 Where reclaim crontab lives
 
-**All crontab / next-run scheduling is stored only in db-scheduler's `scheduled_tasks` table.**
-TMS does **not** put cron expressions in `policy_meta`, and does **not** introduce a separate TMS
-crontab table.
+**Recurring reclaim is stored only in db-scheduler's `scheduled_tasks` table.** TMS does **not** put
+cron expressions in `policy_meta`, and does **not** schedule per-(table,policy) evaluate tasks.
 
-| What                                          | Where it lives                         | Notes                                                        |
-| --------------------------------------------- | -------------------------------------- | ------------------------------------------------------------ |
-| Per-(table, policy) evaluate wake-up          | `scheduled_tasks` (`execution_time`)   | Created on IRC commit; refreshed by post-evaluate reschedule |
-| Recurring reclaim of stale claims             | `scheduled_tasks`                      | Registered at startup from §8.4 conf                         |
-| Policy type, thresholds, enabled, attachments | `policy_meta` / `policy_relation_meta` | **What** to run — never the crontab                          |
-| In-flight / last job / CAS mutex              | `table_maintenance_state`              | **Whether** submit is allowed — never the crontab            |
+| What                                          | Where it lives                         | Notes                               |
+| --------------------------------------------- | -------------------------------------- | ----------------------------------- |
+| Recurring reclaim of stale claims             | `scheduled_tasks`                      | Registered at startup from §8.4 conf |
+| Policy type, thresholds, enabled, attachments | `policy_meta` / `policy_relation_meta` | **What** to run                     |
+| In-flight / last job / CAS mutex              | `table_maintenance_state`              | **Whether** submit is allowed       |
 
-`policy_meta` is read on commit (and during evaluate) for Active policies. It is **not** scanned on a
-timer to invent schedules.
+`policy_meta` is read on commit (and during evaluate) for Active policies.
 
 #### 5.5.2 Recurring db-scheduler tasks
 
@@ -360,15 +335,7 @@ timer to invent schedules.
 | -------------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
 | `tms-reclaim-stale-claims` | `claimTimeoutMs / 2` (floor 60s) | Reclaim `table_maintenance_state` rows stuck in `RUNNING` past `claimTimeoutMs` (§6.2). |
 
-#### 5.5.3 One-time db-scheduler tasks
-
-| Task name             | Instance id                                    | When scheduled                                                                          |
-| --------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `tms-evaluate-policy` | `{metalake_id}:{table_identifier}:{policy_id}` | IRC commit (**now**), after pipeline reschedule (+ `minIntervalMs`), or manual ops API. |
-
-Duplicate schedules for the same instance replace the pending `execution_time` (latest wake wins).
-
-#### 5.5.4 H2 and test backends
+#### 5.5.3 H2 and test backends
 
 db-scheduler does **not** officially support H2 (only HSQLDB among embedded engines). Gravitino unit
 tests use H2 for the entity store. Therefore:
@@ -381,10 +348,10 @@ tests use H2 for the entity store. Therefore:
 This matches the existing Gravitino pattern of backend-specific SQL providers without requiring H2
 parity for every production feature.
 
-**Gate order** (unchanged — enforced inside the pipeline after scheduler wake-up):
+**Gate order** (enforced inside the pipeline on each invoke):
 
 1. If `job_id` is set and that job has finished: `last_job_id = job_id`, then clear `job_id`.
-2. If `job_id` is still in flight (`QUEUED` / `STARTED`): skip this policy; reschedule later.
+2. If `job_id` is still in flight (`QUEUED` / `STARTED`): skip this policy.
 3. Otherwise apply min-interval using `last_job_id` → `job_run_meta.job_finished_at` and the resolved
    `minIntervalMs` (table prop → global conf → code default; §8.3).
 4. Policy trigger (`Recommender`) for each remaining Active policy.
@@ -398,19 +365,16 @@ On **multiple** Gravitino / TMS nodes, an in-process event may run on **any** re
 colocated IRC and receives the commit. Without coordination, two nodes could both evaluate and
 submit the same policy's job for the same table.
 
-**Two layers:**
+**Evaluate mutex:** `table_maintenance_state` conditional `UPDATE` (§6.1) — whether evaluate → submit
+may proceed; tracks `job_id` / `last_job_id`. Commit invokes the pipeline on the IRC node; §6 claim
+prevents double-submit across replicas.
 
-| Layer              | Mechanism                                                        | Responsibility                                                         |
-| ------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **Time queue**     | db-scheduler `scheduled_tasks` (optimistic / `SKIP LOCKED` pick) | Which node runs the evaluate attempt at `execution_time`               |
-| **Business mutex** | `table_maintenance_state` conditional `UPDATE` (§6.1)            | Whether evaluate → submit may proceed; tracks `job_id` / `last_job_id` |
+**Reclaim:** db-scheduler runs `tms-reclaim-stale-claims` on a fixed interval; one node wins each
+pick via `scheduled_tasks` CAS.
 
-db-scheduler pick **does not** replace the §6 claim. A node that wins the scheduler pick may still lose
-the §6 claim; it exits without submitting.
-
-**Approach:** one shared TMS state table plus db-scheduler's `scheduled_tasks` in the Gravitino
-entity DB. Table identity uses a **normalized string `table_identifier`** (`catalog.schema.table`),
-**not** `table_meta.table_id`.
+**Approach:** one shared TMS state table plus db-scheduler's `scheduled_tasks` (reclaim only) in the
+Gravitino entity DB. Table identity uses a **normalized string `table_identifier`**
+(`catalog.schema.table`), **not** `table_meta.table_id`.
 
 Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reason
 `table_metrics` stores `table_identifier`, and `iceberg_cleanup_job` keys by
@@ -420,7 +384,7 @@ Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reas
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **What** to evaluate — read on IRC commit / during evaluate (existing Govern Policy store).             |
 | `table_maintenance_state`              | Per `(table, policy)` §6 claim + `job_id` / `last_job_id`. Upserted on commit (§6.1–§6.2).              |
-| `scheduled_tasks`                      | **Only crontab / next-run store** — evaluate wake-ups + reclaim; all nodes poll; one executor (§5.5.1). |
+| `scheduled_tasks`                      | Recurring reclaim only; all nodes poll; one executor (§5.5.1).                                          |
 
 `table_maintenance_state` primary key is `(metalake_id, table_identifier, policy_id)` — **one row
 per attached maintenance policy**. Claim is **per policy row**: each `(table, policy)` is claimed
@@ -431,24 +395,21 @@ identifier APIs); the state table stores multi-node claim state, the in-flight `
 last finished `last_job_id` per policy. `metalake_id` and `policy_id` come from Gravitino Policy /
 metalake metadata; only **table** identity avoids `table_meta`.
 
-**Why no `table_maintenance_event`:** Commit path schedules evaluate directly; `minIntervalMs` uses
-`last_job_id` → `job_run_meta.job_finished_at` (§5.5). Commit audit remains available from Iceberg
-snapshots and IRC access logs if needed later.
+**Why no `table_maintenance_event`:** Commit path invokes evaluate directly; `minIntervalMs` uses
+`last_job_id` → `job_run_meta.job_finished_at` at pipeline runtime (§5.5). Commit audit remains
+available from Iceberg snapshots and IRC access logs if needed later.
 
 ### 6.1 Claim flow
 
 ```text
-Node A / Node B — both receive an event for same table + same policy
+Node A / Node B — colocated IRC; commit handled on Node A
         │
-        ├─ both resolve Active policies; upsert one row per policy
-        ├─ both schedule db-scheduler evaluate task (same instance id; idempotent)
-        │
-        ├─ one node wins db-scheduler pick → runs pipeline
-        ├─ both may attempt per-policy §6 claim:
+        ├─ Node A: resolve Active policies; upsert one row per policy; invoke pipeline
+        ├─ Node A: per-policy §6 claim:
         │     UPDATE … SET state=RUNNING
         │     WHERE metalake_id=? AND table_identifier=? AND policy_id=? AND state=IDLE
-        │     ├─ Node A: rows_affected = 1 → runs that policy → release to IDLE
-        │     └─ Node B: 0 rows → skip that policy (another node / reclaim)
+        │     ├─ rows_affected = 1 → runs that policy → release to IDLE
+        │     └─ 0 rows → skip (another node / reclaim)
         v
 Different policies on the same table may be claimed by different nodes concurrently
 ```
@@ -456,8 +417,6 @@ Different policies on the same table may be claimed by different nodes concurren
 Gate checks alone are insufficient (read race). **Claim is the write lock** for that policy row;
 gates for a policy run only after its claim succeeds. Each attached policy is unique for a table, so
 per-policy claim prevents double-submit of the same job without locking unrelated policies.
-The claim on `table_maintenance_state` is the business lock. **scheduled_tasks pick is not the lock**
-— it only delivers a wake-up.
 
 ### 6.2 State table (shared store)
 
@@ -521,8 +480,7 @@ pattern as the commit-event callback — §5.1.1). Prefer wiring next to existin
 
 1. **`table_maintenance_state`:** `DELETE` (or soft-clear) all rows for
    `(metalake_id, table_identifier)`.
-2. **`scheduled_tasks`:** cancel all `tms-evaluate-policy` instances for that table.
-3. In-flight Spark jobs are **not** cancelled by this hook (job framework owns lifecycle); operators
+2. In-flight Spark jobs are **not** cancelled by this hook (job framework owns lifecycle); operators
    cancel via Jobs APIs if needed.
 
 **Table rename is out of scope.** TMS does not rewrite `table_identifier` keys on rename; operators
@@ -626,10 +584,10 @@ TMS recognizes four maintenance **task types** (aligned with product Compact pol
 | `maintenance.manifest-rewrite.minIntervalMs` | Manifest rewrite min interval for this table |
 | `maintenance.orphan-cleanup.minIntervalMs`   | Orphan cleanup min interval for this table   |
 
-db-scheduler reschedules the next `tms-evaluate-policy` wake-up using per-policy `last_job_id` →
-`job_run_meta.job_finished_at` and the resolved `minIntervalMs` for that task type (§5.5).
-`job_id` is only the in-flight submission. Policy content still owns **trigger thresholds** (e.g. MSE); interval
-only caps how often a successful submit may repeat.
+The pipeline checks `last_job_id` → `job_run_meta.job_finished_at` against the resolved
+`minIntervalMs` for that task type on each invoke (§5.5). `job_id` is only the in-flight submission.
+Policy content still owns **trigger thresholds** (e.g. MSE); interval only caps how often a successful
+submit may repeat when evaluate runs (commit or ops API).
 
 Example table override:
 
@@ -669,8 +627,8 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
 | ----- | ----------------------------------- | ----------------------------------------------------------------------------- |
 | 1     | Load the in-process plugin          | `TableMaintenanceRESTFeature`; start/stop db-scheduler on supported backends. |
 | 2     | Internal evaluate → submit pipeline | `MaintenanceEvaluateSubmitPipeline` + gates; unit tests.                      |
-| 3     | db-scheduler integration            | `TableMaintenanceScheduler`, migrations, reclaim + evaluate tasks (§5.5).     |
-| 4     | In-process IRC hook (commit path)   | IRC hook invokes TMS callback; schedule immediate evaluate tasks (§5.4).      |
+| 3     | db-scheduler integration            | `TableMaintenanceScheduler`, migrations, reclaim task only (§5.5).            |
+| 4     | In-process IRC hook (commit path)   | IRC hook invokes TMS callback and evaluate pipeline (§5.4).                   |
 | 5     | Hardening                           | Service metrics, graceful shutdown, H2 direct-path tests, user docs.          |
 | 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                  |
 
@@ -694,12 +652,11 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
 
 #### Phase 3 checklist
 
-- [ ] Add `TableMaintenanceScheduler` wrapping db-scheduler (`tms-evaluate-policy`,
-      `tms-reclaim-stale-claims`).
+- [ ] Add `TableMaintenanceScheduler` wrapping db-scheduler (`tms-reclaim-stale-claims` only).
 - [ ] Add entity-store migration for `scheduled_tasks` (MySQL / PostgreSQL).
 - [ ] Wire `DataSource` from the relational entity store; honor §8.4 keys.
-- [ ] On H2 backends: scheduler disabled; pipeline invoked directly (§5.5.4).
-- [ ] Integration test: two nodes, one scheduler pick, §6 claim prevents double-submit.
+- [ ] On H2 backends: scheduler disabled; pipeline invoked directly (§5.5.3).
+- [ ] Integration test: two nodes, §6 claim prevents double-submit on concurrent evaluate.
 
 #### Phase 4 checklist
 
@@ -707,12 +664,12 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
       §8.2).
 - [ ] Add EntityStore migration for **`table_maintenance_state`** (§6.2).
 - [ ] IRC post-commit hook invokes the in-process callback with `table_identifier` and `snapshot_id`.
-      Schedule db-scheduler evaluate tasks per Active policy. Do **not** add `table_maintenance_event`.
+      Run evaluate pipeline per Active policy. Do **not** add `table_maintenance_event`.
 - [ ] Upsert + **per-policy claim** on `table_maintenance_state` (§6.1).
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
-- [ ] Wire IRC **drop** in-process hook to purge state rows and cancel scheduler instances (§6.3).
-- [ ] Integration tests: each commit schedules evaluate tasks; scheduler + claim run the pipeline once;
-      no double-submit; drop clears state and scheduler rows.
+- [ ] Wire IRC **drop** in-process hook to purge state rows (§6.3).
+- [ ] Integration tests: each commit runs the pipeline once; claim prevents double-submit; drop clears
+      state rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 5 checklist
@@ -735,13 +692,13 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
 | ------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Deployment    | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7). |
 | Classpath     | TMS plugin on main server classpath; **not** an aux isolated listener.                                           |
-| Triggers      | **Commit-driven** schedule (§5.4) + post-evaluate reschedule; no policy reconcile; no commit table.              |
-| Scheduling    | **db-scheduler** embedded; **crontab only in `scheduled_tasks`** (§5.5.1, §8.4); not in `policy_meta`.           |
+| Triggers      | **Commit-driven** evaluate (§5.4); `minIntervalMs` runtime gate only; no commit table.                           |
+| Scheduling    | **db-scheduler** embedded for reclaim only (§5.5.1, §8.4); not in `policy_meta`.                                 |
 | Work registry | `table_maintenance_state` upserted on commit; not a parallel policy store.                                       |
 | Ops API       | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.              |
-| Pipeline      | Scheduler wake → per-policy claim → gates → `Recommender` → Jobs.                                                |
-| Drop          | In-process drop hook purges state rows and cancels scheduler instances (§6.3). Rename out of scope.              |
-| Multi-node    | db-scheduler pick + `table_maintenance_state` DB **claim** (§6).                                                 |
+| Pipeline      | Commit invoke → per-policy claim → gates → `Recommender` → Jobs.                                                 |
+| Drop          | In-process drop hook purges state rows (§6.3). Rename out of scope.                                              |
+| Multi-node    | `table_maintenance_state` DB **claim** (§6); db-scheduler for reclaim only.                                    |
 | Policy        | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                                 |
 | Job boundary  | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).                           |
 | Security      | Ops APIs require table WRITE. No commit-event or health endpoint.                                                |
