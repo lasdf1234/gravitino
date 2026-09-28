@@ -82,9 +82,7 @@ TMS uses a **scheduled two-step model** (§5.3–§5.5):
    **per-row claims** (§5.3).
 4. **Provider SPI rewrite**: Does not replace `StatisticsUpdater`, `StatisticsCalculator`,
    `StatisticsProvider`, `StrategyProvider`, `TableMetadataProvider`, or `JobSubmitter`.
-5. **IRC hooks and commit-path triggers**: No `EventListenerPlugin` integration, post-commit
-   compaction callbacks, or rename/drop lifecycle hooks in this design.
-6. **External clock APIs**: No `POST …/maintenance/run-due` (or CronJob) as an alternate timed clock.
+5. **External clock APIs**: No `POST …/maintenance/run-due` (or CronJob) as an alternate timed clock.
    The built-in `MaintenanceScheduler` is the only schedule driver.
 
 ---
@@ -118,7 +116,7 @@ are **not** run on every commit.
 3. Manifest rewrite is typically run about once a day; a scheduler already covers it.
 
 **TMS decision:** This design covers the **scheduler path only** — all four types on schedule
-(§5.2.3, §5.3). IRC hooks and commit-path triggers are out of scope (§3).
+(§5.2.3, §5.3).
 
 ### 4.3 Multi-node schedule options
 
