@@ -94,15 +94,6 @@ embedded in the same JVM (§4.5, §5.5).
    db-scheduler in the main server JVM.
 7. **Replacing §6 with the scheduler library**: db-scheduler owns **when to wake**; `table_maintenance_state`
    still owns **business mutex**, in-flight `job_id`, and `last_job_id`.
-8. **Per-commit TMS audit table**: No `table_maintenance_event` table. Iceberg snapshot history and
-   Gravitino Jobs APIs are sufficient for commit and maintenance audit; `minIntervalMs` uses
-   `last_job_id` → `job_run_meta.job_finished_at` only (§5.5).
-9. **Policy reconcile / quiet-table sweep**: No periodic scan of `policy_meta` /
-   `policy_relation_meta` to discover attachments. Evaluate schedules are created on **IRC commit**
-   and **rescheduled after each evaluate** in `scheduled_tasks`. Tables that never commit through
-   IRC are out of scope for automatic evaluate (use ops APIs in §7 if needed).
-10. **Table rename rewrite**: No TMS rewrite of `table_identifier` / `scheduled_tasks` on Iceberg
-    table rename. Drop cleanup remains in scope (§6.3).
 
 ---
 
@@ -158,7 +149,6 @@ TMS needs **time-based wake-ups** in addition to commit events:
 
 - Reclaim stale `RUNNING` claims after `claimTimeoutMs`.
 - Re-evaluate after `minIntervalMs` elapses since the last finished job.
-- Sweep attached policies on tables that have not committed recently.
 
 These are **not** the same problem as Spark job execution (already owned by Gravitino Jobs) or
 per-policy mutual exclusion (owned by `table_maintenance_state` §6). They need a small, embeddable,
@@ -166,19 +156,12 @@ cluster-safe **persistent scheduler**.
 
 #### Industry and in-project alternatives
 
-| Approach                                                                            | License                | Embed in main server | Cluster CAS / single-flight                                | Fits `execution_time` + dynamic per-(table,policy) | H2 unit-test path                                                    | Extra ops component       | Decision                                           |
-| ----------------------------------------------------------------------------------- | ---------------------- | -------------------- | ---------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- | ------------------------- | -------------------------------------------------- |
-| **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)**                     | Apache 2.0             | Yes                  | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`) | Yes (`schedule(instance, time)`)                   | Degraded: disable scheduler; run pipeline directly in tests (§5.5.4) | No                        | **Chosen**                                         |
-| [JobRunr](https://www.jobrunr.io/)                                                  | LGPL v3 (+ commercial) | Yes                  | Yes                                                        | Yes                                                | Better H2 story                                                      | Optional dashboard server | Rejected — license + overlaps Gravitino Jobs       |
-| [Quartz](https://www.quartz-scheduler.org/) JDBC cluster                            | Apache 2.0             | Yes                  | Yes (`QRTZ_*` row locks)                                   | Awkward for many dynamic instances                 | RAMJobStore only in tests                                            | No                        | Rejected — ~11 tables, heavy for interval wake-ups |
-| [ShedLock](https://github.com/lukas-krecan/ShedLock)                                | Apache 2.0             | Yes                  | Lock only                                                  | No per-task `execution_time`                       | Yes                                                                  | No                        | Rejected — not a scheduler                         |
-| [ElasticJob](https://shardingsphere.apache.org/elasticjob/) Lite                    | Apache 2.0             | Partial              | Yes                                                        | Sharding-oriented                                  | Weak                                                                 | Optional registry         | Rejected — wrong granularity                       |
-| [PowerJob](http://www.powerjob.tech/) / [XXL-JOB](https://www.xuxueli.com/xxl-job/) | Apache 2.0 / MIT       | No (separate server) | Yes                                                        | Yes                                                | N/A                                                                  | **Yes** — admin + worker  | Rejected — conflicts with in-process plugin        |
-| Kubernetes `CronJob` / host `cron`                                                  | N/A                    | No                   | External                                                   | Cron only                                          | N/A                                                                  | Cluster cron              | Rejected — no in-process CAS; alpha external only  |
-| JVM `ScheduledExecutorService` only                                                 | N/A                    | Yes                  | **No** (single node)                                       | Limited                                            | Yes                                                                  | No                        | Rejected for production multi-node                 |
-| Self-built scheduler table only                                                     | N/A                    | Yes                  | Yes (like `iceberg_cleanup_job`)                           | Yes                                                | Yes (H2 provider)                                                    | No                        | Viable fallback; more code than db-scheduler       |
-| [Amoro](https://amoro.apache.org/) optimizer (reference)                            | Apache 2.0             | Product-specific     | AMS + table props                                          | Domain-specific                                    | N/A                                                                  | Separate AMS              | Reference only — not a drop-in library             |
-| [OpenHouse](https://github.com/linkedin/openhouse) Jobs Scheduler (reference)       | Apache 2.0             | Product-specific     | DB-backed cron jobs                                        | Domain-specific                                    | N/A                                                                  | Separate services         | Reference only                                     |
+| Approach                                                        | License                | Embed in main server | Cluster CAS / single-flight                                | Fits `execution_time` + dynamic per-(table,policy) | H2 unit-test path                                                    | Extra ops component       | Decision                                           |
+| --------------------------------------------------------------- | ---------------------- | -------------------- | ---------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- | ------------------------- | -------------------------------------------------- |
+| **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)** | Apache 2.0             | Yes                  | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`) | Yes (`schedule(instance, time)`)                   | Degraded: disable scheduler; run pipeline directly in tests (§5.5.4) | No                        | **Chosen**                                         |
+| [JobRunr](https://www.jobrunr.io/)                              | LGPL v3 (+ commercial) | Yes                  | Yes                                                        | Yes                                                | Better H2 story                                                      | Optional dashboard server | Rejected — license + overlaps Gravitino Jobs       |
+| [ShedLock](https://github.com/lukas-krecan/ShedLock)            | Apache 2.0             | Yes                  | Lock only                                                  | No per-task `execution_time`                       | Yes                                                                  | No                        | Rejected — not a scheduler                         |
+| [Quartz](https://www.quartz-scheduler.org/) JDBC cluster        | Apache 2.0             | Yes                  | Yes (`QRTZ_*` row locks)                                   | Awkward for many dynamic instances                 | RAMJobStore only in tests                                            | No                        | Rejected — ~11 tables, heavy for interval wake-ups |
 
 #### Why db-scheduler
 
