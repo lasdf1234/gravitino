@@ -166,19 +166,19 @@ cluster-safe **persistent scheduler**.
 
 #### Industry and in-project alternatives
 
-| Approach | License | Embed in main server | Cluster CAS / single-flight | Fits `execution_time` + dynamic per-(table,policy) | H2 unit-test path | Extra ops component | Decision |
-| -------- | ------- | -------------------- | --------------------------- | ---------------------------------------------------- | ----------------- | --------------------- | -------- |
-| **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)** | Apache 2.0 | Yes | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`) | Yes (`schedule(instance, time)`) | Degraded: disable scheduler; run pipeline directly in tests (§5.5.4) | No | **Chosen** |
-| [JobRunr](https://www.jobrunr.io/) | LGPL v3 (+ commercial) | Yes | Yes | Yes | Better H2 story | Optional dashboard server | Rejected — license + overlaps Gravitino Jobs |
-| [Quartz](https://www.quartz-scheduler.org/) JDBC cluster | Apache 2.0 | Yes | Yes (`QRTZ_*` row locks) | Awkward for many dynamic instances | RAMJobStore only in tests | No | Rejected — ~11 tables, heavy for interval wake-ups |
-| [ShedLock](https://github.com/lukas-krecan/ShedLock) | Apache 2.0 | Yes | Lock only | No per-task `execution_time` | Yes | No | Rejected — not a scheduler |
-| [ElasticJob](https://shardingsphere.apache.org/elasticjob/) Lite | Apache 2.0 | Partial | Yes | Sharding-oriented | Weak | Optional registry | Rejected — wrong granularity |
-| [PowerJob](http://www.powerjob.tech/) / [XXL-JOB](https://www.xuxueli.com/xxl-job/) | Apache 2.0 / MIT | No (separate server) | Yes | Yes | N/A | **Yes** — admin + worker | Rejected — conflicts with in-process plugin |
-| Kubernetes `CronJob` / host `cron` | N/A | No | External | Cron only | N/A | Cluster cron | Rejected — no in-process CAS; alpha external only |
-| JVM `ScheduledExecutorService` only | N/A | Yes | **No** (single node) | Limited | Yes | No | Rejected for production multi-node |
-| Self-built scheduler table only | N/A | Yes | Yes (like `iceberg_cleanup_job`) | Yes | Yes (H2 provider) | No | Viable fallback; more code than db-scheduler |
-| [Amoro](https://amoro.apache.org/) optimizer (reference) | Apache 2.0 | Product-specific | AMS + table props | Domain-specific | N/A | Separate AMS | Reference only — not a drop-in library |
-| [OpenHouse](https://github.com/linkedin/openhouse) Jobs Scheduler (reference) | Apache 2.0 | Product-specific | DB-backed cron jobs | Domain-specific | N/A | Separate services | Reference only |
+| Approach                                                                            | License                | Embed in main server | Cluster CAS / single-flight                                | Fits `execution_time` + dynamic per-(table,policy) | H2 unit-test path                                                    | Extra ops component       | Decision                                           |
+| ----------------------------------------------------------------------------------- | ---------------------- | -------------------- | ---------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------- | ------------------------- | -------------------------------------------------- |
+| **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)**                     | Apache 2.0             | Yes                  | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`) | Yes (`schedule(instance, time)`)                   | Degraded: disable scheduler; run pipeline directly in tests (§5.5.4) | No                        | **Chosen**                                         |
+| [JobRunr](https://www.jobrunr.io/)                                                  | LGPL v3 (+ commercial) | Yes                  | Yes                                                        | Yes                                                | Better H2 story                                                      | Optional dashboard server | Rejected — license + overlaps Gravitino Jobs       |
+| [Quartz](https://www.quartz-scheduler.org/) JDBC cluster                            | Apache 2.0             | Yes                  | Yes (`QRTZ_*` row locks)                                   | Awkward for many dynamic instances                 | RAMJobStore only in tests                                            | No                        | Rejected — ~11 tables, heavy for interval wake-ups |
+| [ShedLock](https://github.com/lukas-krecan/ShedLock)                                | Apache 2.0             | Yes                  | Lock only                                                  | No per-task `execution_time`                       | Yes                                                                  | No                        | Rejected — not a scheduler                         |
+| [ElasticJob](https://shardingsphere.apache.org/elasticjob/) Lite                    | Apache 2.0             | Partial              | Yes                                                        | Sharding-oriented                                  | Weak                                                                 | Optional registry         | Rejected — wrong granularity                       |
+| [PowerJob](http://www.powerjob.tech/) / [XXL-JOB](https://www.xuxueli.com/xxl-job/) | Apache 2.0 / MIT       | No (separate server) | Yes                                                        | Yes                                                | N/A                                                                  | **Yes** — admin + worker  | Rejected — conflicts with in-process plugin        |
+| Kubernetes `CronJob` / host `cron`                                                  | N/A                    | No                   | External                                                   | Cron only                                          | N/A                                                                  | Cluster cron              | Rejected — no in-process CAS; alpha external only  |
+| JVM `ScheduledExecutorService` only                                                 | N/A                    | Yes                  | **No** (single node)                                       | Limited                                            | Yes                                                                  | No                        | Rejected for production multi-node                 |
+| Self-built scheduler table only                                                     | N/A                    | Yes                  | Yes (like `iceberg_cleanup_job`)                           | Yes                                                | Yes (H2 provider)                                                    | No                        | Viable fallback; more code than db-scheduler       |
+| [Amoro](https://amoro.apache.org/) optimizer (reference)                            | Apache 2.0             | Product-specific     | AMS + table props                                          | Domain-specific                                    | N/A                                                                  | Separate AMS              | Reference only — not a drop-in library             |
+| [OpenHouse](https://github.com/linkedin/openhouse) Jobs Scheduler (reference)       | Apache 2.0             | Product-specific     | DB-backed cron jobs                                        | Domain-specific                                    | N/A                                                                  | Separate services         | Reference only                                     |
 
 #### Why db-scheduler
 
@@ -234,11 +234,11 @@ Gravitino IRC (:9001)
                  Gravitino Job framework (rewrite / cleanup / …)
 ```
 
-| Table | Role |
-| ----- | ---- |
+| Table                                  | Role                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **What** to evaluate (read on commit / during evaluate) — **not** crontab |
-| `table_maintenance_state` | Business mutex + `job_id` / `last_job_id` (§6) |
-| `scheduled_tasks` | **Only** place for next-run / reclaim schedule |
+| `table_maintenance_state`              | Business mutex + `job_id` / `last_job_id` (§6)                            |
+| `scheduled_tasks`                      | **Only** place for next-run / reclaim schedule                            |
 
 #### 5.1.1 In-process commit event
 
@@ -268,16 +268,16 @@ Deployment:
 
 ### 5.2 Internal structure
 
-| Part                                | Responsibility                                                                                                                                           |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; starts/stops db-scheduler; registers in-process callback and ops resources (§7).                |
-| `TableMaintenanceScheduler`         | Wraps db-scheduler: reclaim recurring + evaluate one-time/reschedule; maps `(metalake, table, policy)` ↔ `task_instance`.                               |
-| `IcebergCommitEventHandler`         | IRC commit callback; upserts state; schedules immediate evaluate tasks (§5.4).                                                                           |
-| `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`; reschedules next db-scheduler wake-up.                                                      |
-| `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / drop (§6.1–§6.3).                                                               |
-| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: purge state rows; cancel db-scheduler instances for dropped tables (§6.3). Table rename is out of scope.                   |
-| Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for evaluate path.                                                             |
-| db-scheduler `scheduled_tasks`      | **Only place for crontab / next-run times** — evaluate wake-ups + reclaim. Not a substitute for `table_maintenance_state` or `job_run_meta`.             |
+| Part                                | Responsibility                                                                                                                               |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TableMaintenanceRESTFeature`       | Jersey 2 `Feature` registered via `extensionPackages`; starts/stops db-scheduler; registers in-process callback and ops resources (§7).      |
+| `TableMaintenanceScheduler`         | Wraps db-scheduler: reclaim recurring + evaluate one-time/reschedule; maps `(metalake, table, policy)` ↔ `task_instance`.                    |
+| `IcebergCommitEventHandler`         | IRC commit callback; upserts state; schedules immediate evaluate tasks (§5.4).                                                               |
+| `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`; reschedules next db-scheduler wake-up.                                            |
+| `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / drop (§6.1–§6.3).                                                  |
+| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: purge state rows; cancel db-scheduler instances for dropped tables (§6.3). Table rename is out of scope.       |
+| Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for evaluate path.                                                 |
+| db-scheduler `scheduled_tasks`      | **Only place for crontab / next-run times** — evaluate wake-ups + reclaim. Not a substitute for `table_maintenance_state` or `job_run_meta`. |
 
 ### 5.3 User process
 
@@ -361,26 +361,26 @@ db-scheduler picks due task (one node via scheduled_tasks CAS)
 TMS does **not** put cron expressions in `policy_meta`, and does **not** introduce a separate TMS
 crontab table.
 
-| What | Where it lives | Notes |
-| ---- | -------------- | ----- |
-| Per-(table, policy) evaluate wake-up | `scheduled_tasks` (`execution_time`) | Created on IRC commit; refreshed by post-evaluate reschedule |
-| Recurring reclaim of stale claims | `scheduled_tasks` | Registered at startup from §8.4 conf |
-| Policy type, thresholds, enabled, attachments | `policy_meta` / `policy_relation_meta` | **What** to run — never the crontab |
-| In-flight / last job / CAS mutex | `table_maintenance_state` | **Whether** submit is allowed — never the crontab |
+| What                                          | Where it lives                         | Notes                                                        |
+| --------------------------------------------- | -------------------------------------- | ------------------------------------------------------------ |
+| Per-(table, policy) evaluate wake-up          | `scheduled_tasks` (`execution_time`)   | Created on IRC commit; refreshed by post-evaluate reschedule |
+| Recurring reclaim of stale claims             | `scheduled_tasks`                      | Registered at startup from §8.4 conf                         |
+| Policy type, thresholds, enabled, attachments | `policy_meta` / `policy_relation_meta` | **What** to run — never the crontab                          |
+| In-flight / last job / CAS mutex              | `table_maintenance_state`              | **Whether** submit is allowed — never the crontab            |
 
 `policy_meta` is read on commit (and during evaluate) for Active policies. It is **not** scanned on a
 timer to invent schedules.
 
 #### 5.5.2 Recurring db-scheduler tasks
 
-| Task name | Default interval | Action |
-| --------- | ---------------- | ------ |
+| Task name                  | Default interval                 | Action                                                                                  |
+| -------------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
 | `tms-reclaim-stale-claims` | `claimTimeoutMs / 2` (floor 60s) | Reclaim `table_maintenance_state` rows stuck in `RUNNING` past `claimTimeoutMs` (§6.2). |
 
 #### 5.5.3 One-time db-scheduler tasks
 
-| Task name | Instance id | When scheduled |
-| --------- | ----------- | -------------- |
+| Task name             | Instance id                                    | When scheduled                                                                          |
+| --------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `tms-evaluate-policy` | `{metalake_id}:{table_identifier}:{policy_id}` | IRC commit (**now**), after pipeline reschedule (+ `minIntervalMs`), or manual ops API. |
 
 Duplicate schedules for the same instance replace the pending `execution_time` (latest wake wins).
@@ -390,10 +390,10 @@ Duplicate schedules for the same instance replace the pending `execution_time` (
 db-scheduler does **not** officially support H2 (only HSQLDB among embedded engines). Gravitino unit
 tests use H2 for the entity store. Therefore:
 
-| Entity-store backend | Scheduler behavior |
-| -------------------- | ------------------ |
-| MySQL / PostgreSQL (production) | db-scheduler **enabled**; `scheduled_tasks` migrated with entity store |
-| H2 (unit / local tests) | `gravitino.maintenance.scheduler.enabled = false`; commit path calls `MaintenanceEvaluateSubmitPipeline` **directly** on a bounded executor |
+| Entity-store backend            | Scheduler behavior                                                                                                                          |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| MySQL / PostgreSQL (production) | db-scheduler **enabled**; `scheduled_tasks` migrated with entity store                                                                      |
+| H2 (unit / local tests)         | `gravitino.maintenance.scheduler.enabled = false`; commit path calls `MaintenanceEvaluateSubmitPipeline` **directly** on a bounded executor |
 
 This matches the existing Gravitino pattern of backend-specific SQL providers without requiring H2
 parity for every production feature.
@@ -417,10 +417,10 @@ submit the same policy's job for the same table.
 
 **Two layers:**
 
-| Layer | Mechanism | Responsibility |
-| ----- | --------- | -------------- |
-| **Time queue** | db-scheduler `scheduled_tasks` (optimistic / `SKIP LOCKED` pick) | Which node runs the evaluate attempt at `execution_time` |
-| **Business mutex** | `table_maintenance_state` conditional `UPDATE` (§6.1) | Whether evaluate → submit may proceed; tracks `job_id` / `last_job_id` |
+| Layer              | Mechanism                                                        | Responsibility                                                         |
+| ------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **Time queue**     | db-scheduler `scheduled_tasks` (optimistic / `SKIP LOCKED` pick) | Which node runs the evaluate attempt at `execution_time`               |
+| **Business mutex** | `table_maintenance_state` conditional `UPDATE` (§6.1)            | Whether evaluate → submit may proceed; tracks `job_id` / `last_job_id` |
 
 db-scheduler pick **does not** replace the §6 claim. A node that wins the scheduler pick may still lose
 the §6 claim; it exits without submitting.
@@ -433,11 +433,11 @@ Iceberg REST / optimizer tables often have **no** row in `table_meta` (same reas
 `table_metrics` stores `table_identifier`, and `iceberg_cleanup_job` keys by
 `catalog_id` + `namespace` + `table_name`). TMS must not require Gravitino table metadata to exist.
 
-| Table                     | Role                                                                                        |
-| ------------------------- | ------------------------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **What** to evaluate — read on IRC commit / during evaluate (existing Govern Policy store). |
-| `table_maintenance_state` | Per `(table, policy)` §6 claim + `job_id` / `last_job_id`. Upserted on commit (§6.1–§6.2). |
-| `scheduled_tasks`         | **Only crontab / next-run store** — evaluate wake-ups + reclaim; all nodes poll; one executor (§5.5.1). |
+| Table                                  | Role                                                                                                    |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `policy_meta` / `policy_relation_meta` | **What** to evaluate — read on IRC commit / during evaluate (existing Govern Policy store).             |
+| `table_maintenance_state`              | Per `(table, policy)` §6 claim + `job_id` / `last_job_id`. Upserted on commit (§6.1–§6.2).              |
+| `scheduled_tasks`                      | **Only crontab / next-run store** — evaluate wake-ups + reclaim; all nodes poll; one executor (§5.5.1). |
 
 `table_maintenance_state` primary key is `(metalake_id, table_identifier, policy_id)` — **one row
 per attached maintenance policy**. Claim is **per policy row**: each `(table, policy)` is claimed
@@ -658,12 +658,12 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 
 ### 8.4 db-scheduler keys (`gravitino.conf`)
 
-| Key | Default | Description |
-| --- | ------- | ----------- |
-| `gravitino.maintenance.scheduler.enabled` | `true` on MySQL/PostgreSQL; `false` on H2 | Enables embedded db-scheduler. Auto-false when entity store is H2. |
-| `gravitino.maintenance.scheduler.threads` | `2` | db-scheduler worker threads. |
-| `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | How often due tasks are polled. |
-| `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | `true` on MySQL | Required for MySQL timestamp handling per db-scheduler docs. |
+| Key                                                           | Default                                   | Description                                                        |
+| ------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
+| `gravitino.maintenance.scheduler.enabled`                     | `true` on MySQL/PostgreSQL; `false` on H2 | Enables embedded db-scheduler. Auto-false when entity store is H2. |
+| `gravitino.maintenance.scheduler.threads`                     | `2`                                       | db-scheduler worker threads.                                       |
+| `gravitino.maintenance.scheduler.pollingIntervalMs`           | `10000`                                   | How often due tasks are polled.                                    |
+| `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | `true` on MySQL                           | Required for MySQL timestamp handling per db-scheduler docs.       |
 
 Dependency (illustrative, version pinned at implementation time):
 
@@ -682,14 +682,14 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 This design delivers the in-process plugin, IRC commit hook, shared `table_maintenance_state` +
 claim, embedded **db-scheduler**, and evaluate → submit pipeline.
 
-| Phase | Work item                           | Notes                                                                                     |
-| ----- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
-| 1     | Load the in-process plugin          | `TableMaintenanceRESTFeature`; start/stop db-scheduler on supported backends.             |
-| 2     | Internal evaluate → submit pipeline | `MaintenanceEvaluateSubmitPipeline` + gates; unit tests.                                  |
-| 3     | db-scheduler integration            | `TableMaintenanceScheduler`, migrations, reclaim + evaluate tasks (§5.5).                 |
-| 4     | In-process IRC hook (commit path)   | IRC hook invokes TMS callback; schedule immediate evaluate tasks (§5.4).                  |
-| 5     | Hardening                           | Service metrics, graceful shutdown, H2 direct-path tests, user docs.                      |
-| 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                            |
+| Phase | Work item                           | Notes                                                                         |
+| ----- | ----------------------------------- | ----------------------------------------------------------------------------- |
+| 1     | Load the in-process plugin          | `TableMaintenanceRESTFeature`; start/stop db-scheduler on supported backends. |
+| 2     | Internal evaluate → submit pipeline | `MaintenanceEvaluateSubmitPipeline` + gates; unit tests.                      |
+| 3     | db-scheduler integration            | `TableMaintenanceScheduler`, migrations, reclaim + evaluate tasks (§5.5).     |
+| 4     | In-process IRC hook (commit path)   | IRC hook invokes TMS callback; schedule immediate evaluate tasks (§5.4).      |
+| 5     | Hardening                           | Service metrics, graceful shutdown, H2 direct-path tests, user docs.          |
+| 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                  |
 
 #### Phase 1 checklist
 
@@ -748,21 +748,21 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
 
 ### 9.2 Review Checklist
 
-| Area         | Checklist                                                                                                        |
-| ------------ | ---------------------------------------------------------------------------------------------------------------- |
-| Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7). |
-| Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                                           |
-| Triggers     | **Commit-driven** schedule (§5.4) + post-evaluate reschedule; no policy reconcile; no commit table.          |
-| Scheduling   | **db-scheduler** embedded; **crontab only in `scheduled_tasks`** (§5.5.1, §8.4); not in `policy_meta`.       |
-| Work registry | `table_maintenance_state` upserted on commit; not a parallel policy store.                                    |
-| Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.              |
-| Pipeline     | Scheduler wake → per-policy claim → gates → `Recommender` → Jobs.                                                |
-| Drop         | In-process drop hook purges state rows and cancels scheduler instances (§6.3). Rename out of scope.            |
-| Multi-node   | db-scheduler pick + `table_maintenance_state` DB **claim** (§6).                                                 |
-| Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                                 |
-| Job boundary | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).                           |
-| Security     | Ops APIs require table WRITE. No commit-event or health endpoint.                                                |
-| License      | db-scheduler is **Apache 2.0**; no LGPL scheduling dependency.                                                   |
+| Area          | Checklist                                                                                                        |
+| ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Deployment    | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7). |
+| Classpath     | TMS plugin on main server classpath; **not** an aux isolated listener.                                           |
+| Triggers      | **Commit-driven** schedule (§5.4) + post-evaluate reschedule; no policy reconcile; no commit table.              |
+| Scheduling    | **db-scheduler** embedded; **crontab only in `scheduled_tasks`** (§5.5.1, §8.4); not in `policy_meta`.           |
+| Work registry | `table_maintenance_state` upserted on commit; not a parallel policy store.                                       |
+| Ops API       | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.              |
+| Pipeline      | Scheduler wake → per-policy claim → gates → `Recommender` → Jobs.                                                |
+| Drop          | In-process drop hook purges state rows and cancels scheduler instances (§6.3). Rename out of scope.              |
+| Multi-node    | db-scheduler pick + `table_maintenance_state` DB **claim** (§6).                                                 |
+| Policy        | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                                 |
+| Job boundary  | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).                           |
+| Security      | Ops APIs require table WRITE. No commit-event or health endpoint.                                                |
+| License       | db-scheduler is **Apache 2.0**; no LGPL scheduling dependency.                                                   |
 
 ---
 
