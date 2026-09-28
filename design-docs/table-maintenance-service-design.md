@@ -101,6 +101,8 @@ embedded in the same JVM (§4.5, §5.5).
    `policy_relation_meta` to discover attachments. Evaluate schedules are created on **IRC commit**
    and **rescheduled after each evaluate** in `scheduled_tasks`. Tables that never commit through
    IRC are out of scope for automatic evaluate (use ops APIs in §7 if needed).
+10. **Table rename rewrite**: No TMS rewrite of `table_identifier` / `scheduled_tasks` on Iceberg
+    table rename. Drop cleanup remains in scope (§6.3).
 
 ---
 
@@ -272,8 +274,8 @@ Deployment:
 | `TableMaintenanceScheduler`         | Wraps db-scheduler: reclaim recurring + evaluate one-time/reschedule; maps `(metalake, table, policy)` ↔ `task_instance`.                               |
 | `IcebergCommitEventHandler`         | IRC commit callback; upserts state; schedules immediate evaluate tasks (§5.4).                                                                           |
 | `MaintenanceEvaluateSubmitPipeline` | Per-policy claim → gates → `Recommender` → `JobSubmitter`; reschedules next db-scheduler wake-up.                                                      |
-| `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / rename (§6.1–§6.3).                                                            |
-| `IcebergTableLifecycleHook`         | In-process IRC rename/drop hook: rewrite or purge state rows; cancel db-scheduler instances for dropped tables (§6.3).                                   |
+| `TableMaintenanceStateStore`        | Shared DB access for `table_maintenance_state` upsert / claim / release / drop (§6.1–§6.3).                                                               |
+| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: purge state rows; cancel db-scheduler instances for dropped tables (§6.3). Table rename is out of scope.                   |
 | Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for evaluate path.                                                             |
 | db-scheduler `scheduled_tasks`      | **Only place for crontab / next-run times** — evaluate wake-ups + reclaim. Not a substitute for `table_maintenance_state` or `job_run_meta`.             |
 
@@ -528,31 +530,11 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_state` (
   COMMENT 'TMS multi-node event claim, in-flight job_id, last finished job';
 ```
 
-### 6.3 Table rename / drop lifecycle (required with string keys)
+### 6.3 Table drop lifecycle
 
-Because TMS keys by **`table_identifier`** (not a stable `table_id`), a rename would otherwise orphan
-claim / `job_id` / `last_job_id` rows and break cooldown / in-flight gates. Historical **`table_metrics`** rows can
-tolerate orphan names; **`table_maintenance_state` cannot**.
-
-**Hook:** after a successful Iceberg table rename (or drop), IRC invokes an in-process
-`IcebergTableLifecycleHook` registered by the TMS plugin (same classloader-boundary pattern as the
-commit-event callback — §5.1.1). Prefer wiring next to existing IRC rename/drop paths (e.g.
-`IcebergTableHookDispatcher.renameTable` / `IcebergRenameTableEvent`).
-
-#### Rename (`old_identifier` → `new_identifier`)
-
-1. **`table_maintenance_state`:** rewrite every row for the metalake:
-   `UPDATE … SET table_identifier = new WHERE metalake_id = ? AND table_identifier = old`.
-   Preserve `state`, `job_id`, `last_job_id`, `updated_at` (except bump `updated_at` for audit). If a conflicting
-   destination key already exists (rare), fail the rewrite loudly or merge per implementation policy
-   — do not silently drop `job_id` or `last_job_id`.
-2. **`scheduled_tasks`:** cancel instances for `old_identifier`; reschedule for `new_identifier` if
-   policies remain attached.
-3. Policy attachments on Gravitino metadata objects (when present via `metadata_object_id`) are
-   outside this table rewrite; object-id bindings survive rename when `table_meta` exists. String-
-   based policy attachments, if any, must be updated by the Policy / IRC lifecycle path separately.
-
-#### Drop
+TMS keys by string `table_identifier`. After a successful Iceberg **table drop**, IRC invokes an
+in-process `IcebergTableLifecycleHook` registered by the TMS plugin (same classloader-boundary
+pattern as the commit-event callback — §5.1.1). Prefer wiring next to existing IRC drop paths.
 
 1. **`table_maintenance_state`:** `DELETE` (or soft-clear) all rows for
    `(metalake_id, table_identifier)`.
@@ -560,8 +542,9 @@ commit-event callback — §5.1.1). Prefer wiring next to existing IRC rename/dr
 3. In-flight Spark jobs are **not** cancelled by this hook (job framework owns lifecycle); operators
    cancel via Jobs APIs if needed.
 
-Catalog rename (changes the `catalog.` prefix of many identifiers) is a **follow-up** bulk rewrite;
-This design covers table rename/drop within a catalog.
+**Table rename is out of scope.** TMS does not rewrite `table_identifier` keys on rename; operators
+reattach policies / wait for a new commit path under the new name if needed. Catalog rename is also
+out of scope.
 
 ---
 
@@ -744,10 +727,9 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
       Schedule db-scheduler evaluate tasks per Active policy. Do **not** add `table_maintenance_event`.
 - [ ] Upsert + **per-policy claim** on `table_maintenance_state` (§6.1).
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
-- [ ] Wire IRC **rename/drop** in-process hook to rewrite / purge state rows and cancel scheduler
-      instances (§6.3).
+- [ ] Wire IRC **drop** in-process hook to purge state rows and cancel scheduler instances (§6.3).
 - [ ] Integration tests: each commit schedules evaluate tasks; scheduler + claim run the pipeline once;
-      no double-submit; rename updates `table_identifier`; drop clears state and scheduler rows.
+      no double-submit; drop clears state and scheduler rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 5 checklist
@@ -775,7 +757,7 @@ claim, embedded **db-scheduler**, and evaluate → submit pipeline.
 | Work registry | `table_maintenance_state` upserted on commit; not a parallel policy store.                                    |
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.              |
 | Pipeline     | Scheduler wake → per-policy claim → gates → `Recommender` → Jobs.                                                |
-| Rename/drop  | In-process lifecycle hook rewrites / purges state rows and cancels scheduler instances (§6.3).                 |
+| Drop         | In-process drop hook purges state rows and cancels scheduler instances (§6.3). Rename out of scope.            |
 | Multi-node   | db-scheduler pick + `table_maintenance_state` DB **claim** (§6).                                                 |
 | Policy       | Reuses metalake Policy APIs + `policy_meta`; no TMS policy CRUD.                                                 |
 | Job boundary | Spark work stays in Gravitino job framework; stats land in `statistic_meta` (main DB).                           |
