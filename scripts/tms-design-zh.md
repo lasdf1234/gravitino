@@ -37,8 +37,8 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 
 本设计将 TMS 做成主服务 **8090** 上的 **REST 插件**（与 IdP 相同，通过
 `gravitino.server.rest.extensionPackages`），以便同机部署的 IRC 在 commit 后**入队**按策略的 evaluate
-工作。**db-scheduler** 在 `scheduled_tasks` 上持有短 evaluate 租约（pick + heartbeat）。一张精简的
-Gravitino 表仅存储在途 / 最近完成的 Spark `job_id` 指针。optimizer 执行核心在调度器 pick 后以进程内方式运行。
+工作。**db-scheduler** 在 `scheduled_tasks` 上持有短 evaluate 租约（pick + heartbeat）。`table_maintenance_job`
+为每次 Spark 运行存一行（Validation JSON + submit 门控）。optimizer 执行核心在调度器 pick 后以进程内方式运行。
 
 ---
 
@@ -56,17 +56,17 @@ Gravitino 表仅存储在途 / 最近完成的 Spark `job_id` 指针。optimizer
    evaluate → submit 回调，然后释放 pick。Spark 执行仍在 Gravitino 作业框架（§5.5）。**不要**持有 pick 直到 Spark 完成。
 4. **复用现有 optimizer 执行核心**：调度器任务处理程序以**进程内方法**调用 `maintenance/optimizer` 中已有的
    `Updater` / `Recommender` / 作业提交路径，而非第二套逻辑。
-5. **作业框架兼容**：Spark 维护工作继续使用 Gravitino 作业框架。TMS 在精简指针表中记录已提交的 `jobId`，
-   但不拥有作业状态。Automate Jobs **Validation** 的前后指标存储在 `job_validation_metric`（§6.4）。
+5. **作业框架兼容**：Spark 维护工作继续使用 Gravitino 作业框架。TMS 在 `table_maintenance_job` 中记录每次运行，
+   但不拥有作业状态。Automate Jobs **Validation** 的前后指标在同一行（§6.2）。
 6. **复用 Govern Policy**：维护策略仍在现有 `policy_meta` 与 metalake Policy API
    （create / alter / enable / disable / associate）。TMS **不**另建策略库或
    `/api/maintenance/table/policies` CRUD。
 7. **多节点安全执行**：db-scheduler pick + heartbeat 是给定 `(table, policy)` 任务实例的 evaluate 互斥锁
-   （§5.5、§6）。并发 Spark 提交由 `table_maintenance_job.job_id` 阻止（§6.2）。
-8. **精简作业指针表**：Gravitino 仅为每个 `(metalake, table_id, policy_id)` 持久化
-   `job_id` / `last_job_id`（§6.2）。**短 evaluate** 租约的入队、claim 与崩溃恢复在 `scheduled_tasks`。
+   （§5.5、§6）。并发 Spark 提交由在途行（`finished_at IS NULL`）阻止（§6.2）。
+8. **按运行维护作业表**：Gravitino 为每个 Spark `job_run_id` 持久化一行 `table_maintenance_job`
+   （Validation JSON + `finished_at`）。无独立指针表或 `last_job_id`。**短 evaluate** 租约的入队、claim 与崩溃恢复在 `scheduled_tasks`。
 9. **Commit 驱动入队，调度器驱动执行**：IRC commit 仅 upsert 调度器行（§5.4）。`minIntervalMs` 是管线内的
-   **运行时门控**，使用 `last_job_id` → `job_validation_metric.finished_at`（§5.5、§6.4）。
+   **运行时门控**，对该 `(table_id, policy_id)` 使用 `table_maintenance_job` 的 `MAX(finished_at)`（§5.5、§6.2）。
 10. **专用 TMS 执行主体**：所有自动化维护（commit 后事件入队与定时策略到期）均以内置 metalake 用户 **`tms`**
     提交 Jobs，而非创建策略的运维人员（§5.6）。
 11. **策略 evaluate 触发方式**：自动化维护在 `policy_version_info.content.schedule` 中配置
@@ -92,7 +92,7 @@ Gravitino 表仅存储在途 / 最近完成的 Spark `job_id` 指针。optimizer
    commit 处理**仅进程内**（§5.1.1）。替代 optimizer CLI 的 API 在 **§7**，不是 commit 入口。
    远程 IRC / 跨 JVM 投递不在范围（如需可后续跟进）。
 6. **持有 db-scheduler pick 直到 Spark 完成**：evaluate 回调必须在 submit（或 skip）后返回。
-   长 Spark 生命周期由 `job_id` 门控，而非 `picked` / `last_success`。
+   长 Spark 生命周期由在途 `table_maintenance_job` 行门控，而非 `picked` / `last_success`。
 7. **自动化 TMS 的按人用户模板**：手动 Automate Jobs UI 日后可存按用户默认值；自动化事件/定时运行始终使用
    **`tms`** 主体与策略 `jobOptions`（§5.6–§5.8）。
 
@@ -139,12 +139,12 @@ TMS 不在主 8090 JAX-RS 应用上。
 
 **决策：** 否决。优先选项 B。
 
-### 4.5 Evaluate 租约 + 作业指针（db-scheduler — 选定）
+### 4.5 Evaluate 租约 + 按运行作业记录（db-scheduler — 选定）
 
-TMS 需要在 commit 后进行集群安全的**短** evaluate 执行，以及持久的 Spark 作业指针：
+TMS 需要在 commit 后进行集群安全的**短** evaluate 执行，以及持久的按运行作业记录：
 
 - evaluate → submit 的**入队 / pick / heartbeat**（数秒到数分钟）。
-- **`job_id` / `last_job_id`**，使在途 Spark 与 `minIntervalMs` 在 pick 之外仍然有效。
+- **`table_maintenance_job` 运行行**，使在途 Spark 与 `minIntervalMs` 在 pick 之外仍然有效。
 
 这与 Spark 作业执行（已由 Gravitino Jobs 拥有）**不是**同一问题。单独的臃肿 evaluate 状态表（带 `evaluate_pending` +
 `IDLE`/`RUNNING` + 应用 heartbeat）重复了 db-scheduler 已为短任务提供的能力。持有 `picked` 直到
@@ -171,10 +171,10 @@ Spark 完成会把调度器线程绑在长作业上，已否决（非目标 #6�
 3. **内置 heartbeat** — 短 evaluate 回调运行期间，db-scheduler 刷新 `last_heartbeat`；死 JVM 释放 pick，
    无需在 TMS 状态表上手写租约列。
 4. **职责清晰** — `scheduled_tasks` = 何时 / 谁跑短 evaluate；`table_maintenance_job` =
-   仅 Spark `job_id` / `last_job_id`；Gravitino Jobs 跑 Spark。
+   按运行 Validation + submit 门控；Gravitino Jobs 跑 Spark。
 5. **无臃肿 TMS 状态机** — 无 `evaluate_pending` / `IDLE`/`RUNNING` 与 `picked` 的双份实现。
 
-**决策：** **选定** — db-scheduler 用于按策略 evaluate 租约；精简 `table_maintenance_job` 仅作作业指针。
+**决策：** **选定** — db-scheduler 用于按策略 evaluate 租约；`table_maintenance_job` 用于按运行记录与 submit 门控。
 
 ### 4.6 自动化 Job 配置存放位置
 
@@ -207,7 +207,7 @@ TMS Jobs 的 IRC 客户端认证与 credential-vending 所需 secret（密码、
 
 TMS **由 commit 驱动入队**，**由 db-scheduler 驱动短执行**。IRC commit 为每个 Active `(table, policy)` 调度
 （或重新调度）一个 db-scheduler 任务实例，`execution_time = now`。**每个** TMS 节点运行 db-scheduler；
-一个节点 pick 每个到期实例，运行 `MaintenanceEvaluateSubmitPipeline`，submit 时写入 `job_id`，然后**返回**
+一个节点 pick 每个到期实例，运行 `MaintenanceEvaluateSubmitPipeline`，submit 时插入 `table_maintenance_job` 行，然后**返回**
 （释放 pick）。Spark 在作业框架下异步继续。
 
 并发 commit 通过对**同一** `task_instance` upsert 并将 `execution_time` 设为 now 来合并。
@@ -230,16 +230,15 @@ Node A / Node B / Node C  — 各运行 db-scheduler (§5.5)
         ├─ 轮询 scheduled_tasks；pick 到期的 tms-evaluate 实例（执行期间 heartbeat）
         ├─ MaintenanceEvaluateSubmitPipeline（短）
         │     ├─ ensureTableImported → table_meta / table_id（§5.5.4）
-        │     ├─ 经 table_maintenance_job 门控：在途 job_id / minIntervalMs
+        │     ├─ 经 table_maintenance_job 门控：在途行 / MAX(finished_at) 对比 minIntervalMs
         │     ├─ Recommender → 触发通过时 JobSubmitter
         │     ├─ jobConfig = 模板基线 ⊕ 最近策略 jobOptions ⊕ SecretManager 认证
         │     ├─ 以主体 `tms` 提交 (§5.6)
-        │     ├─ submit 时：设置 job_id；插入 job_validation_metric.before_metrics（§6.4）
+        │     ├─ submit 时：INSERT table_maintenance_job 行（before_metrics；§6.2）
         │     └─ 返回（释放 pick；**不**等待 Spark）
         v
                  Gravitino Job 框架（rewrite / cleanup / …）
-                 job 完成 → last_job_id = job_id；清除 job_id；
-                                 更新 after_metrics + finished_at（§6.4）
+                 job 完成 → UPDATE 该行 after_metrics + finished_at（§6.2）
 
         ┌──────────────────────────────────────────────────────────────┐
         │  scheduled_tasks (db-scheduler)                               │
@@ -252,10 +251,9 @@ Node A / Node B / Node C  — 各运行 db-scheduler (§5.5)
 | -------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **评估什么**、`schedule` 触发（§5.7）与非认证 `jobOptions`（§5.8）                                        |
 | `scheduled_tasks`                      | **短** evaluate 的入队 + pick + heartbeat（§5.5、§6.1）                                              |
-| `table_maintenance_job`                | 精简指针：仅 `job_id` / `last_job_id`（§6.2）                                                         |
+| `table_maintenance_job`                | 按运行记录：Validation JSON + `finished_at`；submit 门控（§6.2）                                        |
 | SecretManager / SecretProvider         | 经 URN 的 TMS Spark / Iceberg **认证**材料（§5.9）；非 TMS 自有表                                          |
 | `user_meta`                            | 启用授权时的内置 metalake 用户 `tms`（§5.6）                                                              |
-| `job_validation_metric`                | Automate Jobs Validation UI 的每作业前后指标（§6.4）                                                    |
 | `job_run_meta`                         | Spark 作业运行**记录**（状态 + `runtime_job_template` 快照）；非默认配置                                        |
 
 #### 5.1.1 进程内 commit 事件
@@ -263,7 +261,7 @@ Node A / Node B / Node C  — 各运行 db-scheduler (§5.5)
 Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-commit 钩子**调用**主服务注册的回调 / SPI**
 （例如在 `GravitinoEnv` 上）。该回调解析 Active 策略并**调度 db-scheduler 任务实例**（每个策略一个）。
 **不**在 commit 路径调用 `MaintenanceEvaluateSubmitPipeline`。evaluate 在**任意**节点 pick 到期任务时运行（§5.5）。
-TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍在 Iceberg 表元数据中（可选在 submit 时记录到 validation 行 — §6.4）。
+TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍在 Iceberg 表元数据中（可选在 submit 时记录到 `table_maintenance_job.before_metrics` — §6.2）。
 
 | 要求          | 详情                                                                                                                                        |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -293,9 +291,8 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
 | `GravitinoTableImportService`       | 经 `TableDispatcher.loadTable` 懒 import 进 `table_meta`（§5.5.4）；按 backend 解析 owner。                                                            |
 | `TmsPrincipalBootstrapListener`     | 监听 `CreateMetalakeEvent` 的 `EventListenerPlugin`；启用授权时确保 metalake 用户 `tms` + 内置角色（§5.6）。                                                     |
 | `TmsAuthConfigResolver`             | 解析 IRC 认证 + credential-vending Spark conf；经 SecretManager 加载 secret（§5.9）。                                                                   |
-| `TableMaintenanceJobStore`          | 读写精简 `table_maintenance_job`（`job_id` / `last_job_id`）（§6.2–§6.3）。                                                                           |
-| `JobValidationMetricStore`          | submit / job 完成时写读 `job_validation_metric`（§6.4）。                                                                                            |
-| `IcebergTableLifecycleHook`         | 进程内 IRC **drop** 钩子：删除调度器实例 + 作业指针行（§6.3）。重命名不在范围。                                                                                           |
+| `TableMaintenanceJobStore`          | 读写 `table_maintenance_job` 按运行行；submit 门控 + Validation JSON（§6.2–§6.3）。                                                                  |
+| `IcebergTableLifecycleHook`         | 进程内 IRC **drop** 钩子：删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                                         |
 | 现有 optimizer 类                      | `Updater`、`Recommender`、providers、`JobSubmitter` — evaluate 路径契约不变。                                                                          |
 | db-scheduler `scheduled_tasks`      | 每 (table,policy) evaluate 租约。不能替代 `table_maintenance_job` 或 `job_run_meta`。                                                                  |
 
@@ -332,8 +329,8 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
    ```
 
 3. 引擎经 Gravitino Iceberg REST 写入。commit 成功后，**IRC 钩子**为 Active 策略调度 db-scheduler evaluate 实例（§5.4）。
-4. **任意**节点的 db-scheduler pick 到期实例并运行管线：门控（在途 `job_id`、`minIntervalMs`）→ 触发 → submit（§5.5、§6）。
-5. 运维在 Gravitino **Jobs** UI / API 观察运行（含来自 `job_validation_metric` 的 Validation）。自动化 Job 的 `audit.creator` 为 **`tms`**。
+4. **任意**节点的 db-scheduler pick 到期实例并运行管线：门控（在途行、`minIntervalMs`）→ 触发 → submit（§5.5、§6）。
+5. 运维在 Gravitino **Jobs** UI / API 观察运行（含来自 `table_maintenance_job` 的 Validation）。自动化 Job 的 `audit.creator` 为 **`tms`**。
    无 IRC commit 的表的手动 evaluate 使用 §7 ops API（ops 可调度同一 `tms-evaluate` 实例或在测试钩子下直接跑管线）。
 
 ### 5.4 Commit 路径 — 仅入队
@@ -364,20 +361,18 @@ db-scheduler（每个 TMS 节点）
         ├─ pick 到期的 tms-evaluate（设置 picked，execute 运行期间刷新 last_heartbeat）
         ├─ MaintenanceEvaluateSubmitPipeline：
         │     ├─ ensureTableImported（幂等；§5.5.4）
-        │     ├─ 确保 table_maintenance_job 行存在（按 table_id 键）
-        │     ├─ 若 job_id 已设且 job 已完成：last_job_id = job_id；清除 job_id
-        │     ├─ 若 job_id 仍为 QUEUED/STARTED → 跳过 submit；返回
-        │     ├─ 否则应用最小间隔（last_job_id → job_validation_metric.finished_at 对比 minIntervalMs）
+        │     ├─ 若存在在途行（finished_at IS NULL）→ 跳过 submit；返回
+        │     ├─ 否则应用最小间隔（MAX(finished_at) 对比 minIntervalMs）
         │     ├─ Recommender.submitForStrategyName(...) → 触发通过时 JobSubmitter
         │     ├─ 叠加该类型最近挂载策略的 jobOptions（§5.8）
         │     ├─ 叠加 SecretManager 认证 + credential-vending conf；以 `tms` 提交（§5.6、§5.9）
-        │     ├─ submit 时：设置 job_id；插入 job_validation_metric.before_metrics（§6.4）
+        │     ├─ submit 时：INSERT table_maintenance_job 行（before_metrics；§6.2）
         │     └─ 快速返回（释放 pick）
         └─ 死 JVM：错过 heartbeat → dead execution 处理程序重新调度 / 解锁实例
 ```
 
 **为何不在 pick 内等待 Spark：** 调度器 heartbeat 与工作线程须按**短** evaluate 工作定容。防止并发 Spark submit 使用
-`table_maintenance_job.job_id`，而非长期持有 `picked` 行。`scheduled_tasks` 上的 `last_success` 表示「evaluate 回调结束」，
+在途 `table_maintenance_job` 行（`finished_at IS NULL`），而非长期持有 `picked` 行。`scheduled_tasks` 上的 `last_success` 表示「evaluate 回调结束」，
 **不是** Spark 完成。
 
 #### 5.5.1 调度状态存放位置
@@ -387,8 +382,7 @@ db-scheduler（每个 TMS 节点）
 | evaluate 到期时间 / pick / heartbeat              | `scheduled_tasks`                      | 每个 `(table, policy)` 一个实例                     |
 | 策略类型、阈值、jobOptions、挂载                         | `policy_meta` / `policy_relation_meta` | **跑什么** + 非认证 job 参数                          |
 | Spark / Iceberg 认证键                           | SecretManager（URN）                     | TMS 主体；不在策略中                                  |
-| 在途 / 最近 Spark job id                          | `table_maintenance_job`                | **是否**允许再次 submit                             |
-| Job Validation 前后                             | `job_validation_metric`                | Automate Jobs UI（§6.4）                        |
+| 按运行 Validation + submit 门控                   | `table_maintenance_job`                | 在途行 + 前后 JSON（§6.2）                            |
 | Job 运行快照                                      | `job_run_meta.runtime_job_template`    | **该次运行**所用；非默认配置                              |
 
 commit 时（及 evaluate 期间）读取 `policy_meta` 以获取 Active 策略。
@@ -412,13 +406,12 @@ commit 时（及 evaluate 期间）读取 `policy_meta` 以获取 Active 策略�
 
 **门控顺序**（成功 pick 后管线内）：
 
-1. `ensureTableImported`（§5.5.4）——启用 import 时须在作业指针门控前成功。
-2. 若 `job_id` 已设且该 job 已完成：`last_job_id = job_id`，然后清除 `job_id`。
-3. 若 `job_id` 仍在途（`QUEUED` / `STARTED`）：跳过 submit 并返回。
-4. 否则用 `last_job_id` → `job_validation_metric.finished_at` 与解析的 `minIntervalMs` 应用最小间隔（表属性 → 全局 conf → 代码默认；§8.3）。
-5. 策略触发（`Recommender`）。
-6. Submit 时：叠加最近策略 `jobOptions`（§5.8）与 SecretManager 认证 / credential-vending conf（§5.9）；以主体 `tms` 的 `runJob`；
-   设置 `job_id`；插入 `before_metrics`（§6.4）。不要改 `last_job_id`。
+1. `ensureTableImported`（§5.5.4）——启用 import 时须在 submit 门控前成功。
+2. 若该 `(metalake_id, table_id, policy_id)` 存在在途行（`finished_at IS NULL`）：跳过 submit 并返回。
+3. 否则用该键的 `MAX(finished_at)` 与解析的 `minIntervalMs` 应用最小间隔（表属性 → 全局 conf → 代码默认；§8.3）。
+4. 策略触发（`Recommender`）。
+5. Submit 时：叠加最近策略 `jobOptions`（§5.8）与 SecretManager 认证 / credential-vending conf（§5.9）；以主体 `tms` 的 `runJob`；
+   `INSERT` 一行 `table_maintenance_job`（含 `before_metrics`）（§6.2）。
 
 #### 5.5.4 懒加载 Gravitino 元数据 import（`table_meta`）
 
@@ -519,7 +512,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 仅当维护**类型**不同（如 compaction + snapshot-expiry）时才用**两条** policy，不是因为两种触发方式。
 
 这与 `minIntervalMs`（§8.3）**不同**：`onCommit` / `crontab` 决定**何时 evaluate**；`minIntervalMs` 限制上次成功
-submit 后多久可再次 submit（查 `job_validation_metric.finished_at`）。
+submit 后多久可再次 submit（查该 `(table_id, policy_id)` 的 `MAX(finished_at)`）。
 
 **存储：** 触发配置在 **`policy_version_info.content`**，不在 `policy_meta` 列、也不在 `scheduled_tasks`。
 前端展示与编辑的 JSON 与 TMS 调度器读取的相同。
@@ -702,19 +695,18 @@ Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job �
 
 **Evaluate 互斥：** 该 `task_instance` 上 db-scheduler 的 `picked` + `last_heartbeat`（§6.1）。
 
-**Spark submit 互斥 / 间隔：** `table_maintenance_job.job_id` / `last_job_id`（§6.2）。
+**Spark submit 互斥 / 间隔：** 在途 `table_maintenance_job` 行 + `MAX(finished_at)`（§6.2）。
 
 **死 evaluate worker：** 若 picking JVM 在回调中途死亡，heartbeat 停止；db-scheduler dead execution 处理解锁 / 重新调度实例。
-**不**取消已提交的 Spark job（作业框架拥有该生命周期）；`job_id` 仍阻止第二次 submit，直到 job 完成或取消。
+**不**取消已提交的 Spark job（作业框架拥有该生命周期）；在途行（`finished_at IS NULL`）仍阻止第二次 submit，直到 job 完成或取消。
 
 | 表                                      | 角色                                                                                           |
 | -------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **评估什么**、`schedule`（§5.7）与非认证 `jobOptions`（§5.8）                                        |
 | `scheduled_tasks`                      | 每 `(table, policy)` 短 evaluate 租约                                                            |
-| `table_maintenance_job`                | 仅 `job_id` / `last_job_id`                                                                   |
+| `table_maintenance_job`                | 按运行 Validation JSON + submit 门控（§6.2）                                                     |
 | SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.9）；无 `tms_credential` 表                                             |
 | `user_meta`                            | 启用授权时的内置 `tms` 用户（§5.6）                                                                      |
-| `job_validation_metric`                | Validation UI 快照（§6.4）                                                                       |
 
 认证材料用 SecretManager。Job-template **参数**留在策略挂载上。
 
@@ -738,90 +730,60 @@ Node A / B / C db-scheduler 轮询
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 ```
 
-### 6.2 精简作业指针表
+### 6.2 按运行维护作业表（`table_maintenance_job`）
 
 **表名：** `table_maintenance_job`
 
-| 列                  | 类型                         | 说明                                                                     |
-| ------------------ | -------------------------- | ---------------------------------------------------------------------- |
-| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                            |
-| `table_id`         | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（§5.5.4 import 后）                                    |
-| `policy_id`        | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                |
-| `job_id`           | `BIGINT UNSIGNED NULL`     | 在途 `job_run_meta.job_run_id`；无则为 null                                  |
-| `last_job_id`      | `BIGINT UNSIGNED NULL`     | 该策略最近完成的 job；min-interval 经 `job_validation_metric.finished_at`（§6.4）  |
+每个 Spark `job_run_id` 一行。同一张表同时服务 Automate **Jobs → Validation**（前后 JSON）与 submit 门控
+（在途行 + `minIntervalMs`）。`minIntervalMs` 以本行 `finished_at` 作为任务结束时间，不用 `job_run_meta.job_finished_at`。
 
-**主键：**（`metalake_id`, `table_id`, `policy_id`）。不存 `table_identifier` 或 `schema_id` ——
-`table_id` 已足够，并与表级 `policy_relation_meta.metadata_object_id` 对齐。
+| 列                | 类型                         | 说明                                                                    |
+| ---------------- | -------------------------- | --------------------------------------------------------------------- |
+| `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`；主键                                          |
+| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                           |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（§5.5.4 import 后）                                   |
+| `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                               |
+| `before_metrics` | `MEDIUMTEXT NULL`          | Submit 时采集的 JSON 对象字符串                                                |
+| `after_metrics`  | `MEDIUMTEXT NULL`          | Job 终态后的 JSON 对象字符串；待处理时为 null                                        |
+| `finished_at`    | `BIGINT UNSIGNED NULL`     | 任务结束时间（epoch 毫秒）；**null = 在途**；驱动 `minIntervalMs`                      |
+
+**主键：**（`job_run_id`）。不存 `table_identifier` 或 `schema_id` —— `table_id` 已足够，并与表级
+`policy_relation_meta.metadata_object_id` 对齐。
 
 无 `evaluate_pending`、无 `IDLE`/`RUNNING`、无应用租约 heartbeat —— 这些是 `scheduled_tasks` 的事。
-
-**生命周期：**
-
-1. 首次 evaluate 可 `INSERT` 指针行（若缺失）（或 commit 路径 upsert 空行）。
-2. Submit 时：设置 `job_id`。
-3. 该 job 完成时（状态轮询或 job 监听器）：`last_job_id = job_id`；`job_id = null`。
-4. Submit 前门控按 §5.5.3 使用 `job_id` / `last_job_id`。
-
-示意 MySQL DDL：
-
-```sql
-CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
-    `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
-    `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta',
-    `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
-    `job_id` BIGINT(20) UNSIGNED NULL COMMENT 'in-flight job_run_id',
-    `last_job_id` BIGINT(20) UNSIGNED NULL COMMENT 'last finished job_run_id',
-    PRIMARY KEY (`metalake_id`, `table_id`, `policy_id`),
-    KEY `idx_tmj_job_id` (`job_id`),
-    KEY `idx_tmj_table_id` (`table_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'TMS slim Spark job pointers per table policy';
-```
-
-### 6.3 表删除生命周期
-
-Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`：
-
-1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
-2. 删除 `task_instance` 包含该 `table_id` 的 `tms-evaluate` 实例。
-3. 对 `(metalake_id, table_id)` `DELETE` `table_maintenance_job`。
-4. 在途 Spark job **不**由此钩子取消；运维按需用 Jobs API。`job_validation_metric` 保留遵循 job GC 策略。
-
-**表重命名不在范围。**
-
-### 6.4 Job Validation（`job_validation_metric`）
-
-Automate **Jobs → Validation** 为**特定** `job_run_id` 显示前后指标。TMS **每 job 一行**（非每指标一行）。
-`minIntervalMs` 以本表 `finished_at` 作为任务结束时间（`last_job_id` → `job_validation_metric.finished_at`），
-不用 `job_run_meta.job_finished_at`。
 
 | 存储                      | 角色                                     | 适合 Jobs Validation?            |
 | ----------------------- | -------------------------------------- | ------------------------------ |
 | `statistic_meta`        | 每对象 + 名称的最新统计                          | 否 — 仅当前值                       |
 | `table_metrics`         | 按 `metric_ts` 追加时序                     | 否 — 非按 `job_run_id`            |
 | `job_metrics`           | Job 范围 optimizer 时序                    | 否 — 非表前后 UI                    |
-| `job_validation_metric` | 每 job 冻结前后 JSON                        | **是**                          |
+| `table_maintenance_job` | 每 job 冻结前后 JSON                        | **是**                          |
 
-**表名：** `job_validation_metric`
+**Submit 门控**（给定 `(metalake_id, table_id, policy_id)`）：
 
-| 列                | 类型                         | 说明                                                                    |
-| ---------------- | -------------------------- | --------------------------------------------------------------------- |
-| `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`；主键                                          |
-| `before_metrics` | `MEDIUMTEXT NULL`          | Submit 时采集的 JSON 对象字符串                                                |
-| `after_metrics`  | `MEDIUMTEXT NULL`          | Job 终态后的 JSON 对象字符串；待处理时为 null                                        |
-| `finished_at`    | `BIGINT UNSIGNED NULL`     | 任务结束时间（epoch 毫秒）；待处理时为 null；驱动 `minIntervalMs`                        |
+1. **在途：** `SELECT 1 … WHERE finished_at IS NULL LIMIT 1` —— 若存在则跳过 submit。
+2. **最小间隔：** `SELECT MAX(finished_at) …` 与解析的 `minIntervalMs`（§8.3）比较。
 
-**主键：**（`job_run_id`）。
+**生命周期：**
+
+1. Submit 时：`INSERT` 行（`job_run_id`、键、`before_metrics`）；`finished_at` 保持 null。
+2. Job 终态（状态轮询或 job 监听器）：`UPDATE after_metrics` 与 `finished_at`。
+
+示意 MySQL DDL：
 
 ```sql
-CREATE TABLE IF NOT EXISTS `job_validation_metric` (
+CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
     `job_run_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'job run id',
+    `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
+    `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta',
+    `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
     `before_metrics` MEDIUMTEXT NULL COMMENT 'JSON object string at submit',
     `after_metrics` MEDIUMTEXT NULL COMMENT 'JSON object string after job; null while pending',
-    `finished_at` BIGINT(20) UNSIGNED NULL COMMENT 'maintenance task end time (epoch millis); null while pending',
-    PRIMARY KEY (`job_run_id`)
+    `finished_at` BIGINT(20) UNSIGNED NULL COMMENT 'maintenance task end time (epoch millis); null = in-flight',
+    PRIMARY KEY (`job_run_id`),
+    KEY `idx_tmj_table_policy_finished` (`metalake_id`, `table_id`, `policy_id`, `finished_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'per-job before/after validation snapshot for Automate Jobs UI';
+  COMMENT 'per-run TMS job record: Validation JSON + submit gates';
 ```
 
 **JSON 格式：** UTF-8 对象，指标键扁平存放，值为 number / string / boolean。可选顶层字段：
@@ -850,7 +812,16 @@ CREATE TABLE IF NOT EXISTS `job_validation_metric` (
 }
 ```
 
-**写入时机：** Submit 时 `INSERT` 写入 `before_metrics`；job 终态时 `UPDATE` `after_metrics` 与 `finished_at`。
+### 6.3 表删除生命周期
+
+Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`：
+
+1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
+2. 删除 `task_instance` 包含该 `table_id` 的 `tms-evaluate` 实例。
+3. 对 `(metalake_id, table_id)` `DELETE` `table_maintenance_job`。
+4. 在途 Spark job **不**由此钩子取消；运维按需用 Jobs API。行保留遵循 job GC 策略。
+
+**表重命名不在范围。**
 
 ---
 
@@ -951,8 +922,8 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 | `maintenance.manifest-rewrite.minIntervalMs` | 该表 manifest rewrite 最小间隔                     |
 | `maintenance.orphan-cleanup.minIntervalMs`   | 该表 orphan cleanup 最小间隔                       |
 
-管线在每次调度驱动调用时，用解析的 `minIntervalMs` 检查 `last_job_id` → `job_validation_metric.finished_at`（§5.5）。
-`table_maintenance_job` 上的 `job_id` 仅是进行中的 submission。策略内容仍拥有**触发阈值**（如 MSE）；间隔仅在 evaluate 运行
+管线在每次调度驱动调用时，用解析的 `minIntervalMs` 检查该 `(table_id, policy_id)` 的 `MAX(finished_at)`（§5.5）。
+在途行（`finished_at IS NULL`）阻止并发 submit。策略内容仍拥有**触发阈值**（如 MSE）；间隔仅在 evaluate 运行
 （调度器 pick 或 ops API）时限制成功 submit 的重复频率。
 
 表示例覆盖：
@@ -988,15 +959,15 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 ### 9.1 建议工作计划
 
-本设计交付进程内插件、IRC commit **入队**到 db-scheduler、按策略**短** evaluate pick、精简 `table_maintenance_job` 指针、
-`job_validation_metric`、`tms` 主体 + SecretManager 认证 / credential vending、策略 `jobOptions` 与 evaluate → submit 管线。
+本设计交付进程内插件、IRC commit **入队**到 db-scheduler、按策略**短** evaluate pick、按运行 `table_maintenance_job` 记录、
+`tms` 主体 + SecretManager 认证 / credential vending、策略 `jobOptions` 与 evaluate → submit 管线。
 
 | 阶段    | 工作项                                 | 说明                                                                                            |
 | ----- | ----------------------------------- | --------------------------------------------------------------------------------------------- |
 | 1     | 加载进程内插件                             | `TableMaintenanceRESTFeature`；启停 db-scheduler；`TmsPrincipalBootstrapListener`。                |
-| 2     | 内部 evaluate → submit 管线             | `MaintenanceEvaluateSubmitPipeline` + 作业指针门控；单元测试。                                            |
+| 2     | 内部 evaluate → submit 管线             | `MaintenanceEvaluateSubmitPipeline` + 按运行 submit 门控；单元测试。                                      |
 | 3     | db-scheduler evaluate 任务            | `tms-evaluate` 处理程序；`scheduled_tasks` 迁移；heartbeat（§5.5）。                                     |
-| 4     | 进程内 IRC 钩子（入队路径）                    | 调度实例（§5.4）；`table_maintenance_job` + validation（§6.2、§6.4）。                                   |
+| 4     | 进程内 IRC 钩子（入队路径）                    | 调度实例（§5.4）；`table_maintenance_job` 按运行行（§6.2）。                                               |
 | 5     | 加固                                  | 服务指标、优雅关闭、H2 路径测试、用户文档。                                                                       |
 | 6     | Optimizer CLI 替代 API                | §7 ops 资源。与 `gravitino-optimizer` 相同命令。                                                       |
 | 7     | TMS 主体 + SecretManager 认证           | `tms` 用户/角色（§5.6）；credential vending + none/basic/oauth/kerberos（§5.9）；策略 `schedule`（§5.7）+ `jobOptions`（§5.8）。 |
@@ -1032,21 +1003,21 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 #### 阶段 4 检查清单
 
 - [ ] 添加 `IcebergCommitEventHandler` 与主服务注册进程内回调 / SPI（§5.1.1 / §8.2）。
-- [ ] 为精简 **`table_maintenance_job`** 添加 EntityStore 迁移（§6.2）。
-- [ ] 为 **`job_validation_metric`** 添加 EntityStore 迁移（§6.4）。
+- [ ] 为 **`table_maintenance_job`** 添加 EntityStore 迁移（§6.2）。
 - [ ] IRC post-commit 按需 import 进 `table_meta`（§5.5.4），再以 `{metalake_id}:{table_id}:{policy_id}` 调度
       `tms-evaluate`；**不**在 commit 线程跑管线。不要加单独的 TMS 事件或 evaluate 状态表。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
-- [ ] IRC **drop** 钩子删除调度器实例 + 作业指针行（§6.3）。
-- [ ] Submit / job 完成：更新 `job_id` / `last_job_id`；写 `before_metrics` / `after_metrics` + `finished_at`（§6.4）。
-- [ ] 集成测试：commit 仅入队；pick 执行；`job_id` 防双 submit；drop 清理调度器 + 指针行。
+- [ ] IRC **drop** 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。
+- [ ] Submit / job 完成：`INSERT` / `UPDATE` `table_maintenance_job`（`before_metrics` /
+      `after_metrics` + `finished_at`）（§6.2）。
+- [ ] 集成测试：commit 仅入队；pick 执行；在途行防双 submit；drop 清理调度器 + 作业行。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
 #### 阶段 5 检查清单
 
 - [ ] 服务指标：入队数、pick 数、submit 数、dead-execution 恢复、失败。
 - [ ] 优雅关闭：entity store 关闭前停止 db-scheduler。
-- [ ] 更新面向用户的 TMS / optimizer 文档：调度器入队 + 精简作业指针 + Validation。
+- [ ] 更新面向用户的 TMS / optimizer 文档：调度器入队 + 按运行 `table_maintenance_job`。
 
 #### 阶段 6 检查清单
 
@@ -1074,15 +1045,15 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 | Classpath     | TMS 插件在主服务器 classpath；**不是** aux 隔离监听。                                                                           |
 | 触发            | **Commit 调度** `tms-evaluate`；db-scheduler pick（§5.4–§5.5）；`minIntervalMs` 仅运行时门控。                                |
 | 调度            | **db-scheduler** 拥有 `scheduled_tasks` 上短 evaluate 租约 + heartbeat（§5.5、§8.4）。                                     |
-| 作业指针          | 精简 `table_maintenance_job`（`table_id` + `policy_id`；仅 `job_id` / `last_job_id`）。                                 |
+| 作业记录          | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                         |
 | Import        | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.5.4）；非 Iceberg `registerTable`。                           |
 | Ops API       | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                           |
 | 管线            | 调度器 pick → 门控 → `Recommender` → Jobs；submit/skip 后释放 pick。                                                       |
-| Validation    | 每 `job_run_id` 一行 `job_validation_metric`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.4）。        |
-| Drop          | Drop 钩子删除调度器实例 + 作业指针行（§6.3）。重命名不在范围。                                                                            |
-| 多节点           | 跨节点 db-scheduler pick；`job_id` 阻止 Spark 双 submit。                                                                |
+| Validation    | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                           |
+| Drop          | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                              |
+| 多节点           | 跨节点 db-scheduler pick；在途行阻止 Spark 双 submit。                                                                   |
 | 策略            | 复用 metalake Policy API + `policy_meta`；`schedule`（§5.7）+ `jobOptions`；最近挂载优先（§5.8）。                            |
-| Job 边界        | Spark 在 job 框架（`job_run_meta` 是**运行快照**）；Validation 在 `job_validation_metric`。                                   |
+| Job 边界        | Spark 在 job 框架（`job_run_meta` 是**运行快照**）；Validation 在 `table_maintenance_job`。                                 |
 | 主体            | 自动化 Jobs 以 `tms` 运行；启用授权时由 `TmsPrincipalBootstrapListener` 在插件启动 + `CreateMetalakeEvent` 时 bootstrap（§5.6）。      |
 | 凭据            | 认证经 SecretManager（none/basic/oauth/kerberos）+ credential vending（§5.9）；不在策略 / 不在 `tms_credential`。               |
 | 安全            | Ops API 须表 WRITE。TMS 角色为 list + 表写 + run job 最小权限。无 commit-event 或 health 端点。                                    |
