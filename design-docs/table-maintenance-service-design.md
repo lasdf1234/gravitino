@@ -286,8 +286,8 @@ Node A / Node B / Node C  — each runs db-scheduler (§5.5)
 | -------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **What** to evaluate, `schedule` triggers (§5.7), and non-auth `jobOptions` (§5.8)            |
 | `scheduled_tasks`                      | Enqueue + pick + heartbeat for **short** evaluate (§5.5, §6.1)                                |
-| `table_maintenance_job`                | Per-run record: Validation JSON + `finished_at`; submit gates (§6.2)                        |
-| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.9); not a TMS-owned table                  |
+| `table_maintenance_job`                | Per-run record: Validation JSON + `finished_at`; submit gates (§6.2)                          |
+| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.9); not a TMS-owned table                   |
 | `user_meta`                            | Built-in metalake user `tms` when authorization is enabled (§5.6)                             |
 | `job_run_meta`                         | Spark job run **record** (status + `runtime_job_template` snapshot); not default config       |
 
@@ -332,7 +332,7 @@ Deployment:
 | `TmsPrincipalBootstrapListener`     | `EventListenerPlugin` on `CreateMetalakeEvent`; ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).            |
 | `TmsAuthConfigResolver`             | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.9).                                                   |
 | `TableMaintenanceJobStore`          | Read/write `table_maintenance_job` per-run rows; submit gates + Validation JSON (§6.2–§6.3).                                                 |
-| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: delete scheduler instances + `table_maintenance_job` rows (§6.3). Rename out of scope.                       |
+| `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: delete scheduler instances + `table_maintenance_job` rows (§6.3). Rename out of scope.                         |
 | Existing optimizer classes          | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for evaluate path.                                                 |
 | db-scheduler `scheduled_tasks`      | Per-(table,policy) evaluate lease. Not a substitute for `table_maintenance_job` or `job_run_meta`.                                           |
 
@@ -566,7 +566,7 @@ scheduled. The policy also defines **when to evaluate** — not only thresholds 
 `policy_meta` row, one `content.schedule` object; **not** two policy records just because both
 triggers are enabled):
 
-| Trigger    | Meaning                                    | Typical use                                       |
+| Trigger    | Meaning                                      | Typical use                                       |
 | ---------- | -------------------------------------------- | ------------------------------------------------- |
 | `onCommit` | After IRC commit, enqueue evaluate (`now`)   | Compaction on write-heavy tables                  |
 | `crontab`  | Periodic evaluate on a crontab expression    | Snapshot expiry, orphan cleanup, low-write tables |
@@ -596,11 +596,11 @@ Illustrative `content.schedule` (exact field names may be finalized with the Pol
 }
 ```
 
-| Field                 | UI                          | TMS runtime                                                                       |
-| --------------------- | --------------------------- | --------------------------------------------------------------------------------- |
-| `schedule.onCommit`   | Toggle “run on commit”      | IRC hook upserts `tms-evaluate` with `execution_time = now` (§5.4)                |
-| `schedule.crontab`    | Crontab picker              | After evaluate (or on policy enable), set next `scheduled_tasks.execution_time`   |
-| `schedule.timezone`   | Timezone for crontab display | Parse crontab when computing next due time                                     |
+| Field                 | UI                           | TMS runtime                                                                       |
+| --------------------- | ---------------------------- | --------------------------------------------------------------------------------- |
+| `schedule.onCommit`   | Toggle “run on commit”       | IRC hook upserts `tms-evaluate` with `execution_time = now` (§5.4)                |
+| `schedule.crontab`    | Crontab picker               | After evaluate (or on policy enable), set next `scheduled_tasks.execution_time`   |
+| `schedule.timezone`   | Timezone for crontab display | Parse crontab when computing next due time                                        |
 
 **Rules:**
 
@@ -826,14 +826,14 @@ One row per Spark `job_run_id`. The same table serves Automate **Jobs → Valida
 JSON) and submit gates (in-flight row + `minIntervalMs`). `minIntervalMs` uses `finished_at` on
 this row as the task end time, not `job_run_meta.job_finished_at`.
 
-| Column           | Type                       | Notes                                                                    |
-| ---------------- | -------------------------- | ------------------------------------------------------------------------ |
-| `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`; primary key                                   |
-| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                              |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after §5.5.4 import)                          |
-| `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                  |
-| `before_metrics` | `MEDIUMTEXT NULL`          | JSON object string captured at submit                                    |
-| `after_metrics`  | `MEDIUMTEXT NULL`          | JSON object string after job terminal status; null while pending         |
+| Column           | Type                       | Notes                                                                      |
+| ---------------- | -------------------------- | -------------------------------------------------------------------------- |
+| `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`; primary key                                     |
+| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                                |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after §5.5.4 import)                            |
+| `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                    |
+| `before_metrics` | `MEDIUMTEXT NULL`          | JSON object string captured at submit                                      |
+| `after_metrics`  | `MEDIUMTEXT NULL`          | JSON object string after job terminal status; null while pending           |
 | `finished_at`    | `BIGINT UNSIGNED NULL`     | Task end time (epoch millis); **null = in-flight**; drives `minIntervalMs` |
 
 **Primary key:** (`job_run_id`). No `table_identifier` or `schema_id` column — `table_id` is
@@ -1062,14 +1062,14 @@ per-policy **short** evaluate picks, per-run `table_maintenance_job` records,
 `tms` principal + SecretManager auth / credential vending, policy `jobOptions`, and evaluate →
 submit pipeline.
 
-| Phase | Work item                           | Notes                                                                                                      |
-| ----- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| 1     | Load the in-process plugin          | `TableMaintenanceRESTFeature`; start/stop db-scheduler; `TmsPrincipalBootstrapListener`.                   |
-| 2     | Internal evaluate → submit pipeline | `MaintenanceEvaluateSubmitPipeline` + per-run submit gates; unit tests.                                    |
-| 3     | db-scheduler evaluate tasks         | `tms-evaluate` handler; `scheduled_tasks` migration; heartbeats (§5.5).                                    |
-| 4     | In-process IRC hook (enqueue path)  | Schedule instances (§5.4); `table_maintenance_job` per-run rows (§6.2).                                    |
-| 5     | Hardening                           | Service metrics, graceful shutdown, H2 path tests, user docs.                                              |
-| 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                                               |
+| Phase | Work item                           | Notes                                                                                                                          |
+| ----- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | Load the in-process plugin          | `TableMaintenanceRESTFeature`; start/stop db-scheduler; `TmsPrincipalBootstrapListener`.                                       |
+| 2     | Internal evaluate → submit pipeline | `MaintenanceEvaluateSubmitPipeline` + per-run submit gates; unit tests.                                                        |
+| 3     | db-scheduler evaluate tasks         | `tms-evaluate` handler; `scheduled_tasks` migration; heartbeats (§5.5).                                                        |
+| 4     | In-process IRC hook (enqueue path)  | Schedule instances (§5.4); `table_maintenance_job` per-run rows (§6.2).                                                        |
+| 5     | Hardening                           | Service metrics, graceful shutdown, H2 path tests, user docs.                                                                  |
+| 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                                                                   |
 | 7     | TMS principal + SecretManager auth  | `tms` user/role (§5.6); credential vending + none/basic/oauth/kerberos (§5.9); policy `schedule` (§5.7) + `jobOptions` (§5.8). |
 
 #### Phase 1 checklist
@@ -1162,7 +1162,7 @@ submit pipeline.
 | Validation    | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Drop          | Drop hook deletes scheduler instances + `table_maintenance_job` rows (§6.3). Rename out of scope.                                          |
 | Multi-node    | db-scheduler pick across nodes; Spark double-submit blocked by in-flight row.                                                              |
-| Policy        | Reuses metalake Policy APIs + `policy_meta`; `schedule` (§5.7) + `jobOptions` on content; nearest attachment wins (§5.8).                |
+| Policy        | Reuses metalake Policy APIs + `policy_meta`; `schedule` (§5.7) + `jobOptions` on content; nearest attachment wins (§5.8).                  |
 | Job boundary  | Spark in job framework (`job_run_meta` is a **run snapshot**); Validation in `table_maintenance_job`.                                      |
 | Principal     | Automated Jobs run as `tms`; `TmsPrincipalBootstrapListener` on plugin start + `CreateMetalakeEvent` when authorization is enabled (§5.6). |
 | Credentials   | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.9); not policy / not `tms_credential`.                         |
