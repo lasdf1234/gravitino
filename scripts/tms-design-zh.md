@@ -69,12 +69,14 @@ Gravitino 表仅存储在途 / 最近完成的 Spark `job_id` 指针。optimizer
    **运行时门控**，使用 `last_job_id` → `job_validation_metric.finished_at`（§5.5、§6.4）。
 10. **专用 TMS 执行主体**：所有自动化维护（commit 后事件入队与定时策略到期）均以内置 metalake 用户 **`tms`**
     提交 Jobs，而非创建策略的运维人员（§5.6）。
-11. **策略上的作业模板参数**：非认证的 Spark / job-template 参数存放在维护策略内容
+11. **策略 evaluate 触发方式**：自动化维护在 `policy_version_info.content.schedule` 中配置
+    `onCommit` 和/或 `crontab`（§5.7）。同一策略一行即可同时启用两种触发；拆成两条 policy 仅因维护**类型**不同。
+12. **策略上的作业模板参数**：非认证的 Spark / job-template 参数存放在维护策略内容
     （`jobOptions` / 现有 `rewriteOptions`）。在 catalog / schema / table 挂载同类型策略；
-    **最近挂载优先**（table > schema > catalog）（§5.7）。
-12. **通过 SecretManager 管理认证凭据**：运行 Spark Jobs 所需的密码、令牌、访问密钥**不**存放在
+    **最近挂载优先**（table > schema > catalog）（§5.8）。
+13. **通过 SecretManager 管理认证凭据**：运行 Spark Jobs 所需的密码、令牌、访问密钥**不**存放在
     `policy_meta` 或 TMS 自有凭据表。敏感值通过 Gravitino **SecretManager**（URN / provider）引用，
-    与服务器配置的可插拔 secret 方案一致。可选启用：未启用 secret 方案时，明文 / 缺失 secret 仍可用（§5.8）。
+    与服务器配置的可插拔 secret 方案一致。可选启用：未启用 secret 方案时，明文 / 缺失 secret 仍可用（§5.9）。
 
 ---
 
@@ -92,7 +94,7 @@ Gravitino 表仅存储在途 / 最近完成的 Spark `job_id` 指针。optimizer
 6. **持有 db-scheduler pick 直到 Spark 完成**：evaluate 回调必须在 submit（或 skip）后返回。
    长 Spark 生命周期由 `job_id` 门控，而非 `picked` / `last_success`。
 7. **自动化 TMS 的按人用户模板**：手动 Automate Jobs UI 日后可存按用户默认值；自动化事件/定时运行始终使用
-   **`tms`** 主体与策略 `jobOptions`（§5.6–§5.7）。
+   **`tms`** 主体与策略 `jobOptions`（§5.6–§5.8）。
 
 ## 4. 方案调研
 
@@ -185,7 +187,7 @@ Spark 完成会把调度器线程绑在长作业上，已否决（非目标 #6�
 | --- | ------------------------------- | ------------------------------------------------- |
 | 优点  | 显式                              | 复用 `policy_meta` / `policy_relation_meta`；最近挂载已定义 |
 | 缺点  | 与策略并行的挂载 + 优先级 + UI；易漂移         | 认证材料见 §4.6.2，不放在此处                                |
-| 决策  | 否决                              | **选定**（§5.7）                                      |
+| 决策  | 否决                              | **选定**（§5.8）                                      |
 
 #### 4.6.2 认证信息
 
@@ -195,7 +197,7 @@ TMS Jobs 的 IRC 客户端认证与 credential-vending 所需 secret（密码、
 | --- | --------------------- | ----------------------------------- | ------------------------------------------------ |
 | 优点  | 与 Spark 选项同一张 map     | 显式 TMS 覆盖层                          | 可插拔 provider（file / Vault / KMS）；可选；与服务器 conf 共享 |
 | 缺点  | 策略广泛可读；secret 泄漏      | SecretManager 旁第二 keystore；无 KMS 路径 | 需为 TMS 主体 bootstrap secret                       |
-| 决策  | 否决                    | 否决                                  | **选定**（§5.8）                                     |
+| 决策  | 否决                    | 否决                                  | **选定**（§5.9）                                     |
 
 ---
 
@@ -248,10 +250,10 @@ Node A / Node B / Node C  — 各运行 db-scheduler (§5.5)
 
 | 表                                      | 角色                                                                                            |
 | -------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **评估什么**以及非认证 job-template 参数（`jobOptions`）（§5.7）                                             |
+| `policy_meta` / `policy_relation_meta` | **评估什么**、`schedule` 触发（§5.7）与非认证 `jobOptions`（§5.8）                                        |
 | `scheduled_tasks`                      | **短** evaluate 的入队 + pick + heartbeat（§5.5、§6.1）                                              |
 | `table_maintenance_job`                | 精简指针：仅 `job_id` / `last_job_id`（§6.2）                                                         |
-| SecretManager / SecretProvider         | 经 URN 的 TMS Spark / Iceberg **认证**材料（§5.8）；非 TMS 自有表                                          |
+| SecretManager / SecretProvider         | 经 URN 的 TMS Spark / Iceberg **认证**材料（§5.9）；非 TMS 自有表                                          |
 | `user_meta`                            | 启用授权时的内置 metalake 用户 `tms`（§5.6）                                                              |
 | `job_validation_metric`                | Automate Jobs Validation UI 的每作业前后指标（§6.4）                                                    |
 | `job_run_meta`                         | Spark 作业运行**记录**（状态 + `runtime_job_template` 快照）；非默认配置                                        |
@@ -290,7 +292,7 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
 | `MaintenanceEvaluateSubmitPipeline` | `ensureTableImported` → 门控 → `Recommender` → 以主体 `tms` 的 `JobSubmitter`（在调度器 pick **内**运行）。                                                  |
 | `GravitinoTableImportService`       | 经 `TableDispatcher.loadTable` 懒 import 进 `table_meta`（§5.5.4）；按 backend 解析 owner。                                                            |
 | `TmsPrincipalBootstrapListener`     | 监听 `CreateMetalakeEvent` 的 `EventListenerPlugin`；启用授权时确保 metalake 用户 `tms` + 内置角色（§5.6）。                                                     |
-| `TmsAuthConfigResolver`             | 解析 IRC 认证 + credential-vending Spark conf；经 SecretManager 加载 secret（§5.8）。                                                                   |
+| `TmsAuthConfigResolver`             | 解析 IRC 认证 + credential-vending Spark conf；经 SecretManager 加载 secret（§5.9）。                                                                   |
 | `TableMaintenanceJobStore`          | 读写精简 `table_maintenance_job`（`job_id` / `last_job_id`）（§6.2–§6.3）。                                                                           |
 | `JobValidationMetricStore`          | submit / job 完成时写读 `job_validation_metric`（§6.4）。                                                                                            |
 | `IcebergTableLifecycleHook`         | 进程内 IRC **drop** 钩子：删除调度器实例 + 作业指针行（§6.3）。重命名不在范围。                                                                                           |
@@ -367,8 +369,8 @@ db-scheduler（每个 TMS 节点）
         │     ├─ 若 job_id 仍为 QUEUED/STARTED → 跳过 submit；返回
         │     ├─ 否则应用最小间隔（last_job_id → job_validation_metric.finished_at 对比 minIntervalMs）
         │     ├─ Recommender.submitForStrategyName(...) → 触发通过时 JobSubmitter
-        │     ├─ 叠加该类型最近挂载策略的 jobOptions（§5.7）
-        │     ├─ 叠加 SecretManager 认证 + credential-vending conf；以 `tms` 提交（§5.6、§5.8）
+        │     ├─ 叠加该类型最近挂载策略的 jobOptions（§5.8）
+        │     ├─ 叠加 SecretManager 认证 + credential-vending conf；以 `tms` 提交（§5.6、§5.9）
         │     ├─ submit 时：设置 job_id；插入 job_validation_metric.before_metrics（§6.4）
         │     └─ 快速返回（释放 pick）
         └─ 死 JVM：错过 heartbeat → dead execution 处理程序重新调度 / 解锁实例
@@ -415,7 +417,7 @@ commit 时（及 evaluate 期间）读取 `policy_meta` 以获取 Active 策略�
 3. 若 `job_id` 仍在途（`QUEUED` / `STARTED`）：跳过 submit 并返回。
 4. 否则用 `last_job_id` → `job_validation_metric.finished_at` 与解析的 `minIntervalMs` 应用最小间隔（表属性 → 全局 conf → 代码默认；§8.3）。
 5. 策略触发（`Recommender`）。
-6. Submit 时：叠加最近策略 `jobOptions`（§5.7）与 SecretManager 认证 / credential-vending conf（§5.8）；以主体 `tms` 的 `runJob`；
+6. Submit 时：叠加最近策略 `jobOptions`（§5.8）与 SecretManager 认证 / credential-vending conf（§5.9）；以主体 `tms` 的 `runJob`；
    设置 `job_id`；插入 `before_metrics`（§6.4）。不要改 `last_job_id`。
 
 #### 5.5.4 懒加载 Gravitino 元数据 import（`table_meta`）
@@ -501,7 +503,63 @@ TMS 创建内置角色（示例名 `tms_maintenance`），在 **metalake** 上�
 
 若集群已运行 TMS 后 later 启用授权，下次插件启动会 bootstrap 缺失的 `tms` 用户与授权。
 
-### 5.7 策略上的作业模板参数（`policy_meta`）
+### 5.7 策略 evaluate 触发（`onCommit` + `crontab`）
+
+自动化 TMS **以 policy 为门控**：表上（直接或经 schema / catalog 继承）若无 Active、已启用的维护策略，
+commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除定义阈值与作业参数外，还定义**何时 evaluate**。
+
+**产品模型：** 两种自动化 evaluate 触发（可组合在**同一**策略上 —— **一条** `policy_meta` 记录、
+一个 `content.schedule` 对象；**不是**因为同时启用 onCommit 与 crontab 就要建两条 policy）：
+
+| 触发方式     | 含义                               | 典型场景                              |
+| ------------ | ---------------------------------- | ------------------------------------- |
+| `onCommit`   | IRC commit 后入队 evaluate（立即） | 写多读多的表 compaction               |
+| `crontab`    | 按 crontab 表达式周期性 evaluate   | snapshot-expiry、orphan cleanup、低写入表 |
+
+仅当维护**类型**不同（如 compaction + snapshot-expiry）时才用**两条** policy，不是因为两种触发方式。
+
+这与 `minIntervalMs`（§8.3）**不同**：`onCommit` / `crontab` 决定**何时 evaluate**；`minIntervalMs` 限制上次成功
+submit 后多久可再次 submit（查 `job_validation_metric.finished_at`）。
+
+**存储：** 触发配置在 **`policy_version_info.content`**，不在 `policy_meta` 列、也不在 `scheduled_tasks`。
+前端展示与编辑的 JSON 与 TMS 调度器读取的相同。
+
+示例 `content.schedule`（字段名可与 Policy API / UI 最终对齐）：
+
+```json
+{
+  "minDataFileMse": 1000,
+  "rewriteOptions": { "target-file-size-bytes": "536870912" },
+  "schedule": {
+    "onCommit": true,
+    "crontab": "0 2 * * *",
+    "timezone": "Asia/Shanghai"
+  }
+}
+```
+
+| 字段                  | 前端                         | TMS 运行时                                                              |
+| --------------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `schedule.onCommit`   | 「commit 后运行」开关        | IRC 钩子 upsert `tms-evaluate`，`execution_time = now`（§5.4）          |
+| `schedule.crontab`    | Crontab 选择器               | evaluate 结束或策略启用后，写入下次 `scheduled_tasks.execution_time`    |
+| `schedule.timezone`   | crontab 时区                 | 解析 crontab 计算下次到期时间                                           |
+
+**规则：**
+
+- 自动化维护应至少设置 `onCommit` 或 `crontab` 之一；可同时设置（同一 `task_instance = {metalake_id}:{table_id}:{policy_id}`）。
+- 仅 `crontab` — 常见于少 commit 的 snapshot-expiry / orphan-cleanup。
+- 仅 `onCommit` — 常见于流式 compaction；未达 `Recommender` 阈值仍 skip submit。
+- 运维 API（§7）为人工触发，不使用 `schedule`。
+
+**状态存放：**
+
+```text
+policy_version_info.content.schedule  →  前端展示；触发配置源
+scheduled_tasks.execution_time        →  下次 evaluate（运行时；来自 crontab 或 commit）
+table_maintenance_job + minIntervalMs →  在途 job + submit 冷却（不是 crontab）
+```
+
+### 5.8 策略上的作业模板参数（`policy_meta`）
 
 `job_run_meta.runtime_job_template` 是**运行快照**（该 Job 实际所用）。自动化维护的默认参数**不**存那里。
 
@@ -526,14 +584,14 @@ Submit 时：
 ```text
 job 模板基线 configs
   叠加最近挂载策略 jobOptions（仅非认证）
-  叠加 SecretManager 解析的认证 + credential-vending 键（§5.8）
+  叠加 SecretManager 解析的认证 + credential-vending 键（§5.9）
   → 以 tms 的 JobSubmitter.runJob(..., jobConfig)
 ```
 
 策略 create / alter **拒绝** `jobOptions` / `rewriteOptions` 中形似凭据的键（与属性掩码同名规则：`password`、`secret`、`token`、`access-key` 等）。
-这些键属于 SecretManager（§5.8），需要时以 URN 引用。
+这些键属于 SecretManager（§5.9），需要时以 URN 引用。
 
-### 5.8 Credential vending 与 IRC 认证（SecretManager）
+### 5.9 Credential vending 与 IRC 认证（SecretManager）
 
 自动化 TMS Jobs 以 Spark catalog 形式访问 Gravitino **Iceberg REST**。两个正交关注点：
 
@@ -579,7 +637,7 @@ job 模板 / submitter 根据 `jobConfig` 中的 catalog 名应用。
 | 属性                                                  | 必填          | SecretManager? | 说明                                                               |
 | --------------------------------------------------- | ----------- | -------------- | ---------------------------------------------------------------- |
 | *（省略 `rest.auth.type`）* 或 `rest.auth.type` = `none` | 否           | 否              | 无用户名 / 密码 / 令牌。                                                  |
-| §5.8 Credential vending 中的属性                        | 若使用 vending | 否（仅 header）    | 存储代发时仍设 `header.X-Iceberg-Access-Delegation=vended-credentials`。 |
+| §5.9 Credential vending 中的属性                        | 若使用 vending | 否（仅 header）    | 存储代发时仍设 `header.X-Iceberg-Access-Delegation=vended-credentials`。 |
 
 IRC 认证本身无需 SecretManager 条目。
 
@@ -592,7 +650,7 @@ IRC 认证本身无需 SecretManager 条目。
 | `rest.auth.type`             | 是           | 否              | `basic`。                                                   |
 | `rest.auth.basic.username`   | 是           | 否              | 自动化 TMS 运行：`tms`（或配置的 TMS 用户名）。                            |
 | `rest.auth.basic.password`   | 是           | **是**          | 该用户密码。存为 SecretManager secret；Job 配置仅在 submit 时持 URN 或解析值。 |
-| §5.8 Credential vending 中的属性 | 若使用 vending | —              | 同父节。                                                       |
+| §5.9 Credential vending 中的属性 | 若使用 vending | —              | 同父节。                                                       |
 
 #### 认证：oauth
 
@@ -605,7 +663,7 @@ IRC 认证本身无需 SecretManager 条目。
 | `oauth2-server-uri`          | client-credential 路径              | 否              | 令牌端点 URI。                                              |
 | `credential`                 | client-credential 路径              | **是**          | OAuth client id 与 secret，通常 `client_id:client_secret`。 |
 | `scope`                      | 推荐                                | 否              | OAuth scope（Iceberg 可默认 `catalog`）。                    |
-| §5.8 Credential vending 中的属性 | 若使用 vending                       | —              | 同父节。                                                   |
+| §5.9 Credential vending 中的属性 | 若使用 vending                       | —              | 同父节。                                                   |
 
 `credential` 优先 client-credential + SecretManager，避免 TMS 在策略或模板中嵌入长期 bearer token。
 
@@ -619,7 +677,7 @@ Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job �
 | Kerberos principal                                                           | 是                                                | 否                           | TMS Jobs 使用的服务主体（如 `tms/_HOST@REALM`）。                     |
 | Keytab 路径或 keytab 材料                                                         | 是                                                | keytab 字节/路径 secret 时 **是** | Keytab 不得放在 `policy_meta`。经 SecretManager 或策略内容外预置的主机路径引用。 |
 | `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | 按集群需要                                            | 否                           | Spark driver/executor 的集群 Kerberos 接线。                     |
-| §5.8 Credential vending 中的属性                                                 | 若使用 vending                                      | —                           | 同父节。Kerberos 认证 IRC；启用时存储访问仍用代发凭据。                         |
+| §5.9 Credential vending 中的属性                                                 | 若使用 vending                                      | —                           | 同父节。Kerberos 认证 IRC；启用时存储访问仍用代发凭据。                         |
 
 #### Submit 时解析
 
@@ -651,10 +709,10 @@ Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job �
 
 | 表                                      | 角色                                                                                           |
 | -------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **评估什么** + 非认证 `jobOptions`（§5.7）                                                            |
+| `policy_meta` / `policy_relation_meta` | **评估什么**、`schedule`（§5.7）与非认证 `jobOptions`（§5.8）                                        |
 | `scheduled_tasks`                      | 每 `(table, policy)` 短 evaluate 租约                                                            |
 | `table_maintenance_job`                | 仅 `job_id` / `last_job_id`                                                                   |
-| SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.8）；无 `tms_credential` 表                                             |
+| SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.9）；无 `tms_credential` 表                                             |
 | `user_meta`                            | 启用授权时的内置 `tms` 用户（§5.6）                                                                      |
 | `job_validation_metric`                | Validation UI 快照（§6.4）                                                                       |
 
@@ -941,7 +999,7 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 | 4     | 进程内 IRC 钩子（入队路径）                    | 调度实例（§5.4）；`table_maintenance_job` + validation（§6.2、§6.4）。                                   |
 | 5     | 加固                                  | 服务指标、优雅关闭、H2 路径测试、用户文档。                                                                       |
 | 6     | Optimizer CLI 替代 API                | §7 ops 资源。与 `gravitino-optimizer` 相同命令。                                                       |
-| 7     | TMS 主体 + SecretManager 认证           | `tms` 用户/角色（§5.6）；credential vending + none/basic/oauth/kerberos（§5.8）；策略 `jobOptions`（§5.7）。 |
+| 7     | TMS 主体 + SecretManager 认证           | `tms` 用户/角色（§5.6）；credential vending + none/basic/oauth/kerberos（§5.9）；策略 `schedule`（§5.7）+ `jobOptions`（§5.8）。 |
 
 #### 阶段 1 检查清单
 
@@ -1003,7 +1061,7 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 - [ ] 为 TMS IRC 认证 secret 接线 **SecretManager**（无 `tms_credential` 表）。可选：未启用 SecretManager 时明文 / 缺失 secret 仍可用。
 - [ ] 策略 create/alter 拒绝 `jobOptions` / `rewriteOptions` 中形似凭据的键。
 - [ ] Submit 路径：最近策略 `jobOptions`（table > schema > catalog）叠加模板基线；启用时加 credential-vending header；
-      解析 **none / basic / oauth / kerberos** 认证（§5.8）；以 `tms` 的 `runJob`。
+      解析 **none / basic / oauth / kerberos** 认证（§5.9）；以 `tms` 的 `runJob`。
 - [ ] 测试：关闭授权跳过用户插入；开启授权授予 `USE_CATALOG`、`USE_SCHEMA`、`PROBE_TABLE_LIKE`、`MODIFY_TABLE`、
       `VIEW_POLICY`、`USE_JOB_TEMPLATE`、`RUN_JOB`。
 - [ ] 测试：表挂载覆盖 catalog `jobOptions`；认证 secret 永不持久化到 `policy_meta`；`runtime_job_template` 脱敏密码 / 令牌 / keytab。
@@ -1023,10 +1081,10 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 | Validation    | 每 `job_run_id` 一行 `job_validation_metric`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.4）。        |
 | Drop          | Drop 钩子删除调度器实例 + 作业指针行（§6.3）。重命名不在范围。                                                                            |
 | 多节点           | 跨节点 db-scheduler pick；`job_id` 阻止 Spark 双 submit。                                                                |
-| 策略            | 复用 metalake Policy API + `policy_meta`；content 上 `jobOptions`；最近挂载优先（§5.7）。                                      |
+| 策略            | 复用 metalake Policy API + `policy_meta`；`schedule`（§5.7）+ `jobOptions`；最近挂载优先（§5.8）。                            |
 | Job 边界        | Spark 在 job 框架（`job_run_meta` 是**运行快照**）；Validation 在 `job_validation_metric`。                                   |
 | 主体            | 自动化 Jobs 以 `tms` 运行；启用授权时由 `TmsPrincipalBootstrapListener` 在插件启动 + `CreateMetalakeEvent` 时 bootstrap（§5.6）。      |
-| 凭据            | 认证经 SecretManager（none/basic/oauth/kerberos）+ credential vending（§5.8）；不在策略 / 不在 `tms_credential`。               |
+| 凭据            | 认证经 SecretManager（none/basic/oauth/kerberos）+ credential vending（§5.9）；不在策略 / 不在 `tms_credential`。               |
 | 安全            | Ops API 须表 WRITE。TMS 角色为 list + 表写 + run job 最小权限。无 commit-event 或 health 端点。                                    |
 | 许可证           | db-scheduler 为 **Apache 2.0**；无 LGPL 调度依赖。                                                                       |
 

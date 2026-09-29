@@ -82,15 +82,18 @@ pointers. The optimizer execution core runs in-process after a scheduler pick.
 10. **Dedicated TMS execution principal**: All automated maintenance (event enqueue after commit
     and timed policy due) submits Jobs as a built-in metalake user **`tms`**, not as the operator
     who created the policy (§5.6).
-11. **Job template parameters on policy**: Non-auth Spark / job-template parameters live in
+11. **Policy evaluate triggers on policy**: Automated maintenance uses `onCommit` and/or `crontab`
+    in `policy_version_info.content.schedule` (§5.7). One policy row holds both triggers when needed;
+    separate policies are for different maintenance **types**, not for separate trigger modes.
+12. **Job template parameters on policy**: Non-auth Spark / job-template parameters live in
     maintenance policy content (`jobOptions` / existing `rewriteOptions`). Attach the same policy
     type at catalog / schema / table; **nearest attachment wins** (table > schema > catalog)
-    (§5.7).
-12. **Auth credentials via SecretManager**: Passwords, tokens, and access keys used to run Spark
+    (§5.8).
+13. **Auth credentials via SecretManager**: Passwords, tokens, and access keys used to run Spark
     Jobs are **not** stored in `policy_meta` or a TMS-owned credential table. Sensitive values are
     referenced through Gravitino **SecretManager** (URN / provider), aligned with the pluggable
     secret approach for server config. Opt-in: plaintext / missing secrets still work when the
-    secret solution is not enabled (§5.8).
+    secret solution is not enabled (§5.9).
 
 ---
 
@@ -114,7 +117,7 @@ pointers. The optimizer execution core runs in-process after a scheduler pick.
    (or skip). Long Spark lifetimes are gated by `job_id`, not by `picked` / `last_success`.
 7. **Per-human-user templates for automated TMS**: Manual Automate Jobs UI may later store
    per-user defaults; automated event/timed runs always use the **`tms`** principal and policy
-   `jobOptions` (§5.6–§5.7).
+   `jobOptions` (§5.6–§5.8).
 
 ## 4. Solution Investigations
 
@@ -216,7 +219,7 @@ Non-auth Spark / job-template parameters (for example executor memory, shuffle p
 | -------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------- |
 | Pros     | Explicit                                                      | Reuses `policy_meta` / `policy_relation_meta`; nearest attachment already defined |
 | Cons     | Parallel attachment + precedence + UI beside policies; drifts | Auth material belongs in §4.6.2, not here                                         |
-| Decision | Rejected                                                      | **Chosen** (§5.7)                                                                 |
+| Decision | Rejected                                                      | **Chosen** (§5.8)                                                                 |
 
 #### 4.6.2 Authentication credentials
 
@@ -227,7 +230,7 @@ keytabs, and similar).
 | -------- | ------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------- |
 | Pros     | One map with Spark options                 | Explicit TMS overlay                              | Pluggable providers (file / Vault / KMS); opt-in; shared with server conf |
 | Cons     | Policies are widely readable; secrets leak | Second keystore beside SecretManager; no KMS path | Needs bootstrap for TMS principal secrets                                 |
-| Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.8)                                                         |
+| Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.9)                                                         |
 
 ---
 
@@ -282,10 +285,10 @@ Node A / Node B / Node C  — each runs db-scheduler (§5.5)
 
 | Table                                  | Role                                                                                          |
 | -------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **What** to evaluate **and** non-auth job-template parameters (`jobOptions`) (§5.7)           |
+| `policy_meta` / `policy_relation_meta` | **What** to evaluate, `schedule` triggers (§5.7), and non-auth `jobOptions` (§5.8)            |
 | `scheduled_tasks`                      | Enqueue + pick + heartbeat for **short** evaluate (§5.5, §6.1)                                |
 | `table_maintenance_job`                | Slim pointer: `job_id` / `last_job_id` only (§6.2)                                            |
-| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.8); not a TMS-owned table                   |
+| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.9); not a TMS-owned table                  |
 | `user_meta`                            | Built-in metalake user `tms` when authorization is enabled (§5.6)                             |
 | `job_validation_metric`                | Per-job before/after metrics for Automate Jobs Validation UI (§6.4)                           |
 | `job_run_meta`                         | Spark job run **record** (status + `runtime_job_template` snapshot); not default config       |
@@ -329,7 +332,7 @@ Deployment:
 | `MaintenanceEvaluateSubmitPipeline` | `ensureTableImported` → gates → `Recommender` → `JobSubmitter` as principal `tms` (runs **inside** a scheduler pick).                        |
 | `GravitinoTableImportService`       | Lazy import into `table_meta` via `TableDispatcher.loadTable` (§5.5.4); backend-aware owner resolution.                                      |
 | `TmsPrincipalBootstrapListener`     | `EventListenerPlugin` on `CreateMetalakeEvent`; ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).            |
-| `TmsAuthConfigResolver`             | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.8).                                                   |
+| `TmsAuthConfigResolver`             | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.9).                                                   |
 | `TableMaintenanceJobStore`          | Read/write slim `table_maintenance_job` (`job_id` / `last_job_id`) (§6.2–§6.3).                                                              |
 | `JobValidationMetricStore`          | Write/read `job_validation_metric` on submit / job complete (§6.4).                                                                          |
 | `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: delete scheduler instances + job pointer rows (§6.3). Rename out of scope.                                     |
@@ -414,8 +417,8 @@ db-scheduler (every TMS node)
         │     ├─ if job_id still QUEUED/STARTED → skip submit; return
         │     ├─ else apply min-interval (last_job_id → job_validation_metric.finished_at vs minIntervalMs)
         │     ├─ Recommender.submitForStrategyName(...) → JobSubmitter when trigger passes
-        │     ├─ overlay jobOptions from nearest attached policy of that type (§5.7)
-        │     ├─ overlay SecretManager auth + credential-vending conf; submit as `tms` (§5.6, §5.8)
+        │     ├─ overlay jobOptions from nearest attached policy of that type (§5.8)
+        │     ├─ overlay SecretManager auth + credential-vending conf; submit as `tms` (§5.6, §5.9)
         │     ├─ on submit: set job_id; insert job_validation_metric.before_metrics (§6.4)
         │     └─ return quickly (release pick)
         └─ dead JVM: missed heartbeats → dead execution handler reschedules / unlocks instance
@@ -465,8 +468,8 @@ namespace; this table is per-table, not per-schema.
 4. Otherwise apply min-interval using `last_job_id` → `job_validation_metric.finished_at` and the
    resolved `minIntervalMs` (table prop → global conf → code default; §8.3).
 5. Policy trigger (`Recommender`).
-6. On submit: overlay nearest-policy `jobOptions` (§5.7) and SecretManager auth / credential-vending
-   conf (§5.8); `runJob` as principal `tms`; set `job_id`; insert `before_metrics` (§6.4).
+6. On submit: overlay nearest-policy `jobOptions` (§5.8) and SecretManager auth / credential-vending
+   conf (§5.9); `runJob` as principal `tms`; set `job_id`; insert `before_metrics` (§6.4).
    Do not change `last_job_id`.
 
 #### 5.5.4 Lazy Gravitino metadata import (`table_meta`)
@@ -559,7 +562,70 @@ Do **not** grant `MANAGE_USERS`, `CREATE_CATALOG`, or `MANAGE_GRANTS`.
 If authorization is later enabled on a cluster that already had TMS running, the next plugin start
 bootstraps missing `tms` users and grants.
 
-### 5.7 Job template parameters on policy (`policy_meta`)
+### 5.7 Policy evaluate triggers (`onCommit` + `crontab`)
+
+Automated TMS is **policy-gated**: without an Active, enabled maintenance policy attached to the
+table (directly or via schema / catalog), commit events do nothing and no crontab evaluate is
+scheduled. The policy also defines **when to evaluate** — not only thresholds and job parameters.
+
+**Product model:** two automated evaluate triggers (combinable on the **same** policy — **one**
+`policy_meta` row, one `content.schedule` object; **not** two policy records just because both
+triggers are enabled):
+
+| Trigger    | Meaning                                    | Typical use                                       |
+| ---------- | -------------------------------------------- | ------------------------------------------------- |
+| `onCommit` | After IRC commit, enqueue evaluate (`now`)   | Compaction on write-heavy tables                  |
+| `crontab`  | Periodic evaluate on a crontab expression    | Snapshot expiry, orphan cleanup, low-write tables |
+
+Use **two policies** only when maintenance **types** differ (for example compaction +
+snapshot-expiry), not because `onCommit` and `crontab` are both set on one policy.
+
+These are **not** the same as `minIntervalMs` (§8.3): `onCommit` / `crontab` decide **when
+evaluate runs**; `minIntervalMs` caps how soon another **successful submit** may repeat after the
+last finished job (`job_validation_metric.finished_at`).
+
+**Storage:** trigger configuration lives in **`policy_version_info.content`**, not in `policy_meta`
+columns and not in `scheduled_tasks`. The UI reads and writes the same JSON the TMS scheduler
+uses.
+
+Illustrative `content.schedule` (exact field names may be finalized with the Policy API / UI):
+
+```json
+{
+  "minDataFileMse": 1000,
+  "rewriteOptions": { "target-file-size-bytes": "536870912" },
+  "schedule": {
+    "onCommit": true,
+    "crontab": "0 2 * * *",
+    "timezone": "Asia/Shanghai"
+  }
+}
+```
+
+| Field                 | UI                          | TMS runtime                                                                       |
+| --------------------- | --------------------------- | --------------------------------------------------------------------------------- |
+| `schedule.onCommit`   | Toggle “run on commit”      | IRC hook upserts `tms-evaluate` with `execution_time = now` (§5.4)                |
+| `schedule.crontab`    | Crontab picker              | After evaluate (or on policy enable), set next `scheduled_tasks.execution_time`   |
+| `schedule.timezone`   | Timezone for crontab display | Parse crontab when computing next due time                                     |
+
+**Rules:**
+
+- At least one of `onCommit` or `crontab` should be set for automated maintenance; both may be set
+  on the same policy (same `task_instance = {metalake_id}:{table_id}:{policy_id}`).
+- `crontab` only — common for snapshot-expiry / orphan-cleanup on tables with few commits.
+- `onCommit` only — common for streaming compaction; evaluate still skips submit when
+  `Recommender` thresholds fail.
+- Manual ops APIs (§7) are a separate, operator-initiated path and do not use `schedule`.
+
+**Where state lives:**
+
+```text
+policy_version_info.content.schedule  →  what the UI shows; source of truth for triggers
+scheduled_tasks.execution_time        →  next evaluate pick (runtime; from crontab or commit)
+table_maintenance_job + minIntervalMs →  in-flight job + submit cooldown (not crontab)
+```
+
+### 5.8 Job template parameters on policy (`policy_meta`)
 
 `job_run_meta.runtime_job_template` is a **run snapshot** (what that Job actually used). Default
 parameters for automated maintenance are **not** stored there.
@@ -589,15 +655,15 @@ At submit:
 ```text
 job template base configs
   overlay nearest attached policy jobOptions  (non-auth only)
-  overlay SecretManager-resolved auth + credential-vending keys (§5.8)
+  overlay SecretManager-resolved auth + credential-vending keys (§5.9)
   → JobSubmitter.runJob(..., jobConfig) as tms
 ```
 
 Policy create / alter **rejects** credential-shaped keys in `jobOptions` / `rewriteOptions`
 (same name rules as property masking: `password`, `secret`, `token`, `access-key`, and similar).
-Those keys belong in SecretManager (§5.8), referenced by URN where needed.
+Those keys belong in SecretManager (§5.9), referenced by URN where needed.
 
-### 5.8 Credential vending and IRC authentication (SecretManager)
+### 5.9 Credential vending and IRC authentication (SecretManager)
 
 Automated TMS Jobs talk to Gravitino **Iceberg REST** as Spark catalogs. Two orthogonal concerns:
 
@@ -650,7 +716,7 @@ No IRC client authentication (typical `simple` / open IRC in lab).
 | Property                                                 | Required         | SecretManager?   | Description                                                                               |
 | -------------------------------------------------------- | ---------------- | ---------------- | ----------------------------------------------------------------------------------------- |
 | *(omit `rest.auth.type`)* or `rest.auth.type` = `none`   | no               | no               | No username / password / token.                                                           |
-| Credential-vending properties in §5.8 Credential vending | if using vending | no (header only) | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
+| Credential-vending properties in §5.9 Credential vending | if using vending | no (header only) | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
 
 No SecretManager entries are required for IRC auth itself.
 
@@ -664,7 +730,7 @@ the maintenance principal (usually user `tms` when authorization is on).
 | `rest.auth.type`                                         | yes              | no             | `basic`.                                                                                                               |
 | `rest.auth.basic.username`                               | yes              | no             | For automated TMS runs: `tms` (or the configured TMS username).                                                        |
 | `rest.auth.basic.password`                               | yes              | **yes**        | Password for that user. Store as a SecretManager secret; Job config holds a URN or resolved value at submit time only. |
-| Credential-vending properties in §5.8 Credential vending | if using vending | —              | Same as parent section.                                                                                                |
+| Credential-vending properties in §5.9 Credential vending | if using vending | —              | Same as parent section.                                                                                                |
 
 #### Auth: oauth
 
@@ -677,7 +743,7 @@ OAuth2 client credentials or bearer token against Gravitino IRC.
 | `oauth2-server-uri`                                      | for client-credential path                | no             | Token endpoint URI.                                                                |
 | `credential`                                             | for client-credential path                | **yes**        | OAuth client id and secret, typically `client_id:client_secret`.                   |
 | `scope`                                                  | recommended                               | no             | OAuth scope (Iceberg may default to `catalog` if omitted).                         |
-| Credential-vending properties in §5.8 Credential vending | if using vending                          | —              | Same as parent section.                                                            |
+| Credential-vending properties in §5.9 Credential vending | if using vending                          | —              | Same as parent section.                                                            |
 
 Prefer client-credential + SecretManager for `credential` so TMS does not embed long-lived bearer
 tokens in policy or templates.
@@ -693,7 +759,7 @@ runtime must be able to obtain a TGT for the TMS service principal.
 | Kerberos principal                                                           | yes                                                                     | no                                     | Service principal used by TMS Jobs (for example `tms/_HOST@REALM`).                                                   |
 | Keytab path or keytab material                                               | yes                                                                     | **yes** for keytab bytes / path secret | Keytab must not live in `policy_meta`. Reference via SecretManager or a host path provisioned outside policy content. |
 | `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | as required by the cluster                                              | no                                     | Cluster Kerberos wiring for the Spark driver/executors.                                                               |
-| Credential-vending properties in §5.8 Credential vending                     | if using vending                                                        | —                                      | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled.     |
+| Credential-vending properties in §5.9 Credential vending                     | if using vending                                                        | —                                      | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled.     |
 
 #### Resolution at submit
 
@@ -730,10 +796,10 @@ finishes or is cancelled.
 
 | Table                                  | Role                                                                                         |
 | -------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **What** to evaluate + non-auth `jobOptions` (§5.7)                                          |
+| `policy_meta` / `policy_relation_meta` | **What** to evaluate, `schedule` (§5.7), and non-auth `jobOptions` (§5.8)                    |
 | `scheduled_tasks`                      | Short evaluate lease per `(table, policy)`                                                   |
 | `table_maintenance_job`                | `job_id` / `last_job_id` only                                                                |
-| SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.8); no `tms_credential` table                                 |
+| SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.9); no `tms_credential` table                                 |
 | `user_meta`                            | Built-in `tms` user when authorization is enabled (§5.6)                                     |
 | `job_validation_metric`                | Validation UI snapshots (§6.4)                                                               |
 
@@ -1032,7 +1098,7 @@ submit pipeline.
 | 4     | In-process IRC hook (enqueue path)  | Schedule instances (§5.4); `table_maintenance_job` + validation (§6.2, §6.4).                              |
 | 5     | Hardening                           | Service metrics, graceful shutdown, H2 path tests, user docs.                                              |
 | 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                                               |
-| 7     | TMS principal + SecretManager auth  | `tms` user/role (§5.6); credential vending + none/basic/oauth/kerberos (§5.8); policy `jobOptions` (§5.7). |
+| 7     | TMS principal + SecretManager auth  | `tms` user/role (§5.6); credential vending + none/basic/oauth/kerberos (§5.9); policy `schedule` (§5.7) + `jobOptions` (§5.8). |
 
 #### Phase 1 checklist
 
@@ -1103,7 +1169,7 @@ submit pipeline.
 - [ ] Policy create/alter rejects credential-shaped keys in `jobOptions` / `rewriteOptions`.
 - [ ] Submit path: nearest policy `jobOptions` (table > schema > catalog) overlay template base;
       add credential-vending header when enabled; resolve auth for **none / basic / oauth /
-      kerberos** (§5.8); `runJob` as `tms`.
+      kerberos** (§5.9); `runJob` as `tms`.
 - [ ] Tests: authorization off skips user insert; authorization on grants `USE_CATALOG`,
       `USE_SCHEMA`, `PROBE_TABLE_LIKE`, `MODIFY_TABLE`, `VIEW_POLICY`, `USE_JOB_TEMPLATE`, `RUN_JOB`.
 - [ ] Tests: table attachment overrides catalog `jobOptions`; auth secrets never persist in
@@ -1124,10 +1190,10 @@ submit pipeline.
 | Validation    | `job_validation_metric` one row per `job_run_id` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.4).                         |
 | Drop          | Drop hook deletes scheduler instances + job pointer rows (§6.3). Rename out of scope.                                                      |
 | Multi-node    | db-scheduler pick across nodes; Spark double-submit blocked by `job_id`.                                                                   |
-| Policy        | Reuses metalake Policy APIs + `policy_meta`; `jobOptions` on content; nearest attachment wins (§5.7).                                      |
+| Policy        | Reuses metalake Policy APIs + `policy_meta`; `schedule` (§5.7) + `jobOptions` on content; nearest attachment wins (§5.8).                |
 | Job boundary  | Spark in job framework (`job_run_meta` is a **run snapshot**); Validation in `job_validation_metric`.                                      |
 | Principal     | Automated Jobs run as `tms`; `TmsPrincipalBootstrapListener` on plugin start + `CreateMetalakeEvent` when authorization is enabled (§5.6). |
-| Credentials   | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.8); not policy / not `tms_credential`.                         |
+| Credentials   | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.9); not policy / not `tms_credential`.                         |
 | Security      | Ops APIs require table WRITE. TMS role is least-privilege for list + table write + run job. No commit-event or health endpoint.            |
 | License       | db-scheduler is **Apache 2.0**; no LGPL scheduling dependency.                                                                             |
 
