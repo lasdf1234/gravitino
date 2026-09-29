@@ -86,9 +86,11 @@ pointers. The optimizer execution core runs in-process after a scheduler pick.
     maintenance policy content (`jobOptions` / existing `rewriteOptions`). Attach the same policy
     type at catalog / schema / table; **nearest attachment wins** (table > schema > catalog)
     (§5.7).
-12. **Auth credentials off policy**: Passwords, tokens, and access keys used to run Spark Jobs are
-    **not** stored in `policy_meta`. They live in a TMS-owned credential table keyed by metalake
-    (§5.8).
+12. **Auth credentials via SecretManager**: Passwords, tokens, and access keys used to run Spark
+    Jobs are **not** stored in `policy_meta` or a TMS-owned credential table. Sensitive values are
+    referenced through Gravitino **SecretManager** (URN / provider), aligned with the pluggable
+    secret approach for server config. Opt-in: plaintext / missing secrets still work when the
+    secret solution is not enabled (§5.8).
 
 ---
 
@@ -114,7 +116,9 @@ pointers. The optimizer execution core runs in-process after a scheduler pick.
    per-user defaults; automated event/timed runs always use the **`tms`** principal and policy
    `jobOptions` (§5.6–§5.7).
 8. **Auth material in `policy_meta`**: Policy content is readable by anyone with `VIEW_POLICY`.
-   Credentials must not be mixed into job options.
+   Credentials must not be mixed into job options; use SecretManager (§5.8).
+9. **Dedicated `tms_credential` table**: Rejected — a second keystore beside SecretManager would
+   drift and ignore the pluggable SecretProvider / KMS path.
 
 ## 4. Solution Investigations
 
@@ -212,8 +216,8 @@ for job pointers only.
 | Extra table keyed by catalog / schema / table | Explicit | Parallel attachment + precedence + UI beside policies; drifts | Rejected |
 | Policy content `jobOptions` (Chosen) | Reuses `policy_meta` / `policy_relation_meta`; nearest attachment already defined | Policy APIs must reject auth keys | **Chosen** (§5.7) |
 | Auth keys in policy `jobOptions` | One map | Policies are widely readable; secrets leak | Rejected |
-| Catalog Secret Manager bindings only | Reuses secrets | Catalog FileIO secrets ≠ TMS Spark overlay; would duplicate per catalog | Rejected as the TMS overlay |
-| `tms_credential` per metalake (Chosen) | Matches `tms` principal; one overlay per metalake | Extra table | **Chosen** for auth keys (§5.8) |
+| Dedicated `tms_credential` table | Explicit TMS overlay | Second keystore beside SecretManager; no KMS path | Rejected |
+| SecretManager + URN (Chosen) | Pluggable providers (file / Vault / KMS); opt-in; shared with server conf | Needs bootstrap for TMS principal secrets | **Chosen** (§5.8) |
 
 ---
 
@@ -250,7 +254,7 @@ Node A / Node B / Node C  — each runs db-scheduler (§5.5)
         ├─ MaintenanceEvaluateSubmitPipeline (short)
         │     ├─ gates via table_maintenance_job: in-flight job_id / minIntervalMs
         │     ├─ Recommender → JobSubmitter when trigger passes
-        │     ├─ jobConfig = template base ⊕ nearest policy jobOptions ⊕ tms_credential
+        │     ├─ jobConfig = template base ⊕ nearest policy jobOptions ⊕ SecretManager auth
         │     ├─ submit as principal `tms` (§5.6)
         │     ├─ on submit: set job_id; write job_validation_metric BEFORE (§6.4)
         │     └─ return (release pick; do NOT wait for Spark)
@@ -271,7 +275,7 @@ Node A / Node B / Node C  — each runs db-scheduler (§5.5)
 | `policy_meta` / `policy_relation_meta` | **What** to evaluate **and** non-auth job-template parameters (`jobOptions`) (§5.7)           |
 | `scheduled_tasks`                      | Enqueue + pick + heartbeat for **short** evaluate (§5.5, §6.1)                                |
 | `table_maintenance_job`                | Slim pointer: `job_id` / `last_job_id` only (§6.2)                                            |
-| `tms_credential`                       | TMS principal Spark / Iceberg **auth** keys per metalake (§5.8)                               |
+| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.8); not a TMS-owned table                   |
 | `user_meta`                            | Built-in metalake user `tms` when authorization is enabled (§5.6)                             |
 | `job_validation_metric`                | Per-job before/after metrics for Automate Jobs Validation UI (§6.4)                           |
 | `job_run_meta`                         | Spark job run **record** (status + `runtime_job_template` snapshot); not default config       |
@@ -314,7 +318,7 @@ Deployment:
 | `IcebergCommitEventHandler`         | IRC commit callback; schedules / reschedules per-policy evaluate tasks (§5.4).                                                                |
 | `MaintenanceEvaluateSubmitPipeline` | Gates → `Recommender` → `JobSubmitter` as principal `tms` (runs **inside** a scheduler pick).                                                 |
 | `TmsPrincipalBootstrap`             | Ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).                                                             |
-| `TmsCredentialStore`                | Read/write `tms_credential` for Spark / Iceberg auth keys (§5.8).                                                                             |
+| `TmsAuthConfigResolver`             | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.8).                                                    |
 | `TableMaintenanceJobStore`          | Read/write slim `table_maintenance_job` (`job_id` / `last_job_id`) (§6.2–§6.3).                                                               |
 | `JobValidationMetricStore`          | Write/read `job_validation_metric` on submit / job complete (§6.4).                                                                           |
 | `IcebergTableLifecycleHook`         | In-process IRC **drop** hook: delete scheduler instances + job pointer rows (§6.3). Rename out of scope.                                      |
@@ -397,7 +401,7 @@ db-scheduler (every TMS node)
         │     ├─ else apply min-interval (last_job_id → job_finished_at vs minIntervalMs)
         │     ├─ Recommender.submitForStrategyName(...) → JobSubmitter when trigger passes
         │     ├─ overlay jobOptions from nearest attached policy of that type (§5.7)
-        │     ├─ overlay tms_credential auth keys; submit as principal `tms` (§5.6, §5.8)
+        │     ├─ overlay SecretManager auth + credential-vending conf; submit as `tms` (§5.6, §5.8)
         │     ├─ on submit: set job_id; insert job_validation_metric BEFORE (§6.4)
         │     └─ return quickly (release pick)
         └─ dead JVM: missed heartbeats → dead execution handler reschedules / unlocks instance
@@ -414,7 +418,7 @@ not a long-held `picked` row. `last_success` on `scheduled_tasks` means “evalu
 | --------------------------------------------- | -------------------------------------- | --------------------------------------------- |
 | Due time / pick / heartbeat for evaluate      | `scheduled_tasks`                      | One instance per `(table, policy)`            |
 | Policy type, thresholds, jobOptions, attachments | `policy_meta` / `policy_relation_meta` | **What** to run + non-auth job params    |
-| Spark / Iceberg auth keys                     | `tms_credential`                       | TMS principal only; not in policy             |
+| Spark / Iceberg auth keys                     | SecretManager (URN)                    | TMS principal; not in policy                  |
 | In-flight / last Spark job ids                | `table_maintenance_job`                | **Whether** another submit is allowed         |
 | Job Validation before/after                   | `job_validation_metric`                | Automate Jobs UI (§6.4)                       |
 | Job run snapshot                              | `job_run_meta.runtime_job_template`    | What **this run** used; not default config    |
@@ -444,8 +448,9 @@ have no `table_meta` row).
 3. Otherwise apply min-interval using `last_job_id` → `job_run_meta.job_finished_at` and the resolved
    `minIntervalMs` (table prop → global conf → code default; §8.3).
 4. Policy trigger (`Recommender`).
-5. On submit: overlay nearest-policy `jobOptions` (§5.7) and `tms_credential` (§5.8); `runJob` as
-   principal `tms`; set `job_id`; write Validation BEFORE metrics (§6.4). Do not change `last_job_id`.
+5. On submit: overlay nearest-policy `jobOptions` (§5.7) and SecretManager auth / credential-vending
+   conf (§5.8); `runJob` as principal `tms`; set `job_id`; write Validation BEFORE metrics (§6.4).
+   Do not change `last_job_id`.
 
 ### 5.6 TMS execution principal (`tms`)
 
@@ -519,60 +524,125 @@ At submit:
 ```text
 job template base configs
   overlay nearest attached policy jobOptions  (non-auth only)
-  overlay tms_credential                      (auth keys only)
+  overlay SecretManager-resolved auth + credential-vending keys (§5.8)
   → JobSubmitter.runJob(..., jobConfig) as tms
 ```
 
 Policy create / alter **rejects** credential-shaped keys in `jobOptions` / `rewriteOptions`
 (same name rules as property masking: `password`, `secret`, `token`, `access-key`, and similar).
-Those keys belong in `tms_credential` (§5.8).
+Those keys belong in SecretManager (§5.8), referenced by URN where needed.
 
-### 5.8 TMS credential table (`tms_credential`)
+### 5.8 Credential vending and IRC authentication (SecretManager)
 
-Spark / Iceberg REST auth (for example `rest.auth.basic.password`, S3 access keys in Spark conf)
-must not sit in `policy_meta` (policies are widely readable) and must not sit in
-`job_template_meta` (shared template skeleton).
+Automated TMS Jobs talk to Gravitino **Iceberg REST** as Spark catalogs. Two orthogonal concerns:
 
-Because automated runs always use the **`tms`** principal, credentials are **per metalake**, not
-per human user.
+1. **Credential vending** — how Spark gets temporary storage credentials for table data.
+2. **IRC authentication** — how Spark authenticates to the Iceberg REST endpoint (`none` /
+   `basic` / `oauth` / `kerberos`).
 
-**Why a dedicated table instead of catalog Secret Manager bindings:** catalog secrets are
-metadata-object properties for engine FileIO. TMS Spark Jobs need a **principal-scoped overlay**
-that is the same for every table TMS maintains in that metalake. Binding secrets onto every catalog
-would duplicate auth and mix catalog-vendored credentials with TMS job runtime. A small TMS table
-keeps that overlay explicit.
+Sensitive values (passwords, client secrets, keytabs contents, static cloud keys if ever needed)
+must **not** sit in `policy_meta`. They are stored and resolved through Gravitino
+**SecretManager** / **SecretProvider** (URN references), the same pluggable path Jerry asked for
+on server JDBC passwords. The solution is **opt-in**: when SecretManager is not configured,
+non-secret auth properties and plaintext test values can still be used for local runs.
 
-**Table name:** `tms_credential`
+Keys below are written into the Job's `spark_conf` map (Iceberg REST catalog properties). Exact
+prefixing (`spark.sql.catalog.<name>.…`) is applied by the job template / submitter from the
+catalog name in `jobConfig`.
 
-| Column             | Type                       | Notes                                              |
-| ------------------ | -------------------------- | -------------------------------------------------- |
-| `metalake_id`      | `BIGINT UNSIGNED NOT NULL` | Metalake scope (TMS user is metalake-scoped)       |
-| `credential_key`   | `VARCHAR(256) NOT NULL`    | Spark / Iceberg conf key (auth only)               |
-| `credential_value` | `VARBINARY` / encrypted    | Stored encrypted at rest (same approach as IdP password hashing or Secret Manager material) |
-| `audit_info`       | `VARCHAR` / JSON           | Who last updated                                   |
+#### Credential vending
 
-**Primary key:** (`metalake_id`, `credential_key`).
+When maintenance Jobs should use **vended** storage credentials (recommended for production),
+configure these on the **Spark / Job** side for every auth mode:
 
-Illustrative MySQL DDL:
+| Property | Required | Description |
+| -------- | -------- | ----------- |
+| `header.X-Iceberg-Access-Delegation` | yes (for vending) | Must be `vended-credentials` so IRC returns temporary storage credentials on `loadTable`. |
+| `uri` | yes | Iceberg REST base URI (for example `http://host:9001/iceberg`). |
+| `type` | yes | `rest`. |
+| `warehouse` / `prefix` | as needed | Catalog warehouse or REST prefix when the deployment uses them. |
+| `io-impl` | usually yes | Iceberg FileIO implementation matching the warehouse scheme (for example `org.apache.iceberg.aws.s3.S3FileIO`). |
 
-```sql
-CREATE TABLE IF NOT EXISTS `tms_credential` (
-    `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
-    `credential_key` VARCHAR(256) NOT NULL COMMENT 'spark/iceberg auth conf key',
-    `credential_value` VARBINARY(4096) NOT NULL COMMENT 'encrypted secret material',
-    `audit_info` VARCHAR(256) NOT NULL COMMENT 'audit info',
-    PRIMARY KEY (`metalake_id`, `credential_key`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-  COMMENT 'TMS principal Spark/Iceberg credentials per metalake';
+**Do not** put long-lived `s3.access-key-id` / `s3.secret-access-key` (or equivalent) into TMS Job
+`spark_conf` when vending is enabled — the client must consume the vended block from IRC. Mixing
+static keys with the vending header causes engines to ignore temporary credentials.
+
+**Catalog-side** (operator configures on the Gravitino catalog / IRC, not in policy `jobOptions`):
+
+| Property | Required | Description |
+| -------- | -------- | ----------- |
+| `data-access` or IRC `header.X-Iceberg-Access-Delegation` defaults | recommended | Advertise `vended-credentials` to clients. |
+| `credential-providers` | yes for token vending | For example `s3-token`, `oss-token`, `adls-token`, `gcs-token` (see [Credential vending](../docs/security/credential-vending.md)). |
+| Provider-specific keys (`s3-role-arn`, `s3-region`, …) | yes per provider | Server-side keys used to mint temporary credentials. Secrets here also go through SecretManager / catalog secret bindings, not TMS policy content. |
+
+Auth mode subsections below only add IRC **client authentication** properties on top of this
+credential-vending baseline.
+
+#### Auth: none
+
+No IRC client authentication (typical `simple` / open IRC in lab).
+
+| Property | Required | SecretManager? | Description |
+| -------- | -------- | -------------- | ----------- |
+| *(omit `rest.auth.type`)* or `rest.auth.type` = `none` | no | no | No username / password / token. |
+| Credential-vending properties in §5.8 Credential vending | if using vending | no (header only) | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
+
+No SecretManager entries are required for IRC auth itself.
+
+#### Auth: basic
+
+HTTP Basic against Gravitino IRC (local users / basic authenticator). TMS Jobs authenticate as
+the maintenance principal (usually user `tms` when authorization is on).
+
+| Property | Required | SecretManager? | Description |
+| -------- | -------- | -------------- | ----------- |
+| `rest.auth.type` | yes | no | `basic`. |
+| `rest.auth.basic.username` | yes | no | For automated TMS runs: `tms` (or the configured TMS username). |
+| `rest.auth.basic.password` | yes | **yes** | Password for that user. Store as a SecretManager secret; Job config holds a URN or resolved value at submit time only. |
+| Credential-vending properties in §5.8 Credential vending | if using vending | — | Same as parent section. |
+
+#### Auth: oauth
+
+OAuth2 client credentials or bearer token against Gravitino IRC.
+
+| Property | Required | SecretManager? | Description |
+| -------- | -------- | -------------- | ----------- |
+| `rest.auth.type` | yes | no | `oauth2`. |
+| `token` | one of token **or** client-credential set | **yes** | Bearer access token path (short-lived; often minted at submit rather than stored). |
+| `oauth2-server-uri` | for client-credential path | no | Token endpoint URI. |
+| `credential` | for client-credential path | **yes** | OAuth client id and secret, typically `client_id:client_secret`. |
+| `scope` | recommended | no | OAuth scope (Iceberg may default to `catalog` if omitted). |
+| Credential-vending properties in §5.8 Credential vending | if using vending | — | Same as parent section. |
+
+Prefer client-credential + SecretManager for `credential` so TMS does not embed long-lived bearer
+tokens in policy or templates.
+
+#### Auth: kerberos
+
+Kerberos / SPNEGO style access when Gravitino authenticators include `kerberos`. Spark / Job
+runtime must be able to obtain a TGT for the TMS service principal.
+
+| Property | Required | SecretManager? | Description |
+| -------- | -------- | -------------- | ----------- |
+| `rest.auth.type` | yes (when Iceberg REST client exposes it) / Gravitino client `authType` | no | `kerberos` (or deployment-specific key used by the maintenance Job’s Iceberg / Gravitino client). |
+| Kerberos principal | yes | no | Service principal used by TMS Jobs (for example `tms/_HOST@REALM`). |
+| Keytab path or keytab material | yes | **yes** for keytab bytes / path secret | Keytab must not live in `policy_meta`. Reference via SecretManager or a host path provisioned outside policy content. |
+| `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | as required by the cluster | no | Cluster Kerberos wiring for the Spark driver/executors. |
+| Credential-vending properties in §5.8 Credential vending | if using vending | — | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled. |
+
+#### Resolution at submit
+
+```text
+1. Load non-auth spark_conf / jobOptions from template ⊕ nearest policy
+2. Select IRC auth mode (none | basic | oauth | kerberos) from TMS / metalake settings
+3. Add credential-vending keys when enabled (header.X-Iceberg-Access-Delegation=…)
+4. Resolve SecretManager URNs for password / oauth credential / keytab
+5. Redact secrets in logs and in persisted runtime_job_template snapshots
+6. runJob as principal tms
 ```
 
-**Ops:** a small TMS ops API (or server conf bootstrap for the first version) lets admins set /
-rotate keys. GET responses redact values. Only metalake admins / service admins may write
-credentials. At Job submit, TMS decrypts in-process and places values into `jobConfig`; they appear
-in `runtime_job_template` only if the Job framework already persists the resolved template —
-implementation **must redact** auth keys in stored snapshots and logs.
-
-Delete `tms_credential` rows when a metalake is dropped.
+No `tms_credential` table. Switching from a local file SecretProvider to Vault / cloud KMS is a
+provider configuration change only.
 
 ---
 
@@ -598,13 +668,13 @@ finishes or is cancelled.
 | `policy_meta` / `policy_relation_meta` | **What** to evaluate + non-auth `jobOptions` (§5.7)                                          |
 | `scheduled_tasks`                      | Short evaluate lease per `(table, policy)`                                                   |
 | `table_maintenance_job`                | `job_id` / `last_job_id` only                                                                |
-| `tms_credential`                       | TMS Spark / Iceberg auth keys per metalake (§5.8)                                            |
+| SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.8); no `tms_credential` table                                 |
 | `user_meta`                            | Built-in `tms` user when authorization is enabled (§5.6)                                     |
 | `job_validation_metric`                | Validation UI snapshots (§6.4)                                                               |
 
 **Why no fat `table_maintenance_state` / `table_maintenance_work`:** Scheduler already stores due time
-and lease heartbeat; the only extra TMS tables are slim job pointers (`table_maintenance_job`) and
-TMS auth overlay (`tms_credential`). Job-template **parameters** stay on policy attachments.
+and lease heartbeat; the only extra TMS table is slim job pointers (`table_maintenance_job`).
+Auth material uses SecretManager. Job-template **parameters** stay on policy attachments.
 
 ### 6.1 Evaluate lease (`scheduled_tasks`)
 
@@ -861,7 +931,8 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 This design delivers the in-process plugin, IRC commit **enqueue** onto db-scheduler,
 per-policy **short** evaluate picks, slim `table_maintenance_job` pointers, `job_validation_metric`,
-`tms` principal + `tms_credential`, policy `jobOptions`, and evaluate → submit pipeline.
+`tms` principal + SecretManager auth / credential vending, policy `jobOptions`, and evaluate →
+submit pipeline.
 
 | Phase | Work item                           | Notes                                                                                    |
 | ----- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -871,7 +942,7 @@ per-policy **short** evaluate picks, slim `table_maintenance_job` pointers, `job
 | 4     | In-process IRC hook (enqueue path)  | Schedule instances (§5.4); `table_maintenance_job` + validation (§6.2, §6.4).            |
 | 5     | Hardening                           | Service metrics, graceful shutdown, H2 path tests, user docs.                            |
 | 6     | Optimizer CLI replacement APIs      | Ops resources in §7. Same commands as `gravitino-optimizer`.                             |
-| 7     | TMS principal + credentials         | `tms` user/role (§5.6); `tms_credential` migration + overlay (§5.8); policy `jobOptions` (§5.7). |
+| 7     | TMS principal + SecretManager auth  | `tms` user/role (§5.6); credential vending + none/basic/oauth/kerberos (§5.8); policy `jobOptions` (§5.7). |
 
 #### Phase 1 checklist
 
@@ -933,15 +1004,16 @@ per-policy **short** evaluate picks, slim `table_maintenance_job` pointers, `job
 
 #### Phase 7 checklist
 
-- [ ] EntityStore migration for **`tms_credential`** (§5.8). Encrypt at rest; redact GET / logs /
-      `runtime_job_template` snapshots.
+- [ ] Wire **SecretManager** for TMS IRC auth secrets (no `tms_credential` table). Opt-in: plaintext
+      / missing secrets still work when SecretManager is not enabled.
 - [ ] Policy create/alter rejects credential-shaped keys in `jobOptions` / `rewriteOptions`.
-- [ ] Submit path: nearest policy `jobOptions` (table > schema > catalog) overlay template base,
-      then overlay `tms_credential`; `runJob` as `tms`.
+- [ ] Submit path: nearest policy `jobOptions` (table > schema > catalog) overlay template base;
+      add credential-vending header when enabled; resolve auth for **none / basic / oauth /
+      kerberos** (§5.8); `runJob` as `tms`.
 - [ ] Tests: authorization off skips user insert; authorization on grants `USE_CATALOG`,
       `USE_SCHEMA`, `PROBE_TABLE_LIKE`, `MODIFY_TABLE`, `VIEW_POLICY`, `USE_JOB_TEMPLATE`, `RUN_JOB`.
-- [ ] Tests: table attachment overrides catalog `jobOptions`; auth keys never persist in
-      `policy_meta`.
+- [ ] Tests: table attachment overrides catalog `jobOptions`; auth secrets never persist in
+      `policy_meta`; `runtime_job_template` redacts passwords / tokens / keytabs.
 
 ### 9.2 Review Checklist
 
@@ -960,7 +1032,7 @@ per-policy **short** evaluate picks, slim `table_maintenance_job` pointers, `job
 | Policy        | Reuses metalake Policy APIs + `policy_meta`; `jobOptions` on content; nearest attachment wins (§5.7).            |
 | Job boundary  | Spark in job framework (`job_run_meta` is a **run snapshot**); Validation in `job_validation_metric`.            |
 | Principal     | Automated Jobs run as `tms`; bootstrap only when authorization is enabled (§5.6).                                |
-| Credentials   | Auth keys in `tms_credential`, not policy or job template (§5.8).                                                |
+| Credentials   | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.8); not policy / not `tms_credential`. |
 | Security      | Ops APIs require table WRITE. TMS role is least-privilege for list + table write + run job. No commit-event or health endpoint. |
 | License       | db-scheduler is **Apache 2.0**; no LGPL scheduling dependency.                                                   |
 
