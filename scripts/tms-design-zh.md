@@ -38,8 +38,8 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 本设计将 TMS 做成主服务 **8090** 上的 **REST 插件**（与 IdP 相同，通过
 `gravitino.server.rest.extensionPackages`），以便同机部署的 IRC 在 commit 后**唤醒**表维护。
 **db-scheduler** 在 `scheduled_tasks` 上持有**三类**任务：① **policy-expand**（crontab → Spark 单元；长期保留；入队后即返回）、
-② **table-scheduler** / ③ **table-commit**（submit 后**持有 pick 直到 Spark 终态**再 **DELETE**；③ 可再 upsert）。
-双池：`expand.threads=4`（仅 ①）与 `table.threads=8`（②+③；同时限制并发 Spark 数）。`table_maintenance_job` 记 Validation 并作死节点安全网。
+② **table-scheduler** / ③ **table-commit**（短回调：submit → INSERT 占坑+`before_metrics` → **DELETE** → return；③ 可再 upsert）。
+双池：`expand.threads=4`（仅 ①）与 `table.threads=8`（②+③）。`table_maintenance_job` 记 Validation + 在途占坑；Job 监听写 `after_metrics`+`finished_at`；对账只关坑（§5.5.3）。
 
 ---
 
@@ -56,10 +56,10 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
      **cursor**。写出 **`tms-table-scheduler`**；① **保留**（§5.5）。
    - **`tms-table-scheduler`（②）**：crontab expand 写出。实例
      `table:{table_id}:{policy_id}` 或 `batch:{batch_id}:{policy_id}`；
-     `task_data = { tableIds, policyIds }`。`runJob` → **持有 pick** → Spark 终态 → **DELETE**。
+     `task_data = { tableIds, policyIds }`。短回调：`runJob` → INSERT job 行 → **DELETE** → return。
    - **`tms-table-commit`（③）**：commit 唤醒；`task_instance = {table_id}`；
-     `task_data = { tableId }`（可选 snapshotId）。**policy 在 pick 时决议**（§5.4）；同样持有到终态再 **DELETE**（可再 upsert）。
-   两个 Scheduler：**expand** 池（仅 ①，短）与 **table** 池（②+③，可持有到 Spark 结束）。**N 抢 1**。
+     `task_data = { tableId }`（可选 snapshotId）。**policy 在 pick 时决议**（§5.4）；同样短 submit（终态后可再 upsert）。
+   两个 Scheduler：**expand** 池（仅 ①）与 **table** 池（②+③）。**N 抢 1**。不要持有 pick 直到 Spark 完成。
 4. **复用现有 optimizer 执行核心**：调度器任务处理程序以**进程内方法**调用 `maintenance/optimizer` 中已有的
    `Updater` / `Recommender` / 作业提交路径，而非第二套逻辑。
 5. **作业框架兼容**：Spark 维护工作继续使用 Gravitino 作业框架。TMS 在 `table_maintenance_job` 中记录每次运行，
@@ -98,9 +98,8 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 5. **Commit 路径 HTTP 或 Kafka**：无 `POST …/events/iceberg-commit`、无健康检查资源、无 Kafka 生产/消费路径。
    commit 处理**仅进程内**（§5.1.1）。替代 optimizer CLI 的 API 在 **§7**，不是 commit 入口。
    远程 IRC / 跨 JVM 投递不在范围（如需可后续跟进）。
-6. **持有 expand（①）pick 直到 Spark 完成**：① 必须在分页 / INSERT ②（或 skip）后返回。
-   仅 table 池的 **② / ③** 在 Spark 到达终态前保持 `picked`（heartbeat），然后 **DELETE** ——
-   该租约是防双提交的主锁。`table_maintenance_job` 仍记 Validation，并覆盖死节点重抢（§5.5.3、§6.2）。
+6. **持有 db-scheduler pick 直到 Spark 完成**：① / ② / ③ 回调必须在入队 / submit（或 skip）后返回。
+   防双提交靠在途 `table_maintenance_job` 占坑；Validation 指标只在热路径写入（§5.5.3）。
 7. **自动化 TMS 的按人用户模板**：手动 Automate Jobs UI 日后可存按用户默认值；自动化事件/定时运行始终使用
    **`tms`** 主体与策略 `jobOptions`（§5.6–§5.8）。
 
@@ -152,12 +151,11 @@ TMS 不在主 8090 JAX-RS 应用上。
 TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，外加持久的按运行作业记录：
 
 1. **Policy-expand**（①）— crontab：把策略解析成 Spark 工作单元（每个 `policy_id` 长期一行）；入队后返回。
-2. **Table-scheduler**（②）— crontab/batch：`runJob`，**持有 pick 直到 Spark 终态**，再 **DELETE**。
-3. **Table-commit**（③）— 每表 `{table_id}` commit 唤醒；pick 时 resolve；持有到终态；**DELETE**；可再 upsert。
+2. **Table-scheduler**（②）— crontab/batch：短 `runJob` 回调后 **DELETE**。
+3. **Table-commit**（③）— 每表 `{table_id}` commit 唤醒；pick 时 resolve；短 submit；**DELETE**；Job 终态后可再 upsert。
 
-另加 **`table_maintenance_job`** 记 Validation、`minIntervalMs` 与死节点重抢安全网。
-双池：expand（①，短）与 table（②+③，线程可占用至 Spark 结束），避免抢 crontab expand 线程（§8.4）。
-`table.threads=8` 同时限制并发维护 Spark 数。
+另加 **`table_maintenance_job`** 记 Validation、`minIntervalMs` 与在途占坑。
+双池：expand（①）与 table（②+③），避免抢 crontab expand 线程（§8.4）。
 
 #### 行业与项目内替代方案
 
@@ -179,8 +177,8 @@ TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，�
 2. **可嵌入且轻量** — 租约用一张 `scheduled_tasks` 表；随 `TableMaintenanceRESTFeature` 启停。
 3. **内置 heartbeat** — 短 evaluate 回调运行期间，db-scheduler 刷新 `last_heartbeat`；死 JVM 释放 pick，
    无需在 TMS 状态表上手写租约列。
-4. **职责清晰** — ① = crontab expand → INSERT ②（返回）；②/③ = submit → 持有 pick → 终态 → **DELETE**；
-   ③ 按 `{table_id}` 合并；`table_maintenance_job` = Validation + 死节点门控。
+4. **职责清晰** — ① = crontab expand → INSERT ②；②/③ = 短 submit → **DELETE**；占坑 + Validation 在
+   `table_maintenance_job`；③ 按 `{table_id}` 合并。
 5. **无臃肿 TMS 状态机** — 无 `evaluate_pending` / `IDLE`/`RUNNING` 与 `picked` 的双份实现。
 
 **决策：** **选定** — db-scheduler 三类任务名 + 双池；`table_maintenance_job` 用于按运行记录与 submit 门控。
@@ -220,8 +218,8 @@ expand 池与 table 池轮询；每个到期实例 **N 抢 1**。
 | 种类 | `task_name` | 实例键 | pick 之后 |
 | ---- | ----------- | ------ | --------- |
 | ① Policy expand | `tms-policy-expand` | `{policy_id}` | 分页 INSERT ②；保留 ① |
-| ② Table scheduler | `tms-table-scheduler` | `table:{table_id}:{policy_id}` / `batch:{batch_id}:{policy_id}` | submit → 持有 pick → 终态 → DELETE |
-| ③ Table commit | `tms-table-commit` | `{table_id}` | resolve → submit → 持有 pick → 终态 → DELETE |
+| ② Table scheduler | `tms-table-scheduler` | `table:{table_id}:{policy_id}` / `batch:{batch_id}:{policy_id}` | 短 submit → job 行 → DELETE |
+| ③ Table commit | `tms-table-commit` | `{table_id}` | resolve → 短 submit → DELETE；终态后可再 upsert |
 
 **生命周期概要：**
 
@@ -239,8 +237,8 @@ IRC commit（IRC 线程，短）
        task_data = { tableId }
 
 ② / ③ pick（table.threads）
-  → runJob → INSERT table_maintenance_job
-  → 持有 pick + heartbeat 直到 Spark 终态 → DELETE
+  → 采样 before → runJob → INSERT table_maintenance_job → DELETE → return
+  → Job 终态监听：采样 after → UPDATE finished_at
   → ③ 可再 upsert 同一 {table_id}
 ```
 
@@ -249,7 +247,7 @@ IRC post-commit → upsert tms-table-commit/{table_id}（不进 expand 池）
 
 Node A/B/C
   ├─ expand.threads=4  → pick ① → INSERT ②
-  └─ table.threads=8   → pick ② 或 ③ → runJob → 持有到终态 → DELETE
+  └─ table.threads=8   → pick ② 或 ③ → 短 submit → DELETE
 ```
 
 | 表 | 角色 |
@@ -283,7 +281,7 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
 | `TableMaintenanceScheduler`      | 两个调度器：expand（①，4 线程）+ table（②+③，8 线程）（§8.4）。                                                                              |
 | `IcebergCommitEventHandler`      | IRC upsert `tms-table-commit` `{table_id}`（§5.4）。                                                                                      |
 | `PolicyExpandPipeline`           | 在 ① pick 内运行：分页解析 → expand 门控 → INSERT ≤ `expand.enqueueBatchSize` 条 **`tms-table-scheduler`**；未完则游标 + 立刻再到期（§5.5）。                    |
-| `MaintenanceSparkSubmitPipeline` | 在 table 池 ②/③ pick：resolve → 门控 → `runJob` → 持有 pick 至 Spark 终态 → **DELETE**（§5.5）。                                       |
+| `MaintenanceSparkSubmitPipeline` | 在 table 池 ②/③ 短 pick：resolve → 门控 → 采样 before → `runJob` → INSERT → **DELETE**（§5.5）。                                 |
 | `GravitinoTableImportService`    | 经 `TableDispatcher.loadTable` 懒 import 进 `table_meta`（§5.5.4）；按 backend 解析 owner。                                            |
 | `TmsPrincipalBootstrapListener`  | 监听 `CreateMetalakeEvent` 的 `EventListenerPlugin`；启用授权时确保 metalake 用户 `tms` + 内置角色（§5.6）。                                     |
 | `TmsAuthConfigResolver`          | 解析 IRC 认证 + credential-vending Spark conf；经 SecretManager 加载 secret（§5.9）。                                                   |
@@ -326,8 +324,8 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
    ```
 
 3. 引擎经 Gravitino Iceberg REST 写入。commit 成功后，**IRC 钩子** upsert **`tms-table-commit`** `{table_id}`（§5.4）。
-4. **table** 池 pick ③，resolve 后 submit，**持有 pick 直到 Spark 终态**再 **DELETE**；可再 upsert 同一 `{table_id}`（§5.7.1）。
-   每个实例**只有一个**节点持有 pick；该租约在 heartbeat 有效期内防止双提交。
+4. **table** 池 pick ③，resolve 后短 submit 并 **DELETE**；Job 终态可再 upsert 同一 `{table_id}`（§5.7.1）。
+   同一 `(table, policy)` 的双 submit 由 `table_maintenance_job` 在途占坑阻止。
 5. 运维在 Gravitino **Jobs** UI / API 观察运行（含来自 `table_maintenance_job` 的 Validation）。自动化 Job 的 `audit.creator` 为 **`tms`**。
    §7 ops API 可 bump ① 或在测试钩子下入队 ②。
 
@@ -347,8 +345,8 @@ IRC commit 成功（同 JVM）— 跑在 IRC 回调线程（须短）
 同表多节点 / 突发 commit 都 upsert **同一行**；主键 `(tms-table-commit, {table_id})` 即合并点。
 
 **Pick（table 池，`table.threads`）：** 按**当前时刻**解析 Active `onCommit` 策略，排除 orphan-cleanup /
-被门控类型，取 §5.7.1 队首，`runJob`，**保持行被 pick**（heartbeat）直到 Spark 终态，再 **DELETE**。
-若仍需下一类型，再 upsert 同一 `(tms-table-commit, {table_id})`。若 pick 时全部被门控，则 DELETE 且不 submit。
+被门控类型，取 §5.7.1 队首，短 submit（before → runJob → INSERT → **DELETE**）。Job 终态后若仍需下一类型，
+再 upsert 同一 `(tms-table-commit, {table_id})`。若 pick 时全部被门控，则 DELETE 且不 submit。
 
 ### 5.5 执行路径 — expand + table-scheduler + table-commit
 
@@ -369,24 +367,21 @@ Table Scheduler （table.threads=8） — 注册 tms-table-scheduler + tms-table
         └─ 否则清 cursor；设下次 crontab（若有）
 
 ② tms-table-scheduler 到期（table 池）：
-        ├─ 读 tableIds / policyIds → 在途复检 → 读 jobOptions → runJob
-        ├─ INSERT table_maintenance_job（finished_at=NULL）
-        ├─ **持有 pick + heartbeat** 直到 Spark 终态
-        ├─ UPDATE metrics + finished_at
-        └─ **DELETE** ②（仅 Spark 结束后）
+        ├─ 在途复检 → 采样 before → runJob
+        ├─ INSERT table_maintenance_job → DELETE ② → return
+        └─（Spark 异步；终态监听写 after + finished_at）
 
 ③ tms-table-commit 到期（table 池；与 ② 共用 table.threads）：
-        ├─ pick 时 resolve onCommit policy（§5.7.1）→ runJob
-        ├─ INSERT table_maintenance_job → 持有 pick 至终态 → **DELETE** ③
-        └─ 若还需下一类型 → 再 upsert 同一 {table_id}
+        ├─ pick 时 resolve（§5.7.1）→ 同上短 submit → DELETE ③
+        └─ Job 终态若还需下一类型 → 再 upsert 同一 {table_id}
 ```
 
-**防双提交：** ②/③ 在 Spark 结束前保持 pick，其它节点无法再抢同一实例。
+**防双提交：** 同一 `(table, policy)` 的在途 `table_maintenance_job`（`finished_at IS NULL`）占坑。
 
-**为何 ②/③ 终态才 DELETE、① 保留：** ① 是按 `policy_id` 的长期 expand 租约，须快速返回。②/③ 行 + pick
-覆盖整个 Spark 生命周期；仅终态 **DELETE**，以便中途崩溃后经错过 heartbeat 重抢（再靠死节点门控）。
+**为何 ②/③ submit 后 DELETE、① 保留：** ① 是按 `policy_id` 的长期 expand 租约。②/③ 是一次性 submit；
+Spark 生命周期与防双提交在 `table_maintenance_job` + Job 监听 / 对账（§5.5.3）。
 
-**线程：** commit **入队** = IRC 线程；commit **执行** = `table.threads`（与 ② 共用；线程占用至 Spark 结束）。
+**线程：** commit **入队** = IRC 线程；commit **执行** = 短 `table.threads` 回调（与 ② 共用）。
 crontab expand 只用 `expand.threads`。
 
 #### 5.5.1 调度状态存放位置
@@ -430,35 +425,33 @@ crontab expand 只用 `expand.threads`。
 **Submit 路径**（在 **② `tms-table-scheduler`** 或 **③ `tms-table-commit`** 的 table 池 pick 内）：
 
 1. `ensureTableImported`（§5.5.4）——启用 import 时须成功。
-2. 复检在途（`finished_at IS NULL`）：若存在（竞态 / 死节点重抢），**不要**再次 `runJob` ——
-   等待该 job 终态（或接管监控），然后 **DELETE** 本调度行并返回。
-3. 策略触发（`Recommender`）。
-4. 叠加最近策略 `jobOptions`（§5.8）与 SecretManager 认证 / credential-vending conf（§5.9）；以主体 `tms` 的 `runJob` → `job_run_id`。
-5. **立刻** `INSERT` `table_maintenance_job`（`job_run_id` + 三键，`finished_at = NULL`）（§6.2）。
-6. **保持** ②/③ `scheduled_tasks` 行处于 **picked**；刷新 heartbeat 直到 Spark 终态
-   **或** `jobTimeoutMs` 到期（见下方卡住路径）。
-7. 终态 **或超时**：`UPDATE` `before_metrics` / `after_metrics` + `finished_at`，再 **DELETE** 调度行。
-   `before_metrics` 须在**改表前采样**。
+2. 复检在途（`finished_at IS NULL`）：若存在 → **不要** `runJob`，**DELETE** 本调度行并返回（坑已被占）。
+3. **现在采样 `before_metrics`**（必须在任何改表之前）。事后无法重建。
+4. 策略触发（`Recommender`）。
+5. 叠加最近策略 `jobOptions`（§5.8）与 SecretManager 认证 / credential-vending conf（§5.9）；以主体 `tms` 的 `runJob` → `job_run_id`。
+6. **立刻** `INSERT` `table_maintenance_job`（含 `job_run_id`、三键、`before_metrics`、`finished_at = NULL`）（§6.2）。
+   此行是防双提交的**占坑声明**，不是对 Spark 的探活。
+7. **DELETE** 本 ②/③ `scheduled_tasks` 行并 **return** —— **不要**用 db-scheduler 线程陪跑 Spark。
 
-**为何持有到终态：** submit 后立刻 DELETE 会丢掉 db-scheduler 租约，其它节点可能 pick 新入队的重复单元。
-pick + heartbeat 是主互斥；`table_maintenance_job` 是错过 heartbeat 后的备份门控。
+**终态路径**（Job **刚**到终态时的监听 / 状态回调 —— 不是很久以后的对账扫描）：
 
-**卡住 / 超时的 Spark：** 持有 pick + heartbeat 时，**活着的** JVM 不会因为 Spark 挂住而释放租约 ——
-其它节点抢不到该实例。因此 ②/③ **必须**有墙钟 **`jobTimeoutMs`**（conf；默认 **6h**），从 `runJob` /
-开始等待起算：
+1. **立刻**采样 `after_metrics`（紧接本次 Job 后的表状态）。拖太久再采没有意义。
+2. `UPDATE` `after_metrics` + `finished_at = now`。
 
-1. 轮询（或等待）Gravitino Job 状态，同时刷新 db-scheduler heartbeat。
-2. 若在截止前到达正常终态 → 与现路径相同（`UPDATE` + **DELETE** 调度行）。
-3. 若先到 **`jobTimeoutMs`**：
-   - 尽力 **cancel** Spark / Gravitino Job（Jobs API 支持时；cancel 本身也不无限阻塞）。
-   - `UPDATE` `table_maintenance_job`：`finished_at = now`，`after_metrics` 含 `passed=false` 与超时原因
-     （如 `"timeout": true`）。
-   - **DELETE** ②/③ `scheduled_tasks` 行并返回 —— 释放 table 池线程。
-4. 之后的 crontab expand / commit upsert 可按 `minIntervalMs` 与门控再次入队。
-   超时**不是**“仍在途”（`finished_at` 已写入）。
+**对账 reconcile**（周期 / pick 时；只修**占坑**，绝不补 Validation 指标）：
 
-**死 JVM vs 卡住的 Spark：** 错过 heartbeat 覆盖进程死亡；**`jobTimeoutMs`** 覆盖活节点挂在僵死 job 上。
-两者都以终态 `table_maintenance_job` 结束，避免重抢时双 submit。
+`finished_at IS NULL` 只表示「TMS 还没关坑」，**不等于**「Spark 一定还在跑」。是否在跑以 Jobs API /
+`job_run_meta` 为准。
+
+| `table_maintenance_job` | Job 实际状态 | 动作 |
+| ----------------------- | ------------ | ---- |
+| `finished_at IS NULL` | 仍在 queued / started，且未超 `jobTimeoutMs` | 保持在途；同一 `(table, policy)` 不再 submit |
+| `finished_at IS NULL` | 已是 SUCCEEDED / FAILED / CANCELLED | **只**补 `finished_at`；**不**补 `before_metrics`，也**不**补过期的 `after_metrics`（Validation 可保持不完整） |
+| `finished_at IS NULL` | 仍在跑，但已超 `jobTimeoutMs` | 尽力 `cancelJob`；写 `finished_at`（超时）；**不**编造 metrics；放坑 |
+| `finished_at IS NULL` | Job 查不到 / 异常过久 | 写 `finished_at`（abandoned / 失败）；放坑；**不**补 metrics |
+
+**`jobTimeoutMs`**（`gravitino.maintenance.scheduler.table.jobTimeoutMs`，默认 6h）是 TMS 对在途行的
+**对账上限** —— **不是** db-scheduler 库参数，也**不是**「table 池线程堵 6 小时」。
 
 **`minIntervalMs` 在 ① 上判断**（crontab）；commit 在 ③ pick 时决议门控。
 
@@ -579,8 +572,8 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 **未**挂载（或未开 `onCommit`）的类型**跳过** —— 链继续到列表中下一个已挂载类型。不要重排已挂载类型。不要插入未挂载类型。
 
-**串行：** `tms-table-commit` 每表一行 `{table_id}`。pick 时取 §5.7.1 队首并 submit；**持有 pick 直到该
-Spark 终态**，**DELETE** 后若仍需下一类型再 upsert 同一 `{table_id}`。前一行仍被 pick 时不要跑下一类型。
+**串行：** `tms-table-commit` 每表一行 `{table_id}`。pick 时取 §5.7.1 队首并短 submit；该 Job **终态**后
+若仍需下一类型再 upsert 同一 `{table_id}`。前一 policy 仍 `finished_at IS NULL` 时不要 submit 下一个。
 
 **Crontab 路径**仍按策略各自 expand（每个 `policy_id` 一条 ①），**不**要求这种跨类型顺序，除非产品后续统一定时跑法。
 
@@ -621,8 +614,8 @@ Spark 终态**，**DELETE** 后若仍需下一类型再 upsert 同一 `{table_id
 ```text
 policy_version_info.content.schedule  →  UI 展示的触发配置；触发的真实来源
 scheduled_tasks ① tms-policy-expand      →  crontab expand；长期保留
-scheduled_tasks ② tms-table-scheduler    →  submit；持有 pick 至 Spark 终态；再 DELETE
-scheduled_tasks ③ tms-table-commit       →  submit；持有 pick 至终态；再 DELETE
+scheduled_tasks ② tms-table-scheduler    →  短 submit；pick 后 DELETE
+scheduled_tasks ③ tms-table-commit       →  短 submit；pick 后 DELETE
 table_maintenance_job + minIntervalMs →  在途 + expand 冷却（INSERT ② 前；不是 crontab）
 ```
 
@@ -634,12 +627,12 @@ table_maintenance_job + minIntervalMs →  在途 + expand 冷却（INSERT ② �
               → expand INSERT N × ② tms-table-scheduler（execution_time = now）
               → 保留 ①；设下次 crontab 到期
 ~02:00+       → 各节点 pick 每条 ②（可跨单元 / 节点并行）
-              → 门控 → runJob → INSERT table_maintenance_job
-              → 持有 pick 至 Spark 终态 → UPDATE 指标 → DELETE 该 ②
+              → 采样 before → runJob → INSERT table_maintenance_job → DELETE 该 ②
+              → Job 终态：采样 after → UPDATE finished_at
 ```
 
 `execution_time = 02:00` 在 ① 上是 **expand 到期时间**。Spark 单元 ② 在 expand 写出后到期（通常立刻）。
-② **不是**再盖一个墙钟 02:00:00；与 ① 不同，每条 ② 仅在其 Spark **终态后**才从 `scheduled_tasks` **DELETE**。
+② **不是**再盖一个墙钟 02:00:00；与 ① 不同，每条 ② 在短 submit 路径后即 **DELETE**，Spark 异步继续。
 
 ### 5.8 策略上的作业模板参数（`policy_meta`）
 
@@ -790,18 +783,16 @@ pick 给定实例（CAS + heartbeat）。
 
 **Expand 互斥：** ① 上的 pick（`expand.threads`）（§6.1）。
 
-**Table 互斥：** 每条 ② 或 ③ 上的 pick（`table.threads`）；**持有到 Spark 终态**再 **DELETE**。
-该租约是防双提交的主锁。备份：在途 `table_maintenance_job` + `minIntervalMs`（§5.5.3、§6.2）。
+**Table 互斥：** 每条 ② 或 ③ 上的 pick（`table.threads`）；短 submit 后 **DELETE**。
+防双提交：在途 `table_maintenance_job` + `minIntervalMs`（§5.5.3、§6.2）。
 
-**死 worker：** 错过 heartbeat 解锁 / 重新入队。重抢**不**取消已提交 Spark；若 `finished_at IS NULL`
-则在同一 `jobTimeoutMs` 下等待/接管 —— **绝不**第二次 `runJob`。
-
-**卡住的 Spark（活节点）：** heartbeat 会续租；只有 **`jobTimeoutMs`** 能强制终态 + DELETE（§5.5.3）。
+**死 worker / 卡住的 Spark：** missed heartbeat 只释放**卡住的短回调**（回调本应很短）。
+长 Spark / 丢失的终态更新由对账修理 `finished_at IS NULL`（§5.5.3）—— **只**写 `finished_at`，从不补采 Validation 指标。
 
 | 表                                      | 角色                                                    |
 | -------------------------------------- | ----------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **expand 什么**、`schedule`（§5.7）与非认证 `jobOptions`（§5.8） |
-| `scheduled_tasks`                      | ① 长期 expand + ②/③ 持有至 Spark 终态再 DELETE               |
+| `scheduled_tasks`                      | ① 长期 expand + ②/③ 一次性（短 submit 后 DELETE）            |
 | `table_maintenance_job`                | 按运行 Validation JSON + submit 门控（§6.2）                 |
 | SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.9）；无 `tms_credential` 表      |
 | `user_meta`                            | 启用授权时的内置 `tms` 用户（§5.6）                               |
@@ -817,9 +808,9 @@ IRC commit → upsert ③ {table_id}（IRC 线程；不进任一池）
 Node A / B / C
         │
         ├─ expand 池：pick ① → INSERT ② → 保留 ①
-        ├─ table 池： pick ② → submit → 持有 → 终态 → DELETE ②
-        ├─ table 池： pick ③ → resolve → submit → 持有 → 终态 → DELETE ③
-        │               （可再 upsert 同一 {table_id} 跑下一类型）
+        ├─ table 池： pick ② → 短 submit → DELETE ②
+        ├─ table 池： pick ③ → resolve → 短 submit → DELETE ③
+        │               （Job 终态可再 upsert 同一 {table_id}）
         └─ picker 死亡 → 错过 heartbeat → 实例可再次运行
 ```
 
@@ -1059,9 +1050,8 @@ db-scheduler **每个** `Scheduler` 一个线程池。TMS 在同一张 `schedule
 | Expand | 仅 `tms-policy-expand` | `4` | `…scheduler.expand.threads` |
 | Table | `tms-table-scheduler` + `tms-table-commit` | `8` | `…scheduler.table.threads` |
 
-**Commit 线程：** IRC 回调只做 ③ 的 **upsert**（不进任一池）。**执行** ③ 与 ② 共用 `table.threads`，
-且**占用线程直到 Spark 结束**（有意背压：`table.threads` ≈ 最大并发维护 Spark 数）。
-commit **不得**占用 `expand.threads`。
+**Commit 线程：** IRC 回调只做 ③ 的 **upsert**（不进任一池）。**执行** ③ 与 ② 共用 `table.threads` 做**短**
+submit 回调。commit **不得**占用 `expand.threads`。
 
 | 键 | 默认 | 说明 |
 | -- | ---- | ---- |
@@ -1071,7 +1061,7 @@ commit **不得**占用 `expand.threads`。
 | `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | 轮询间隔 |
 | `gravitino.maintenance.scheduler.heartbeatIntervalMs` | `60000` | 心跳 |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit` | `6` | 判死 |
-| `gravitino.maintenance.scheduler.table.jobTimeoutMs` | `21600000`（6h） | ②/③ `runJob` 后最长等待；超时则终态 + DELETE（§5.5.3） |
+| `gravitino.maintenance.scheduler.table.jobTimeoutMs` | `21600000`（6h） | 对账上限：`finished_at IS NULL` 最长保留多久后超时/放弃（§5.5.3） |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | MySQL `true` | MySQL 时间戳 |
 
 JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量）。通常保持默认即可。
@@ -1113,7 +1103,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 - [ ] import 后按 backend 解析 owner；永不将 owner 默认设为 `tms`。
 - [ ] 实现 `PolicyExpandPipeline`（挂载 → INSERT `tms-table-scheduler` ②；保留 ①）。
 - [ ] 实现 `MaintenanceSparkSubmitPipeline` 调用 `Recommender.submitForStrategyName`。
-- [ ] 门控：① 上在途 / 最小间隔；②/③ 持有 pick 至 Spark 终态再 DELETE。
+- [ ] 门控：① 上在途 / 最小间隔；②/③ 短 submit 后 DELETE；Job 监听 + 对账（§5.5.3）。
 - [ ] 经现有 Policy / `StrategyProvider` 解析 Active 挂载策略（无新策略库）。
 - [ ] 为 skip / noop / submit 结果添加单元测试。
 
@@ -1134,7 +1124,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
-- [ ] `runJob` 后：`INSERT` `table_maintenance_job`；**持有 pick** 至终态 **或** `jobTimeoutMs`；再 `UPDATE` + **DELETE**；超时尽力 cancel；③ 可再 upsert（§5.5.3、§6.2）。
+- [ ] `runJob` 前采 `before_metrics`；INSERT job 行后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账只关坑不补指标（§5.5.3）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
@@ -1169,11 +1159,11 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 | 部署         | 经 `gravitino.server.rest.extensionPackages` 启用；IRC 同 JVM 同机。Ops API 在 **8090**（§7）。                         |
 | Classpath  | TMS 插件在主服务器 classpath；**不是** aux 隔离监听。                                                                      |
 | 触发         | Commit：upsert ③ + pick 时 §5.7.1 有序；crontab：按策略 ①；orphan-cleanup 仅 crontab。                                      |
-| 调度         | **db-scheduler** 双池：① 长期保留；②/③ 持有 pick 至 Spark 终态再 DELETE（§5.5、§8.4）。                                    |
+| 调度         | **db-scheduler** 双池：① 长期保留；②/③ 短 submit 后 DELETE；占坑在 `table_maintenance_job`（§5.5、§8.4）。              |
 | 作业记录       | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                     |
 | Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.5.4）；非 Iceberg `registerTable`。                      |
 | Ops API    | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                      |
-| 管线         | ①→INSERT ②；②/③ 持有至终态或 `jobTimeoutMs` → DELETE；卡住 Spark 靠超时释放（§5.5.3）。                          |
+| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账只补 `finished_at`（§5.5.3）。                                    |
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
 | Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期实例 N 抢 1；②/③ pick+heartbeat 防双提交；死节点靠 `table_maintenance_job` 备份门控。                                    |
