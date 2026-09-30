@@ -331,10 +331,10 @@ picks ③ (§5.4).
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**.                                                                       |
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka.                                                  |
-| Payload     | `table_id` / table identifier and optional committed `snapshot_id`.                                                                         |
+| Payload     | `table_id` / table identifier (for upsert `task_instance` / `task_data.tableIds`).                                                          |
 | Enqueue     | Upsert `(tms-table-commit, {table_id})` on the IRC thread (must stay short).                                                                |
 | Execute     | **`commit.threads`** picks ③ (never IRC / expand / table); resolve + gate + short submit; re-upsert after Job terminal if needed (§5.4). |
-| Scheduling  | Expand pool (① only) + table pool (② + ③); same JDBC DataSource as MySQL / PostgreSQL entity store (§8.4).                                  |
+| Scheduling  | Expand (①) + table (②) + commit (③) pools; same JDBC DataSource as MySQL / PostgreSQL entity store (§8.4).                                  |
 
 
 Deployment:
