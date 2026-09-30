@@ -257,7 +257,7 @@ every node runs it: **every** node polls; **N compete, one pick wins** per due i
 | Kind                    | `task_name` (illustrative) | When created                                        | Instance key                                                                      | After pick                                                                            |
 | ----------------------- | -------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | ① Policy → Spark expand | `tms-policy-expand`        | Policy **create / enable** (and reconcile on alter) | `{policy_id}`                                                                     | Parse policy → **INSERT** zero or more ② rows; **keep** ① (set next `execution_time`) |
-| ② Spark submit unit     | `tms-spark`                | Written by ① when expand runs                       | Table unit: `{table_id}:{policy_id}` (crontab) or `{table_id}:{policy_id}[:…]` (commit); batch: `{policy_id}:batch:{batch_id}` (§5.5.2) | Submit head → `table_maintenance_job` → **DELETE** ②; commit may enqueue remainder     |
+| ② Spark submit unit     | `tms-spark`                | Written by ① when expand runs                       | Crontab: `{table_id}:{policy_id}`; commit: `{table_id}:{policy_id}[:{policy_id}…]` (§5.5.2) | Submit head → `table_maintenance_job` → **DELETE** ②; commit may enqueue remainder     |
 
 **Lifecycle sketch:**
 
@@ -522,8 +522,7 @@ NULL` gates further submits for that `(table, policy)`.
 | Task name           | Instance key                                               | When created / due                                     | Action                                                |
 | ------------------- | ---------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------- |
 | `tms-policy-expand` | `{policy_id}` | Policy create/enable; due on crontab or commit bump | Expand → INSERT ②; retain ① |
-| `tms-spark` (crontab, per table) | `{table_id}:{policy_id}` | Written by ① crontab expand; due immediately | Submit Spark → `table_maintenance_job` → **DELETE** ② |
-| `tms-spark` (crontab, batch) | `{policy_id}:batch:{batch_id}` | Snapshot-expiry multi-table jobs | Same submit / DELETE path |
+| `tms-spark` (crontab) | `{table_id}:{policy_id}` | Written by ① crontab expand; due immediately | Submit Spark → `table_maintenance_job` → **DELETE** ② |
 | `tms-spark` (commit) | `{table_id}:{policy_id}[:{policy_id}…]` | Written by commit expand after gates; due immediately | Submit **first** policy_id → DELETE ②; on terminal enqueue remainder if any |
 
 Instance keys use surrogate ids only (`policy_id`, `table_id`). Those ids are treated as **globally
@@ -531,11 +530,11 @@ unique** in the entity store, so `metalake_id` is not required in `task_instance
 available via `policy_meta` / `table_meta` when needed).
 
 **Table-unit naming (crontab + commit):** always `{table_id}` first, then `policy_id`(s). Crontab
-enqueues one policy per row (`{table_id}:{policy_id}`). Commit enqueues one row listing every
-**ungated** policy in §5.7.1 order (`{table_id}:{p1}:{p2}:…`); gated-out policies are omitted, so
-the key may be shorter. Use `task_data.path = commit|crontab` to tell a one-policy commit key from
-a crontab key. Multi-table snapshot-expiry batches keep `{policy_id}:batch:{batch_id}` (no single
-`table_id`).
+enqueues one row per table (`{table_id}:{policy_id}`). A schema-/catalog-attached policy (e.g.
+snapshot-expiry) still expands to **one ② per table**, all sharing the same `policy_id` — no
+separate batch instance key. Commit enqueues one row listing every **ungated** policy in §5.7.1
+order (`{table_id}:{p1}:{p2}:…`); gated-out policies are omitted, so the key may be shorter. Use
+`task_data.path = commit|crontab` to tell a one-policy commit key from a crontab key.
 
 **Policy lifecycle → ①:** create/enable → INSERT ①; alter schedule → update ① `execution_time` /
 `task_data`; disable/drop → DELETE ① and DELETE outstanding ② for that `policy_id`.
@@ -973,10 +972,9 @@ Illustrative `scheduled_tasks` usage (db-scheduler owned; MySQL-shaped):
 -- owned by db-scheduler; see upstream DDL
 -- PRIMARY KEY (task_name, task_instance)
 -- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
--- ② crontab table: task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}'
--- ② crontab batch: task_name = 'tms-spark', task_instance = '{policy_id}:batch:{batch_id}'
--- ② commit:        task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
---                  (only ungated policy_ids; task_data.path = commit|crontab)
+-- ② crontab: task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}'
+-- ② commit:  task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
+--            (only ungated policy_ids; task_data.path = commit|crontab)
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- After ② pick path completes successfully (submit or gated skip): DELETE that row.
 -- Commit remainder (if any) is a new INSERT with a shorter commit key.
@@ -1164,10 +1162,10 @@ TMS recognizes four maintenance **task types** (aligned with product Compact pol
 **Commit path:** only `compaction`, `manifest-rewrite`, and `snapshot-expiry` may use `onCommit`,
 and only in that order among attached types (§5.7.1). **`orphan-cleanup` is crontab-only.**
 
-**Snapshot expiry batching:** When a snapshot-expiry policy is attached at **catalog** or **schema**
-scope, TMS may submit one Spark job that runs `expire_snapshots` for multiple tables under that
-attachment. The default is **10 tables per job**; remaining tables are submitted in follow-on jobs.
-Table-attached snapshot-expiry policies still use **one table per job** (commit-driven path).
+**Catalog / schema attachments:** When a policy (including snapshot-expiry) is attached at
+**catalog** or **schema** scope, expand lists every table under that attachment and enqueues one
+crontab ② per table — all with the **same** `policy_id` (`{table_id}:{policy_id}`). **One table per
+Spark job**; no `batch` `task_instance` form.
 
 **Resolution order** (first hit wins), same idea as Amoro table props + AMS defaults:
 
@@ -1183,7 +1181,6 @@ Table-attached snapshot-expiry policies still use **one table per job** (commit-
 | ------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `task.compaction.minIntervalMs`       | Default min interval for compaction jobs                                                     |
 | `task.snapshot-expiry.minIntervalMs`  | Default min interval for snapshot expiry                                                     |
-| `task.snapshot-expiry.batchSize`      | Max tables per snapshot-expiry job when policy is catalog- or schema-attached (default `10`) |
 | `task.manifest-rewrite.minIntervalMs` | Default min interval for manifest rewrite                                                    |
 | `task.orphan-cleanup.minIntervalMs`   | Default min interval for orphan cleanup                                                      |
 

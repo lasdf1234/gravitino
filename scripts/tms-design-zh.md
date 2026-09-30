@@ -217,7 +217,7 @@ TMS 在 `scheduled_tasks`（db-scheduler）上使用**两类**行。写入一行
 | 种类                      | `task_name`（示例）     | 何时创建                         | 实例键                                                                | pick 之后                                                           |
 | ----------------------- | ------------------- | ---------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | ① Policy → Spark expand | `tms-policy-expand` | 策略**创建 / 启用**（变更时 reconcile） | `{policy_id}`                                                      | 解析 policy → **INSERT** 零或多条 ②；**保留** ①（设下次 `execution_time`）      |
-| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | 表单元：`{table_id}:{policy_id}`（crontab）或 `{table_id}:{policy_id}[:…]`（commit）；batch：`{policy_id}:batch:{batch_id}`（§5.5.2） | submit 队首 → `table_maintenance_job` → **DELETE** ②；commit 可再入队剩余 |
+| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | crontab：`{table_id}:{policy_id}`；commit：`{table_id}:{policy_id}[:{policy_id}…]`（§5.5.2） | submit 队首 → `table_maintenance_job` → **DELETE** ②；commit 可再入队剩余 |
 
 **生命周期概要：**
 
@@ -459,17 +459,16 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
 | 任务名                 | 实例键                                                       | 何时创建 / 到期                             | 动作                                                    |
 | ------------------- | --------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------- |
 | `tms-policy-expand` | `{policy_id}` | 策略创建/启用；crontab 或 commit bump 到期 | Expand → INSERT ②；保留 ① |
-| `tms-spark`（crontab，单表） | `{table_id}:{policy_id}` | ① crontab expand 写入；通常立即到期 | Submit Spark → `table_maintenance_job` → **DELETE** ② |
-| `tms-spark`（crontab，batch） | `{policy_id}:batch:{batch_id}` | snapshot-expiry 多表 job | 同样 submit / DELETE |
+| `tms-spark`（crontab） | `{table_id}:{policy_id}` | ① crontab expand 写入；通常立即到期 | Submit Spark → `table_maintenance_job` → **DELETE** ② |
 | `tms-spark`（commit） | `{table_id}:{policy_id}[:{policy_id}…]` | commit expand 过门控后写入；通常立即到期 | Submit **第一个** policy_id → DELETE ②；终态再入队剩余（若有） |
 
 实例键只使用代理 id（`policy_id`、`table_id`）。在 entity store 中将其视为**全局唯一**，因此 `task_instance` **不需要** `metalake_id`（需要 metalake 时从 `policy_meta` / `table_meta` 反查即可）。
 
-**表单元命名（crontab + commit）：** 一律先 `{table_id}`，再跟 `policy_id`。crontab 一表一 policy 一行
-（`{table_id}:{policy_id}`）。commit 一行列出全部**未门控** policy（§5.7.1 顺序
-`{table_id}:{p1}:{p2}:…`）；被门控的不追加，键可能更短。用 `task_data.path = commit|crontab`
-区分「单 policy 的 commit 键」与 crontab 键。多表 snapshot-expiry batch 仍用
-`{policy_id}:batch:{batch_id}`（没有单一 `table_id`）。
+**表单元命名（crontab + commit）：** 一律先 `{table_id}`，再跟 `policy_id`。crontab **一表一行**
+（`{table_id}:{policy_id}`）。挂在 schema / catalog 上的策略（如 snapshot-expiry）expand 时仍按表各写一条 ②，
+**共用同一个 `policy_id`** —— **没有**单独的 batch 实例键。commit 一行列出全部**未门控** policy（§5.7.1
+顺序 `{table_id}:{p1}:{p2}:…`）；被门控的不追加，键可能更短。用 `task_data.path = commit|crontab`
+区分「单 policy 的 commit 键」与 crontab 键。
 
 **策略生命周期 → ①：** 创建/启用 → INSERT ①；变更 schedule → 更新 ① `execution_time` / `task_data`；禁用/删除 → DELETE ① 并 DELETE 该 `policy_id` 下未完成的 ②。
 
@@ -860,10 +859,9 @@ Node A / B / C 轮询
 -- 由 db-scheduler 拥有；见上游 DDL
 -- PRIMARY KEY (task_name, task_instance)
 -- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
--- ② crontab 单表: task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}'
--- ② crontab batch: task_name = 'tms-spark', task_instance = '{policy_id}:batch:{batch_id}'
--- ② commit:        task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
---                  （仅未门控 policy_id；task_data.path = commit|crontab）
+-- ② crontab: task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}'
+-- ② commit:  task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
+--            （仅未门控 policy_id；task_data.path = commit|crontab）
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- ② pick 路径成功结束后（submit 或门控跳过）：DELETE 该行。
 -- commit 剩余（若有）用更短 commit 键再 INSERT。
@@ -1038,9 +1036,9 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 
 **Commit 路径：** 仅 `compaction`、`manifest-rewrite`、`snapshot-expiry` 可使用 `onCommit`，且仅对已挂载类型按该顺序（§5.7.1）。**`orphan-cleanup` 仅为 crontab。**
 
-**Snapshot expiry 批量：** 当 snapshot-expiry 策略挂在 **catalog** 或 **schema** 上时，TMS 可将该
-范围内的多张表合并提交到**同一个 Spark job**（driver 内依次 `expire_snapshots`）。默认每 job **10 张表**，
-超出部分拆到后续 job。挂在**表**上的 snapshot-expiry 仍为**一表一 job**（commit 驱动路径）。
+**Catalog / schema 挂载：** 策略（含 snapshot-expiry）挂在 **catalog** 或 **schema** 上时，expand
+列出挂载范围内每张表，并**一表一条** crontab ② —— 共用**同一个** `policy_id`（`{table_id}:{policy_id}`）。
+**一表一 Spark job**；没有 `batch` 形式的 `task_instance`。
 
 **解析顺序**（先命中者生效），同 Amoro 表属性 + AMS 默认思路：
 
@@ -1056,7 +1054,6 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 | ------------------------------------- | ------------------------------------------------------ |
 | `task.compaction.minIntervalMs`       | compaction job 默认最小间隔                                  |
 | `task.snapshot-expiry.minIntervalMs`  | snapshot expiry 默认最小间隔                                 |
-| `task.snapshot-expiry.batchSize`      | catalog / schema 级 snapshot-expiry 每 job 最多表数（默认 `10`） |
 | `task.manifest-rewrite.minIntervalMs` | manifest rewrite 默认最小间隔                                |
 | `task.orphan-cleanup.minIntervalMs`   | orphan cleanup 默认最小间隔                                  |
 
