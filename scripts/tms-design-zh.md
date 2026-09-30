@@ -145,10 +145,11 @@ TMS 不在主 8090 JAX-RS 应用上。
 
 ### 4.5 两层调度任务 + 按运行作业记录（db-scheduler — 选定）
 
-TMS 需要在 commit 后进行集群安全的**短** evaluate 执行，以及持久的按运行作业记录：
+TMS 需要在 `scheduled_tasks` 上对**两类**工作做集群安全调度，外加持久的按运行作业记录：
 
-- evaluate → submit 的**入队 / pick / heartbeat**（数秒到数分钟）。
-- **`table_maintenance_job` 运行行**，使在途 Spark 与 `minIntervalMs` 在 pick 之外仍然有效。
+1. **Policy-expand** — 把维护策略解析成 Spark 工作单元（每个 `policy_id` 长期一行）。
+2. **Spark-submit** — 真正 `runJob` 的一次性单元（多行；**pick 后删除**）。
+3. **`table_maintenance_job`** — 在途 Spark / `minIntervalMs` / Validation 跨过 spark-submit pick 仍有效。
 
 这与 Spark 作业执行（已由 Gravitino Jobs 拥有）**不是**同一问题。单独的臃肿 evaluate 状态表（带 `evaluate_pending` +
 `IDLE`/`RUNNING` + 应用 heartbeat）重复了 db-scheduler 已为短任务提供的能力。持有 `picked` 直到
@@ -174,11 +175,11 @@ Spark 完成会把调度器线程绑在长作业上，已否决（非目标 #6�
 2. **可嵌入且轻量** — 租约用一张 `scheduled_tasks` 表；随 `TableMaintenanceRESTFeature` 启停。
 3. **内置 heartbeat** — 短 evaluate 回调运行期间，db-scheduler 刷新 `last_heartbeat`；死 JVM 释放 pick，
    无需在 TMS 状态表上手写租约列。
-4. **职责清晰** — `scheduled_tasks` = 何时 / 谁跑短 evaluate；`table_maintenance_job` =
-   按运行 Validation + submit 门控；Gravitino Jobs 跑 Spark。
+4. **职责清晰** — `tms-policy-expand` = 解析 policy → 入队 spark 单元；`tms-spark` = submit 后 **DELETE**；
+   `table_maintenance_job` = Validation + submit 门控；Gravitino Jobs 跑 Spark。
 5. **无臃肿 TMS 状态机** — 无 `evaluate_pending` / `IDLE`/`RUNNING` 与 `picked` 的双份实现。
 
-**决策：** **选定** — db-scheduler 用于按策略 evaluate 租约；`table_maintenance_job` 用于按运行记录与 submit 门控。
+**决策：** **选定** — db-scheduler 两类任务名；`table_maintenance_job` 用于按运行记录与 submit 门控。
 
 ### 4.6 自动化 Job 配置存放位置
 
@@ -476,8 +477,8 @@ TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tas
 | ---------- | ------------------------------------------------------------------------------------------------ |
 | API        | 对 `metalake.catalog.schema.table` 调用 `TableDispatcher.loadTable`（与 IRC `importTableEntity` 同路径）。 |
 | **不是**     | Iceberg REST `registerTable`、新建 TMS 表、或直接 `INSERT` `table_meta`。                                 |
-| 时机（commit） | 在 `IcebergCommitEventHandler` 调度 `tms-evaluate` 之前，或管线开头（若入队仍用名称键）。                              |
-| 时机（定时）     | 展开 catalog / schema 策略时：**从 catalog backend list tables**，对每张候选表 import 后再调度 `tms-evaluate`。     |
+| 时机（commit） | 可选：bump ① 前 import 已提交表，或在 ① expand 时按 commit 提示 import。                                         |
+| 时机（expand） | 展开 catalog / schema 挂载时：**从 catalog backend list tables**，对每张候选表 import 后再 INSERT ②。             |
 | 幂等         | `table_meta` 已有该表时，`loadTable` 不再重复 import。                                                      |
 | 失败         | 记录日志并**跳过**该表的调度 / submit；无 `table_id` 时不写 `table_maintenance_job`。                              |
 
@@ -583,8 +584,8 @@ submit 后多久可再次 submit（查该 `(table_id, policy_id)` 的 `MAX(finis
 
 | 字段                    | 前端                           | TMS 运行时                                                                 |
 | --------------------- | ---------------------------- | ----------------------------------------------------------------------- |
-| `schedule.onCommit`   | 「commit 后运行」开关               | IRC 钩子 upsert `tms-evaluate`，`execution_time = now`（§5.4）               |
-| `schedule.crontab`    | Crontab 选择器                  | evaluate 结束或策略启用后，写入下次 `scheduled_tasks.execution_time`                 |
+| `schedule.onCommit`   | 「commit 后运行」开关               | IRC 钩子 bump `tms-policy-expand` ①（`execution_time = now`）（§5.4）         |
+| `schedule.crontab`    | Crontab 选择器                  | expand 后刷新 ① 的下次 `scheduled_tasks.execution_time`                       |
 | `schedule.timezone`   | crontab 时区                   | 解析 crontab 计算下次到期时间                                                     |
 
 **规则：**
@@ -928,7 +929,7 @@ Commit 路径保持进程内，**不**调用这些 API。它们为运维与脚�
 | `list-table-metrics`      | `GET`  | `/api/maintenance/table/ops/metrics/tables`    | `identifiers`, `partitionPath`                                                                     |
 | `list-job-metrics`        | `GET`  | `/api/maintenance/table/ops/metrics/jobs`      | `identifiers`                                                                                      |
 
-每条路由调用现有 optimizer 命令实现。IRC 钩子与 `MaintenanceEvaluateSubmitPipeline` **不**调用本组。
+每条路由调用现有 optimizer 命令实现。IRC 钩子与 `MaintenanceSparkSubmitPipeline` **不**调用本组。
 
 ---
 
@@ -1047,8 +1048,8 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 | 阶段    | 工作项                                 | 说明                                                                                                              |
 | ----- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | 1     | 加载进程内插件                             | `TableMaintenanceRESTFeature`；启停 db-scheduler；`TmsPrincipalBootstrapListener`。                                  |
-| 2     | 内部 evaluate → submit 管线             | `MaintenanceEvaluateSubmitPipeline` + 按运行 submit 门控；单元测试。                                                       |
-| 3     | db-scheduler evaluate 任务            | `tms-evaluate` 处理程序；`scheduled_tasks` 迁移；heartbeat（§5.5）。                                                       |
+| 2     | 内部 expand + spark-submit 管线         | `PolicyExpandPipeline` + `MaintenanceSparkSubmitPipeline`；单元测试。                                                 |
+| 3     | db-scheduler 两类任务                   | `tms-policy-expand` + `tms-spark`；`scheduled_tasks` 迁移；heartbeat（§5.5）。                                         |
 | 4     | 进程内 IRC 钩子（入队路径）                    | 调度实例（§5.4）；`table_maintenance_job` 按运行行（§6.2）。                                                                  |
 | 5     | 加固                                  | 服务指标、优雅关闭、H2 路径测试、用户文档。                                                                                         |
 | 6     | Optimizer CLI 替代 API                | §7 ops 资源。与 `gravitino-optimizer` 相同命令。                                                                         |
@@ -1069,14 +1070,15 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 - [ ] 实现 `GravitinoTableImportService`（`TableDispatcher.loadTable` → `table_meta`；§5.5.4）。
 - [ ] import 后按 backend 解析 owner；永不将 owner 默认设为 `tms`。
-- [ ] 实现 `MaintenanceEvaluateSubmitPipeline` 调用 `Recommender.submitForStrategyName`。
-- [ ] 经 `table_maintenance_job`（`table_id` 键）强制执行每策略门控：在途 / 最小间隔。
+- [ ] 实现 `PolicyExpandPipeline`（挂载 → INSERT `tms-spark` ②；保留 ①）。
+- [ ] 实现 `MaintenanceSparkSubmitPipeline` 调用 `Recommender.submitForStrategyName`。
+- [ ] 在 ② 上经 `table_maintenance_job` 强制门控：在途 / 最小间隔；完成后 DELETE ②。
 - [ ] 经现有 Policy / `StrategyProvider` 解析 Active 挂载策略（无新策略库）。
 - [ ] 为 skip / noop / submit 结果添加单元测试。
 
 #### 阶段 3 检查清单
 
-- [ ] 添加 `TableMaintenanceScheduler` 封装 db-scheduler（`tms-evaluate` 一次性 / 可重新调度实例）。
+- [ ] 添加 `TableMaintenanceScheduler` 封装 db-scheduler（`tms-policy-expand` + `tms-spark`）。
 - [ ] 为 `scheduled_tasks` 添加 entity-store 迁移（MySQL / PostgreSQL）。
 - [ ] 从关系 entity store 接线 `DataSource`；遵守 §8.4 heartbeat 键。
 - [ ] H2 后端：调度器禁用；测试中直接调用管线（§5.5.3）。
@@ -1086,8 +1088,8 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 - [ ] 添加 `IcebergCommitEventHandler` 与主服务注册进程内回调 / SPI（§5.1.1 / §8.2）。
 - [ ] 为 **`table_maintenance_job`** 添加 EntityStore 迁移（§6.2）。
-- [ ] IRC post-commit 按需 import 进 `table_meta`（§5.5.4），再以 `{metalake_id}:{table_id}:{policy_id}` 调度
-      `tms-evaluate`；**不**在 commit 线程跑管线。不要加单独的 TMS 事件或 evaluate 状态表。
+- [ ] 策略创建/启用时 INSERT **`tms-policy-expand`** ①（`policy_id`）（§5.5.2）。
+- [ ] IRC post-commit 为 Active `onCommit` 策略 bump ①；**不**在 commit 线程插入 ②。不要加单独的 TMS 事件表。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。
 - [ ] `runJob` 成功后：`INSERT` `table_maintenance_job`（`job_run_id` + 键，`finished_at` null）；
@@ -1125,12 +1127,12 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 | ------------- | ---------------------------------------------------------------------------------------------------------------- |
 | 部署            | 经 `gravitino.server.rest.extensionPackages` 启用；IRC 同 JVM 同机。Ops API 在 **8090**（§7）。                              |
 | Classpath     | TMS 插件在主服务器 classpath；**不是** aux 隔离监听。                                                                           |
-| 触发            | **Commit 调度** `tms-evaluate`；db-scheduler pick（§5.4–§5.5）；`minIntervalMs` 仅运行时门控。                                |
-| 调度            | **db-scheduler** 拥有 `scheduled_tasks` 上短 evaluate 租约 + heartbeat（§5.5、§8.4）。                                     |
+| 触发            | Commit / crontab bump **① expand**；expand 写 **② spark**；`minIntervalMs` 仅在 ②。                                    |
+| 调度            | **db-scheduler**：① 按 `policy_id` 长期保留；② 一次性 pick 后 DELETE（§5.5、§6.1、§8.4）。                                       |
 | 作业记录          | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                          |
 | Import        | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.5.4）；非 Iceberg `registerTable`。                           |
 | Ops API       | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                           |
-| 管线            | 调度器 pick → 门控 → `Recommender` → Jobs；submit/skip 后释放 pick。                                                       |
+| 管线            | ① expand → INSERT ②；② pick → 门控 → `Recommender` → Jobs → DELETE ②。                                               |
 | Validation    | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                          |
 | Drop          | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                        |
 | 多节点           | 到期 `scheduled_tasks`：N 轮询、一个 pick；在途行阻止 Spark 双 submit。                                                          |
