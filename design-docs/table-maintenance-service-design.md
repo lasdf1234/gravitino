@@ -368,7 +368,7 @@ Deployment:
 | Part                             | Responsibility                                                                                                                         |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`; starts/stops db-scheduler; registers in-process callback and ops (§7); bootstraps `tms` user (§5.6).               |
-| `TableMaintenanceScheduler`      | Wraps db-scheduler; registers **`tms-policy-expand`** and **`tms-spark`** handlers; reconciles ① on policy create/alter (§5.5).        |
+| `TableMaintenanceScheduler`      | Two db-scheduler instances on one `scheduled_tasks` table: expand (① only, 4 threads) + spark (② only, 8 threads) (§8.4); reconciles ① on policy create/alter (§5.5). |
 | `IcebergCommitEventHandler`      | IRC commit callback; ordered commit chain for attached `onCommit` types (§5.4, §5.7.1).                                                |
 | `PolicyExpandPipeline`           | Runs inside ① pick: paged resolve → expand gates → INSERT ≤ `expand.enqueueBatchSize` **`tms-spark`** rows; cursor + re-due if more (§5.5). |
 | `MaintenanceSparkSubmitPipeline` | Runs inside ② pick: `ensureTableImported` → in-flight re-check → `Recommender` → `runJob` as `tms` → `table_maintenance_job` → **DELETE** ② (§5.5). |
@@ -1155,7 +1155,8 @@ gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.r
 gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
-gravitino.maintenance.scheduler.threads = 4
+gravitino.maintenance.scheduler.expand.threads = 4
+gravitino.maintenance.scheduler.spark.threads = 8
 ```
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
@@ -1223,14 +1224,32 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 
 ### 8.4 db-scheduler keys (`gravitino.conf`)
 
+db-scheduler exposes **one** thread pool per `Scheduler` instance. TMS runs **two** schedulers on the
+**same** `DataSource` / `scheduled_tasks` table so expand and spark-submit do not share one pool:
+
+| Scheduler instance | Registers | Default threads | `schedulerName` (illustrative) |
+| ------------------ | --------- | --------------- | ------------------------------ |
+| Expand             | `tms-policy-expand` only | `4` | `tms-expand` |
+| Spark submit       | `tms-spark` only | `8` | `tms-spark` |
+
+Both start/stop with the TMS plugin. Shared tuning (poll / heartbeat / UTC) applies to both.
+`expand.threads=4` avoids long queues when many policies become due together, without overloading
+metadata listing. `spark.threads=8` drains many short ② submits; raise only if Jobs / the cluster
+can absorb more concurrent `runJob` calls. Do **not** hand work off to a second executor inside a
+single handler (lease / completion semantics break unless the handler blocks).
+
 | Key                                                           | Default                                   | Description                                                        |
 | ------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
-| `gravitino.maintenance.scheduler.enabled`                     | `true` on MySQL/PostgreSQL; `false` on H2 | Enables embedded db-scheduler. Auto-false when entity store is H2. |
-| `gravitino.maintenance.scheduler.threads`                     | `4`                                       | db-scheduler worker threads (size for concurrent short evaluates). |
-| `gravitino.maintenance.scheduler.pollingIntervalMs`           | `10000`                                   | How often due tasks are polled.                                    |
-| `gravitino.maintenance.scheduler.heartbeatIntervalMs`         | `60000`                                   | Heartbeat while a short evaluate callback is running.              |
+| `gravitino.maintenance.scheduler.enabled`                     | `true` on MySQL/PostgreSQL; `false` on H2 | Enables both embedded schedulers. Auto-false when entity store is H2. |
+| `gravitino.maintenance.scheduler.expand.threads`              | `4`                                       | Worker threads for the expand `Scheduler` (① only).                |
+| `gravitino.maintenance.scheduler.spark.threads`               | `8`                                       | Worker threads for the spark-submit `Scheduler` (② only).          |
+| `gravitino.maintenance.scheduler.pollingIntervalMs`           | `10000`                                   | How often each scheduler polls for due tasks.                      |
+| `gravitino.maintenance.scheduler.heartbeatIntervalMs`         | `60000`                                   | Heartbeat while a short callback is running.                       |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit`       | `6`                                       | Missed heartbeats before a pick is considered dead.                |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | `true` on MySQL                           | Required for MySQL timestamp handling per db-scheduler docs.       |
+
+Operators normally leave these at defaults. JDBC pool size should be at least
+`expand.threads + spark.threads` (plus headroom for REST / IRC).
 
 Dependency (illustrative, version pinned at implementation time):
 
@@ -1287,7 +1306,7 @@ spark-submit pipeline.
 
 #### Phase 3 checklist
 
-- [ ] Add `TableMaintenanceScheduler` wrapping db-scheduler (`tms-policy-expand` + `tms-spark`).
+- [ ] Add `TableMaintenanceScheduler` with **two** db-scheduler instances (expand threads=4, spark threads=8; §8.4).
 - [ ] Add entity-store migration for `scheduled_tasks` (MySQL / PostgreSQL).
 - [ ] Wire `DataSource` from the relational entity store; honor §8.4 heartbeat keys.
 - [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (§5.5.3).

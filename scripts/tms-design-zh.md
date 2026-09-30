@@ -315,7 +315,7 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
 | 组件                               | 职责                                                                                                                           |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`；启停 db-scheduler；注册进程内回调与 ops（§7）；bootstrap `tms` 用户（§5.6）。                                                |
-| `TableMaintenanceScheduler`      | 封装 db-scheduler；注册 **`tms-policy-expand`** 与 **`tms-spark`** 处理程序；策略创建/变更时 reconcile ①（§5.5）。                                |
+| `TableMaintenanceScheduler`      | 同一 `scheduled_tasks` 上两个 db-scheduler：expand（仅 ①，4 线程）+ spark（仅 ②，8 线程）（§8.4）；策略创建/变更时 reconcile ①（§5.5）。              |
 | `IcebergCommitEventHandler`      | IRC commit 回调；对已挂载 `onCommit` 类型驱动有序 commit 链（§5.4、§5.7.1）。                                                                  |
 | `PolicyExpandPipeline`           | 在 ① pick 内运行：分页解析 → expand 门控 → INSERT ≤ `expand.enqueueBatchSize` 条 **`tms-spark`**；未完则游标 + 立刻再到期（§5.5）。                    |
 | `MaintenanceSparkSubmitPipeline` | 在 ② pick 内运行：`ensureTableImported` → 在途复检 → `Recommender` → 以 `tms` 的 `runJob` → `table_maintenance_job` → **DELETE** ②（§5.5）。 |
@@ -1029,7 +1029,8 @@ gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.r
 gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
-gravitino.maintenance.scheduler.threads = 4
+gravitino.maintenance.scheduler.expand.threads = 4
+gravitino.maintenance.scheduler.spark.threads = 8
 ```
 
 HTTP `tableMaintenance.uri` / Kafka 生产消费键**不在**范围（非目标 #5）。
@@ -1093,14 +1094,30 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 
 ### 8.4 db-scheduler 键（`gravitino.conf`）
 
+db-scheduler **每个** `Scheduler` 实例只有**一个**线程池。TMS 在**同一** `DataSource` /
+`scheduled_tasks` 上启动**两个**调度器，避免 expand 与 spark-submit 抢同一池：
+
+| 调度器实例 | 注册的任务 | 默认线程数 | `schedulerName`（示例） |
+| ----- | ----- | ----- | ------------------- |
+| Expand | 仅 `tms-policy-expand` | `4` | `tms-expand` |
+| Spark submit | 仅 `tms-spark` | `8` | `tms-spark` |
+
+随 TMS 插件一起启停。轮询 / heartbeat / UTC 等共享配置两边一致。
+`expand.threads=4`：整点多个 policy 到期时不至于排太久，又不把元数据列表打满。
+`spark.threads=8`：消化大量短 ② submit；仅当 Jobs / 集群扛得住更多并发 `runJob` 时再调高。
+**不要**在单个 handler 里再丢到第二个线程池后立刻 return（租约 / 完成语义会乱，除非 handler 阻塞等待）。
+
 | 键                                                             | 默认                                     | 说明                                              |
 | ------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------- |
-| `gravitino.maintenance.scheduler.enabled`                     | MySQL/PostgreSQL 上 `true`；H2 上 `false` | 启用嵌入式 db-scheduler。entity store 为 H2 时自动 false。 |
-| `gravitino.maintenance.scheduler.threads`                     | `4`                                    | db-scheduler 工作线程（并发短 evaluate 定容）。             |
-| `gravitino.maintenance.scheduler.pollingIntervalMs`           | `10000`                                | 轮询到期任务的频率。                                      |
-| `gravitino.maintenance.scheduler.heartbeatIntervalMs`         | `60000`                                | 短 evaluate 回调运行时的 heartbeat。                    |
+| `gravitino.maintenance.scheduler.enabled`                     | MySQL/PostgreSQL 上 `true`；H2 上 `false` | 启用两个嵌入式调度器。entity store 为 H2 时自动 false。 |
+| `gravitino.maintenance.scheduler.expand.threads`              | `4`                                    | expand 调度器工作线程（仅 ①）。             |
+| `gravitino.maintenance.scheduler.spark.threads`               | `8`                                    | spark-submit 调度器工作线程（仅 ②）。          |
+| `gravitino.maintenance.scheduler.pollingIntervalMs`           | `10000`                                | 每个调度器轮询到期任务的频率。                                      |
+| `gravitino.maintenance.scheduler.heartbeatIntervalMs`         | `60000`                                | 短回调运行时的 heartbeat。                    |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit`       | `6`                                    | pick 视为死亡前错过的 heartbeat 数。                      |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | MySQL 上 `true`                         | 按 db-scheduler 文档 MySQL 时间戳处理需要。                |
+
+运维通常保持默认即可。JDBC 连接池大小至少为 `expand.threads + spark.threads`（再给 REST / IRC 留余量）。
 
 依赖（示例，实现时固定版本）：
 
@@ -1152,7 +1169,7 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 #### 阶段 3 检查清单
 
-- [ ] 添加 `TableMaintenanceScheduler` 封装 db-scheduler（`tms-policy-expand` + `tms-spark`）。
+- [ ] 添加 `TableMaintenanceScheduler`：**两个** db-scheduler 实例（expand 线程=4，spark 线程=8；§8.4）。
 - [ ] 为 `scheduled_tasks` 添加 entity-store 迁移（MySQL / PostgreSQL）。
 - [ ] 从关系 entity store 接线 `DataSource`；遵守 §8.4 heartbeat 键。
 - [ ] H2 后端：调度器禁用；测试中直接调用管线（§5.5.3）。
