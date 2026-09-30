@@ -217,7 +217,7 @@ TMS 在 `scheduled_tasks`（db-scheduler）上使用**两类**行。写入一行
 | 种类                      | `task_name`（示例）     | 何时创建                         | 实例键                                                                | pick 之后                                                           |
 | ----------------------- | ------------------- | ---------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | ① Policy → Spark expand | `tms-policy-expand` | 策略**创建 / 启用**（变更时 reconcile） | `{policy_id}`                                                      | 解析 policy → **INSERT** 零或多条 ②；**保留** ①（设下次 `execution_time`）      |
-| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | `{policy_id}:{table_id}` 或 `{policy_id}:batch:{batch_id}`（每工作单元唯一） | 门控 → `runJob` → `INSERT table_maintenance_job` → **DELETE** 该 ② 行 |
+| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | crontab：`{policy_id}:{table_id}` / batch；**commit：** `{table_id}:{policy_id}[:{policy_id}…]`（§5.5.2） | submit 队首 → `table_maintenance_job` → **DELETE** ②；commit 可再入队剩余 |
 
 **生命周期概要：**
 
@@ -231,16 +231,19 @@ onCommit / crontab 到期
 
 ① 被 pick（一个节点）
   → 读 policy_meta + 挂载；列出 / 过滤表（§5.5.4）
-  → 对每个工作单元：在途或仍在 minIntervalMs 内则跳过；否则 INSERT ② tms-spark
+  → 对候选应用 expand 门控（在途 / minIntervalMs）
+  → crontab：每个未门控单元 INSERT ②（`{policy_id}:{table_id}`）
+  → commit：为该表 INSERT **一条** ② `{table_id}:{policy_id}:…`
+       （仅未门控的 policy_id，按 §5.7.1；被门控的不写入，键里 policy 更少）
   → 按 crontab 设 ① 下次 execution_time（或等待下次 commit bump）
   → **不**删除 ①（除非策略禁用 / 删除 / 替换）
 
-② 被 pick（每行一个节点；多条 ② 可在不同节点并行）
-  → 门控（在途）→ Recommender → 以 tms 的 runJob
+② 被 pick（每行一个节点；crontab 多条 ② 可跨节点并行）
+  → 门控（在途）→ Recommender → 以 tms 的 runJob（commit：键中第一个 policy_id）
   → INSERT table_maintenance_job（job_run_id + 键；finished_at NULL）
   → DELETE 该 ② scheduled_tasks 行
   → 返回；Spark 在作业框架继续
-  → 终态：UPDATE table_maintenance_job 的 before/after/finished_at
+  → 终态：UPDATE 指标；commit 链：若仍有剩余 policy_id，INSERT 更短键的下一条 ②
 ```
 
 ```text
@@ -252,7 +255,9 @@ Gravitino IRC (:9001)
         └─ post-commit → IcebergCommitEventHandler (§5.4)
                 ├─ 解析该表已挂载 onCommit 类型
                 ├─ 顺序：compaction → manifest-rewrite → snapshot-expiry（§5.7.1）
-                └─ 驱动 expand / ② 链（跳过未挂载类型；无 orphan-cleanup）
+                ├─ expand 门控 → 去掉仍在 minInterval / 在途的 policy
+                └─ 入队 commit ② `task_instance = {table_id}:{policy_id}:…`
+                      （仅剩余 policy_id；全被门控则不入队）
 
 Node A / Node B / Node C  — 各轮询 db-scheduler（§5.5）；N 抢 1 中
         │
@@ -355,7 +360,7 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
    ```
 
 3. 引擎经 Gravitino Iceberg REST 写入。commit 成功后，**IRC 钩子**对该表已挂载的 `onCommit` 类型驱动**有序** commit 链（§5.4、§5.7.1）。
-4. Expand / ② 链按 §5.7.1 顺序推进：expand 门控后入队 ② → `runJob` → `INSERT` 作业行 → **DELETE** 该 ②；前一类型终态后再入队下一类型（§5.5、§6）。
+4. Expand 门控后入队 commit ②（`{table_id}:{policy_ids…}`）→ submit 队首 → **DELETE** ②；终态再入队更短键（§5.5、§6）。
    每个实例**只有一个**节点执行。
 5. 运维在 Gravitino **Jobs** UI / API 观察运行（含来自 `table_maintenance_job` 的 Validation）。自动化 Job 的 `audit.creator` 为 **`tms`**。
    §7 ops API 可 bump ① 或在测试钩子下入队 ②。
@@ -375,11 +380,18 @@ IRC commit 成功（同 JVM）
               │     （table / schema / catalog；每类型最近挂载优先）
               ├─ 过滤为允许 commit 的类型；排除 orphan-cleanup（§5.7）
               ├─ 按固定顺序排序剩余类型（§5.7.1）
-              └─ 驱动 expand，使该表的 ② **按该顺序**入队
-                    （见 §5.7.1；commit 路径不要并行跑多种类型）
+              ├─ 对每个 policy 做 expand 门控（在途 / minIntervalMs；§5.5.3）
+              │     → 被门控的 policy 不进入运行列表
+              └─ 若仍有 policy_id：入队 **一条** commit ②
+                    task_instance = {table_id}:{policy_id1}:{policy_id2}:…
+                    （policy_id = 未门控集合，已按 §5.7.1 排序）
+                    task_data 标记 path=commit（与 crontab ② 区分）
 ```
 
-IRC 路径**不**调用 `runJob`。同一表的并发 commit 合并到该表**待处理的有序链**（链在途时不要开第二条）。
+IRC 路径**不**调用 `runJob`。**`task_instance` 只带将要执行的 policy** —— 仍在 `minIntervalMs`
+（或在途）内的 **不写入**，键里的 `policy_id` 段会变少。若候选全被门控，**不**插入 ②。
+
+同一表的并发 commit 合并到该 `table_id` 上**待处理的 commit 链 ②**（链在途 / 待跑时不要开第二条）。
 
 ### 5.5 执行路径 — expand pick + spark-submit pick
 
@@ -392,11 +404,15 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
         │     ├─ 加载 policy_meta / content.schedule / 挂载
         │     ├─ 解析目标表（commit 提示 → 单表；crontab → 挂载范围内列表）
         │     ├─ 对候选 ensureTableImported（§5.5.4）
-        │     ├─ 对每个工作单元：应用 expand 门控（在途 / minIntervalMs；§5.5.3）
-        │     │     → 被门控则跳过（不 INSERT ②）
-        │     ├─ crontab 路径：为未门控单元 INSERT 到期 ②（execution_time = now）
+        │     ├─ 对每个候选：应用 expand 门控（在途 / minIntervalMs；§5.5.3）
+        │     │     → 被门控者不入队
+        │     ├─ crontab 路径：每个未门控单元 INSERT 一条 ②（execution_time = now）
         │     │     task_instance = {policy_id}:{table_id}
-        │     ├─ commit 路径：按 §5.7.1 顺序为该表入队未门控 ②（链式）
+        │     │     task_data.path = crontab
+        │     ├─ commit 路径：为该表 INSERT **一条** ②（execution_time = now）
+        │     │     task_instance = {table_id}:{policy_id1}:{policy_id2}:…
+        │     │       （仅未门控 policy_id，§5.7.1 顺序；有门控则段数更少）
+        │     │     task_data.path = commit
         │     ├─ 按 crontab 设 ① 下次 execution_time（若有）；否则等下次 commit bump
         │     └─ 返回（① **不**删除）
         └─ 死 JVM → 错过 heartbeat → ① 可再次运行
@@ -406,10 +422,14 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
         ├─ MaintenanceSparkSubmitPipeline：
         │     ├─ ensureTableImported（§5.5.4）
         │     ├─ 若在途（finished_at IS NULL）→ DELETE ②；返回
+        │     ├─ 解析目标 policy_id：
+        │     │     crontab → 键中唯一的 policy_id
+        │     │     commit → 键中 table_id 后的**第一个** policy_id
         │     ├─ Recommender → 叠加 jobOptions / SecretManager；以 tms 的 runJob
         │     ├─ INSERT table_maintenance_job（job_run_id + 键；finished_at NULL）（§6.2）
         │     ├─ DELETE 该 ② scheduled_tasks 行
-        │     ├─ 若是 commit 链：job 终态后按顺序入队下一类型（§5.7.1）
+        │     ├─ commit 链：job 终态后，若原键仍有剩余 policy_id，
+        │     │     INSERT 下一条 ②，task_instance = {table_id}:{剩余 policy_id…}
         │     └─ 返回（Spark 异步）
         └─ 回调中途死 JVM → 错过 heartbeat → ② 可能再次被 pick
            （幂等门控 + 唯一工作单元键避免双 submit）
@@ -438,10 +458,16 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
 
 | 任务名                 | 实例键                                                       | 何时创建 / 到期                             | 动作                                                    |
 | ------------------- | --------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------- |
-| `tms-policy-expand` | `{policy_id}`                                             | 策略创建/启用；crontab 或 commit bump 到期      | Expand → INSERT ②；保留 ①                                |
-| `tms-spark`         | `{policy_id}:{table_id}` 或 `{policy_id}:batch:{batch_id}` | 由 ① 写入；通常立即到期（`execution_time = now`） | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| `tms-policy-expand` | `{policy_id}` | 策略创建/启用；crontab 或 commit bump 到期 | Expand → INSERT ②；保留 ① |
+| `tms-spark`（crontab） | `{policy_id}:{table_id}` 或 `{policy_id}:batch:{batch_id}` | ① crontab expand 写入；通常立即到期 | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| `tms-spark`（commit） | `{table_id}:{policy_id}[:{policy_id}…]` | commit expand 过门控后写入；通常立即到期 | Submit **第一个** policy_id → DELETE ②；终态再入队剩余（若有） |
 
 实例键只使用代理 id（`policy_id`、`table_id`）。在 entity store 中将其视为**全局唯一**，因此 `task_instance` **不需要** `metalake_id`（需要 metalake 时从 `policy_meta` / `table_meta` 反查即可）。
+
+**Commit ② 命名：** 先 `{table_id}`，再按 §5.7.1 依次追加**将要执行的** `policy_id`。Expand 门控在拼键
+**之前**执行 —— 仍在 `minIntervalMs`（或在途）内的 policy **不追加**，因此三策略表可能只入队
+`{table_id}:{p_compaction}:{p_expiry}`（manifest-rewrite 被门控掉）。用 `task_data.path =
+commit|crontab` 区分两段式键，避免与 crontab `{policy_id}:{table_id}` 歧义。
 
 **策略生命周期 → ①：** 创建/启用 → INSERT ①；变更 schedule → 更新 ① `execution_time` / `task_data`；禁用/删除 → DELETE ① 并 DELETE 该 `policy_id` 下未完成的 ②。
 
@@ -588,8 +614,8 @@ job 结束后多久 expand 可再入队 ②（查该 `(table, policy)` 的 `MAX(
 
 **未**挂载（或未开 `onCommit`）的类型**跳过** —— 链继续到列表中下一个已挂载类型。不要重排已挂载类型。不要插入未挂载类型。
 
-**串行：** 仅当前一类型对该表的 Spark 运行到达终态（或被门控 / Recommender 跳过）后，才入队 / 启动下一类型的
-`tms-spark` ②。前一类型在途时不要 submit 下一类型。
+**串行：** commit ② 键列出全部剩余 `policy_id`。先 submit **第一个**；该 job 终态后再用更短键入队剩余
+（或结束）。前一 policy 在途时不要 submit 下一个。
 
 **Crontab 路径**仍按策略各自 expand（每个 `policy_id` 一条 ①），**不**要求这种跨类型顺序，除非产品后续统一定时跑法。
 
@@ -832,9 +858,12 @@ Node A / B / C 轮询
 -- 由 db-scheduler 拥有；见上游 DDL
 -- PRIMARY KEY (task_name, task_instance)
 -- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
--- ② task_name = 'tms-spark', task_instance = '{policy_id}:{table_id}' or '{policy_id}:batch:{batch_id}'
+-- ② crontab: task_name = 'tms-spark', task_instance = '{policy_id}:{table_id}' or batch
+-- ② commit:  task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
+--            （仅未门控 policy_id；task_data.path = commit）
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- ② pick 路径成功结束后（submit 或门控跳过）：DELETE 该行。
+-- commit 剩余（若有）用更短 commit 键再 INSERT。
 -- ① 仅在策略禁用 / 删除 / 替换时删除（§5.5.2）。
 ```
 
@@ -930,7 +959,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
 Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`：
 
 1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
-2. `DELETE` `task_instance` 包含该 `table_id` 的未完成 **`tms-spark`** ② 行。
+2. `DELETE` 该表相关未完成 **`tms-spark`** ②（crontab 键含 `{table_id}`；commit 键以 `{table_id}:` 开头）。
 3. 对 `(metalake_id, table_id)` `DELETE` `table_maintenance_job`。
 4. **不**删除 **`tms-policy-expand`** ①（策略级）；该 policy 下其余表仍可在下次到期 expand。在途 Spark job **不**由此钩子取消。
 
@@ -1126,7 +1155,7 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ② + `table_maintenance_job` 行（§6.3）。
 - [ ] `runJob` 成功后：`INSERT` `table_maintenance_job`；**DELETE** ②；终态：`UPDATE` 指标 + `finished_at`（§6.2）。
-- [ ] 集成测试：commit 驱动有序链；expand 在 INSERT ② 前应用 minInterval / 在途；② pick submit 后删行；在途竞态跳过；drop 清理 ② + 作业行。
+- [ ] 集成测试：commit ② 键为过 minInterval 后的 `{table_id}:{policy_ids…}`；有门控则键更短；终态入队剩余；crontab 键不变；drop 清理 ② + 作业行。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
 #### 阶段 5 检查清单
