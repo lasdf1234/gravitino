@@ -213,16 +213,16 @@ TMS Jobs 的 IRC 客户端认证与 credential-vending 所需 secret（密码、
 TMS 在 `scheduled_tasks`（db-scheduler）上使用**两类**行。写入一行**不等于**每个节点都执行：
 **每个**节点轮询；每个到期实例 **N 抢 1 中**。
 
-| 种类                      | `task_name`（示例）     | 何时创建                         | 实例键                                                     | pick 之后                                                           |
-| ----------------------- | ------------------- | ---------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------- |
-| ① Policy → Spark expand | `tms-policy-expand` | 策略**创建 / 启用**（变更时 reconcile） | `{metalake_id}:{policy_id}`                             | 解析 policy → **INSERT** 零或多条 ②；**保留** ①（设下次 `execution_time`）      |
-| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | `{metalake_id}:{policy_id}:{table_id}[:batch]`（每工作单元唯一） | 门控 → `runJob` → `INSERT table_maintenance_job` → **DELETE** 该 ② 行 |
+| 种类                      | `task_name`（示例）     | 何时创建                         | 实例键                                                                | pick 之后                                                           |
+| ----------------------- | ------------------- | ---------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| ① Policy → Spark expand | `tms-policy-expand` | 策略**创建 / 启用**（变更时 reconcile） | `{policy_id}`                                                      | 解析 policy → **INSERT** 零或多条 ②；**保留** ①（设下次 `execution_time`）      |
+| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | `{policy_id}:{table_id}` 或 `{policy_id}:batch:{batch_id}`（每工作单元唯一） | 门控 → `runJob` → `INSERT table_maintenance_job` → **DELETE** 该 ② 行 |
 
 **生命周期概要：**
 
 ```text
 创建 / 启用维护策略（policy_id = P）
-  → INSERT scheduled_tasks ① tms-policy-expand / {metalake_id}:{P}
+  → INSERT scheduled_tasks ① tms-policy-expand / {policy_id}
      execution_time = 下次 crontab（若仅 onCommit，可先放到远未来直至首次 commit）
 
 onCommit / crontab 到期
@@ -251,7 +251,7 @@ Gravitino IRC (:9001)
         └─ post-commit → IcebergCommitEventHandler (§5.4)
                 ├─ 解析该表 Active（onCommit）策略
                 └─ bump tms-policy-expand ①
-                      task_instance = {metalake_id}:{policy_id}
+                      task_instance = {policy_id}
                       execution_time = now
                       （可选 task_data：已提交 table_id）
 
@@ -302,7 +302,7 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
 | 部署          | IRC（`iceberg-rest`）与主 Gravitino 服务器共享**一个 JVM**。                                                                                              |
 | 传输          | 仅进程内回调 / SPI —— **无** HTTP `POST …/events/iceberg-commit`，**无** Kafka。                                                                        |
 | 载荷          | 规范化 `table_identifier`（`catalog.schema.table`）与已提交 `snapshot_id`。策略选择使用 Active 策略 + `onCommit`。                                               |
-| 入队          | Upsert / bump `tms-policy-expand`，`task_instance = {metalake_id}:{policy_id}`，`execution_time = now`。                                         |
+| 入队          | Upsert / bump `tms-policy-expand`，`task_instance = {policy_id}`，`execution_time = now`。                                                       |
 | 执行          | 所有节点轮询；**一个** pick 跑 expand ① → 写 ②；随后 pick 跑 ② submit 再 **DELETE** ②（§5.5）。                                                                  |
 | 调度          | db-scheduler 嵌入 TMS 插件；与 MySQL / PostgreSQL entity store 使用同一 JDBC DataSource。                                                                |
 
@@ -395,7 +395,7 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
         │     ├─ 解析目标表（commit 提示 → 单表；crontab → 挂载范围内列表）
         │     ├─ 对候选 ensureTableImported（§5.5.4）
         │     ├─ 对每个工作单元（表或 snapshot-expiry batch）：INSERT tms-spark ②
-        │     │     task_instance = {metalake_id}:{policy_id}:{table_id}[…]
+        │     │     task_instance = {policy_id}:{table_id}
         │     │     execution_time = now
         │     ├─ 按 crontab 设 ① 下次 execution_time（若有）；否则等下次 commit bump
         │     └─ 返回（① **不**删除）
@@ -436,10 +436,12 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
 
 #### 5.5.2 db-scheduler 任务
 
-| 任务名                   | 实例键                                                     | 何时创建 / 到期                                    | 动作                                                    |
-| --------------------- | ------------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------- |
-| `tms-policy-expand`   | `{metalake_id}:{policy_id}`                             | 策略创建/启用；crontab 或 commit bump 到期             | Expand → INSERT ②；保留 ①                                |
-| `tms-spark`           | `{metalake_id}:{policy_id}:{table_id}`（+ batch 后缀）      | 由 ① 写入；通常立即到期（`execution_time = now`）        | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| 任务名                   | 实例键                                                       | 何时创建 / 到期                                    | 动作                                                    |
+| --------------------- | --------------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------- |
+| `tms-policy-expand`   | `{policy_id}`                                             | 策略创建/启用；crontab 或 commit bump 到期             | Expand → INSERT ②；保留 ①                                |
+| `tms-spark`           | `{policy_id}:{table_id}` 或 `{policy_id}:batch:{batch_id}` | 由 ① 写入；通常立即到期（`execution_time = now`）        | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+
+实例键只使用代理 id（`policy_id`、`table_id`）。在 entity store 中将其视为**全局唯一**，因此 `task_instance` **不需要** `metalake_id`（需要 metalake 时从 `policy_meta` / `table_meta` 反查即可）。
 
 **策略生命周期 → ①：** 创建/启用 → INSERT ①；变更 schedule → 更新 ① `execution_time` / `task_data`；禁用/删除 → DELETE ① 并 DELETE 该 `policy_id` 下未完成的 ②。
 
@@ -801,8 +803,8 @@ Node A / B / C 轮询
 ```sql
 -- 由 db-scheduler 拥有；见上游 DDL
 -- PRIMARY KEY (task_name, task_instance)
--- ① task_name = 'tms-policy-expand', task_instance = '{metalake_id}:{policy_id}'
--- ② task_name = 'tms-spark', task_instance = '{metalake_id}:{policy_id}:{table_id}[…]'
+-- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
+-- ② task_name = 'tms-spark', task_instance = '{policy_id}:{table_id}' or '{policy_id}:batch:{batch_id}'
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- ② pick 路径成功结束后（submit 或门控跳过）：DELETE 该行。
 -- ① 仅在策略禁用 / 删除 / 替换时删除（§5.5.2）。

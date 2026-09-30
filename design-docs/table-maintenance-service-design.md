@@ -254,16 +254,16 @@ keytabs, and similar).
 TMS uses **two kinds of rows in `scheduled_tasks`** (db-scheduler). Writing a row does **not** mean
 every node runs it: **every** node polls; **N compete, one pick wins** per due instance.
 
-| Kind                    | `task_name` (illustrative) | When created                                        | Instance key                                                          | After pick                                                                            |
-| ----------------------- | -------------------------- | --------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| ① Policy → Spark expand | `tms-policy-expand`        | Policy **create / enable** (and reconcile on alter) | `{metalake_id}:{policy_id}`                                           | Parse policy → **INSERT** zero or more ② rows; **keep** ① (set next `execution_time`) |
-| ② Spark submit unit     | `tms-spark`                | Written by ① when expand runs                       | `{metalake_id}:{policy_id}:{table_id}[:batch]` (unique per work unit) | Gates → `runJob` → `INSERT table_maintenance_job` → **DELETE** this ② row             |
+| Kind                    | `task_name` (illustrative) | When created                                        | Instance key                                                                      | After pick                                                                            |
+| ----------------------- | -------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| ① Policy → Spark expand | `tms-policy-expand`        | Policy **create / enable** (and reconcile on alter) | `{policy_id}`                                                                     | Parse policy → **INSERT** zero or more ② rows; **keep** ① (set next `execution_time`) |
+| ② Spark submit unit     | `tms-spark`                | Written by ① when expand runs                       | `{policy_id}:{table_id}` or `{policy_id}:batch:{batch_id}` (unique per work unit) | Gates → `runJob` → `INSERT table_maintenance_job` → **DELETE** this ② row             |
 
 **Lifecycle sketch:**
 
 ```text
 Create / enable maintenance policy (policy_id = P)
-  → INSERT scheduled_tasks ① tms-policy-expand / {metalake_id}:{P}
+  → INSERT scheduled_tasks ① tms-policy-expand / {policy_id}
      execution_time = next crontab (or far-future if onCommit-only until first commit)
 
 onCommit / crontab due
@@ -292,7 +292,7 @@ Gravitino IRC (:9001)
         └─ post-commit → IcebergCommitEventHandler (§5.4)
                 ├─ resolve Active policies (onCommit) for this table
                 └─ bump tms-policy-expand ①
-                      task_instance = {metalake_id}:{policy_id}
+                      task_instance = {policy_id}
                       execution_time = now
                       (optional task_data hint: committed table_id)
 
@@ -346,7 +346,7 @@ table metadata (optional to record on `table_maintenance_job.before_metrics` whe
 | Deployment  | IRC (`iceberg-rest`) and the main Gravitino server share **one JVM**.                                                                           |
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka.                                                      |
 | Payload     | Normalized `table_identifier` (`catalog.schema.table`) and the committed `snapshot_id`. Policy selection uses Active policies + `onCommit`.     |
-| Enqueue     | Upsert / bump `tms-policy-expand` with `task_instance = {metalake_id}:{policy_id}`, `execution_time = now`.                                     |
+| Enqueue     | Upsert / bump `tms-policy-expand` with `task_instance = {policy_id}`, `execution_time = now`.                                                   |
 | Execute     | All nodes poll; **one** pick runs expand ① → writes ②; later picks run ② submit then **DELETE** ② (§5.5).                                       |
 | Scheduling  | db-scheduler embedded in the TMS plugin; same JDBC DataSource as the entity store on MySQL / PostgreSQL.                                        |
 
@@ -455,7 +455,7 @@ db-scheduler (every TMS node polls; only one pick wins per due instance)
         │     ├─ resolve target tables (commit hint → one table; crontab → list under attach)
         │     ├─ ensureTableImported for candidates (§5.5.4)
         │     ├─ for each work unit (table or snapshot-expiry batch): INSERT tms-spark ②
-        │     │     task_instance = {metalake_id}:{policy_id}:{table_id}[…]
+        │     │     task_instance = {policy_id}:{table_id}
         │     │     execution_time = now
         │     ├─ set ① next execution_time from crontab (if any); else wait for next commit bump
         │     └─ return (① NOT deleted)
@@ -499,10 +499,12 @@ NULL` gates further submits for that `(table, policy)`.
 
 #### 5.5.2 db-scheduler tasks
 
-| Task name             | Instance key                                              | When created / due                                      | Action                                                                 |
-| --------------------- | --------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `tms-policy-expand`   | `{metalake_id}:{policy_id}`                               | Policy create/enable; due on crontab or commit bump     | Expand → INSERT ②; retain ①                                            |
-| `tms-spark`           | `{metalake_id}:{policy_id}:{table_id}` (+ batch suffix)   | Written by ①; due immediately (`execution_time = now`)  | Submit Spark → `table_maintenance_job` → **DELETE** ②                  |
+| Task name             | Instance key                                               | When created / due                                      | Action                                                                 |
+| --------------------- | ---------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `tms-policy-expand`   | `{policy_id}`                                              | Policy create/enable; due on crontab or commit bump     | Expand → INSERT ②; retain ①                                            |
+| `tms-spark`           | `{policy_id}:{table_id}` or `{policy_id}:batch:{batch_id}` | Written by ①; due immediately (`execution_time = now`)  | Submit Spark → `table_maintenance_job` → **DELETE** ②                  |
+
+Instance keys use surrogate ids only (`policy_id`, `table_id`). Those ids are treated as **globally unique** in the entity store, so `metalake_id` is not required in `task_instance` (metalake remains available via `policy_meta` / `table_meta` when needed).
 
 **Policy lifecycle → ①:** create/enable → INSERT ①; alter schedule → update ① `execution_time` /
 `task_data`; disable/drop → DELETE ① and DELETE outstanding ② for that `policy_id`.
@@ -674,7 +676,7 @@ Illustrative `content.schedule` (exact field names may be finalized with the Pol
 **Rules:**
 
 - At least one of `onCommit` or `crontab` should be set for automated maintenance; both may be set
-  on the same policy (same ① `task_instance = {metalake_id}:{policy_id}`).
+  on the same policy (same ① `task_instance = {policy_id}`).
 - `crontab` only — common for snapshot-expiry / orphan-cleanup on tables with few commits.
 - `onCommit` only — common for streaming compaction; expand may still enqueue ② that later skip
   submit when `Recommender` thresholds fail.
@@ -906,8 +908,8 @@ Illustrative `scheduled_tasks` usage (db-scheduler owned; MySQL-shaped):
 ```sql
 -- owned by db-scheduler; see upstream DDL
 -- PRIMARY KEY (task_name, task_instance)
--- ① task_name = 'tms-policy-expand', task_instance = '{metalake_id}:{policy_id}'
--- ② task_name = 'tms-spark', task_instance = '{metalake_id}:{policy_id}:{table_id}[…]'
+-- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
+-- ② task_name = 'tms-spark', task_instance = '{policy_id}:{table_id}' or '{policy_id}:batch:{batch_id}'
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- After ② pick path completes successfully (submit or gated skip): DELETE that row.
 -- ① is deleted only on policy disable / drop / replace (§5.5.2).
