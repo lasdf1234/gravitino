@@ -518,8 +518,11 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 #### 5.6.1 Commit 驱动的类型顺序
 
-对给定表的 **commit 路径**，TMS **不会**并行跑所有已挂载的 `onCommit` 类型。它先收集该表 Active、已挂载、
-允许 commit 的类型，再**仅对实际挂载的类型**按以下**固定**顺序执行：
+**`onCommit` 仅支持** `compaction`、`manifest-rewrite`、`snapshot-expiry`，且**严格按此顺序**。
+**不支持** `orphan-cleanup` 的 `onCommit`（孤儿清理仅为 crontab）。
+
+对给定表的 **commit 路径**，TMS **不会**并行跑这些类型。只取 Active、已挂载且开启 `onCommit` 的子集，
+再**严格按下列固定顺序**执行（未挂载 / 未开 `onCommit` 的类型跳过；不重排；不插入未挂载类型）：
 
 ```text
 1. compaction
@@ -527,7 +530,8 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 3. snapshot-expiry
 ```
 
-**未**挂载（或未开 `onCommit`）的类型**跳过** —— 链继续到列表中下一个已挂载类型。不要重排已挂载类型。不要插入未挂载类型。
+**配置不一致：** 若多层挂载 / 多条策略对同一数值参数（如门槛、`minIntervalMs`）取值不同，TMS 取**最大**
+的那份配置。
 
 **串行：** `tms-table-commit` 每表一行 `{table_id}`。pick 时取 5.6.1 队首并短 submit；该 Job **终态**后
 若仍需下一类型再 upsert 同一 `{table_id}`。前一 policy 仍 `finished_at IS NULL` 时不要 submit 下一个。

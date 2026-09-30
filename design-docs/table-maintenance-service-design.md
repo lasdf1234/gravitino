@@ -637,9 +637,12 @@ for orphan-cleanup (or ignores it). Orphan cleanup is **crontab-only**.
 
 #### 5.6.1 Commit-driven type order
 
-On the **commit path** for a given table, TMS does **not** run every attached `onCommit` type in
-parallel. It builds the set of Active, attached, commit-allowed types for that table, then runs
-**only those types that are actually attached**, in this **fixed** order:
+**`onCommit` allows only** `compaction`, `manifest-rewrite`, and `snapshot-expiry` — **in that
+strict order**. **`orphan-cleanup` is not allowed** on `onCommit` (crontab-only).
+
+On the **commit path** for a given table, TMS does **not** run those types in parallel. It takes
+the Active, attached, `onCommit`-enabled subset, then runs them **only in the fixed order below**
+(skip any type that is not attached or not `onCommit`; never reorder; never invent a missing type):
 
 ```text
 1. compaction
@@ -647,9 +650,8 @@ parallel. It builds the set of Active, attached, commit-allowed types for that t
 3. snapshot-expiry
 ```
 
-Types that are **not** attached (or not `onCommit`) are **skipped** — the chain continues with the
-next attached type in the list. Never reorder attached types. Never insert a type that is not
-attached.
+**Conflicting parameters:** if overlapping policies / attachments disagree on a numeric option
+(for example thresholds or `minIntervalMs`), TMS uses the **maximum** configured value.
 
 **Sequencing:** `tms-table-commit` is one row per `{table_id}`. Submit the 5.6.1 head chosen at
 pick time; on that Job’s terminal, upsert the same `{table_id}` again if another type is still
