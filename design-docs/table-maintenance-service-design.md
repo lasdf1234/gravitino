@@ -551,6 +551,9 @@ Use an **`EventListenerPlugin`**, not an IRC hook and **not** a change to the me
 
 #### Built-in role and privileges (authorization enabled)
 
+When the Gravitino process starts with authorization enabled, TMS **automatically** creates the
+built-in role and grants (no manual grant step).
+
 TMS creates a built-in role (illustrative name `tms_maintenance`) granted to user `tms` on the
 **metalake** so grants apply to all catalogs / schemas / tables under it.
 
