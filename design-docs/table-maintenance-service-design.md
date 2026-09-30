@@ -416,8 +416,9 @@ Deployment:
 
 3. Engines write through Gravitino Iceberg REST. On commit success, the **IRC hook** drives the
    **ordered** commit chain for attached `onCommit` types on that table (§5.4, §5.7.1).
-4. Scheduler picks expand / `tms-spark` ② in chain order: gates → `runJob` → `INSERT` job row →
-   **DELETE** ② → on terminal enqueue the next attached type. Only **one** node runs each instance.
+4. Expand gates, then enqueue one commit ② (`{table_id}:{policy_ids…}`); pick submits the head
+   policy → **DELETE** ② → on terminal enqueue a shorter key if policy_ids remain. Only **one**
+   node runs each instance.
 5. Operators observe runs in the Gravitino **Jobs** UI / APIs (including Validation from
    `table_maintenance_job`). Automated Job `audit.creator` is **`tms`**. Manual ops APIs in §7 may
    bump ① or enqueue ② under test hooks.
