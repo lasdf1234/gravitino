@@ -62,13 +62,13 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 6. **复用 Govern Policy**：维护策略仍在现有 `policy_meta` 与 metalake Policy API
    （create / alter / enable / disable / associate）。TMS **不**另建策略库或
    `/api/maintenance/table/policies` CRUD。
-7. **多节点安全执行**：db-scheduler pick + heartbeat 是每个 `scheduled_tasks` 实例的互斥锁（① 与 ② 皆然）
+7. **多节点安全执行**：db-scheduler pick + heartbeat 是每个 `scheduled_tasks` 实例的互斥锁（① / ② / ③）
    （5.4、§6）。同一 `(table, policy)` 的并发 Spark 提交还由在途 `table_maintenance_job` 行门控（§6.2）。
 8. **按运行维护作业表**：Gravitino 为每个 Spark `job_run_id` 持久化一行 `table_maintenance_job`
    （Validation JSON + `finished_at`）。调度任务的入队 / 回收在 `scheduled_tasks`（上述三类）。
 9. **Crontab expand 与 commit 唤醒分离**：crontab 让 **① 到期**并写出 **`tms-table-scheduler`**（§5.4）。
-   commit **不走** expand 池：IRC upsert **`tms-table-commit`** `{table_id}`，由 **table** 池 pick 并在
-   pick 时解析 policy（5.1.1、§6.2）。
+   commit **不走** expand / table 池：IRC upsert **`tms-table-commit`** `{table_id}`，由 **commit** 池
+   pick 并在 pick 时解析 policy（§5.1.1、§6.2）。
 10. **专用 TMS 执行主体**：所有自动化维护（commit 后事件入队与定时策略到期）均以内置 metalake 用户 **`tms`**
     提交 Jobs，而非创建策略的运维人员（§5.5）。
 11. **策略 evaluate 触发方式**：自动化维护在 `policy_version_info.content.schedule` 中配置
@@ -204,8 +204,8 @@ TMS Jobs 的 IRC 客户端认证与 credential-vending 所需 secret（密码、
 
 ### 5.1 架构
 
-TMS 在 `scheduled_tasks`（db-scheduler）上使用**三类**任务。写入一行**不等于**每个节点都执行：
-expand 池与 table 池轮询；每个到期实例 **N 抢 1**。
+TMS 在 `scheduled_tasks`（db-scheduler）上使用**三类**任务与**三池**（expand / table / commit）。
+写入一行**不等于**每个节点都执行：三池轮询；每个到期实例 **N 抢 1**。
 
 | 种类 | `task_name` | 实例键 | pick 之后 |
 | ---- | ----------- | ------ | --------- |
@@ -300,7 +300,7 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
    ```
 
 3. 引擎经 Gravitino Iceberg REST 写入。commit 成功后，**IRC 钩子** upsert **`tms-table-commit`** `{table_id}`（§5.1.1）。
-4. **table** 池 pick ③，resolve 后短 submit 并 **DELETE**；Job 终态可再 upsert 同一 `{table_id}`（§5.6.1）。
+4. **commit** 池 pick ③，resolve 后短 submit 并 **DELETE**；Job 终态可再 upsert 同一 `{table_id}`（§5.6.1）。
    同一 `(table, policy)` 的双 submit 由 `table_maintenance_job` 在途占坑阻止。
 5. 运维在 Gravitino **Jobs** UI / API 观察运行（含来自 `table_maintenance_job` 的 Validation）。自动化 Job 的 `audit.creator` 为 **`tms`**。
    §7 ops API 可 bump ① 或在测试钩子下入队 ②。
@@ -552,7 +552,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 | 字段                  | 前端             | TMS 运行时                                           |
 | ------------------- | -------------- | ------------------------------------------------- |
-| `schedule.onCommit` | 「commit 后运行」开关 | IRC upsert ③；table 池按 §5.6.1 有序驱动（§5.1.1）              |
+| `schedule.onCommit` | 「commit 后运行」开关 | IRC upsert ③；commit 池按 §5.6.1 有序驱动（§5.1.1）             |
 | `schedule.crontab`  | Crontab 选择器    | expand 后刷新 ① 的下次 `scheduled_tasks.execution_time` |
 
 **规则：**
@@ -762,7 +762,7 @@ pick 给定实例（CAS + heartbeat）。
 ```text
 策略创建 → INSERT ①（policy_id）
 crontab 到期 → pick ①（expand.threads）→ INSERT 多条 ② → 保留 ①
-IRC commit → upsert ③ {table_id}（IRC 线程；不进任一池）
+IRC commit → upsert ③ {table_id}（IRC 线程；不进任一调度池）
 Node A / B / C
         │
         ├─ expand 池：pick ① → INSERT ② → 保留 ①

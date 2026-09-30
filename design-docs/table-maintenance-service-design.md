@@ -237,8 +237,8 @@ keytabs, and similar).
 
 ### 5.1 Architecture
 
-TMS uses **three** task names on `scheduled_tasks` (db-scheduler) and **two** pools. Writing a row
-does **not** mean every node runs it: expand and table pools poll; **N compete, one pick wins**
+TMS uses **three** task names on `scheduled_tasks` (db-scheduler) and **three** pools (expand / table / commit). Writing a row
+does **not** mean every node runs it: all three pools poll; **N compete, one pick wins**
 per due instance.
 
 | Kind                    | `task_name` (illustrative) | When created                                        | Instance key                                                                      | After pick                                                                            |
@@ -262,7 +262,7 @@ crontab due → ① picked (expand pool)
   → more tables → cursor in ① task_data, due now; else clear cursor / next crontab
   → do NOT delete ① (unless policy disabled / dropped / replaced)
 
-IRC commit (any node that handled the write; not expand/table pool)
+IRC commit (any node that handled the write; not expand/table/commit pools)
   → upsert tms-table-commit instance={table_id} task_data={ tableIds, policyIds } execution_time=now
 
 ② tms-table-scheduler picked (table pool)
@@ -270,7 +270,7 @@ IRC commit (any node that handled the write; not expand/table pool)
   → INSERT table_maintenance_job (before_metrics, finished_at=NULL) → DELETE ② → return
   → Job terminal listener: sample after_metrics → UPDATE finished_at
 
-③ tms-table-commit picked (table pool; same threads as ②)
+③ tms-table-commit picked (commit pool, `commit.threads`)
   → resolve onCommit policies + gates **at pick time** (§5.6.1) → same short submit path
   → on Job terminal: if more types needed → upsert same {table_id} again
 ```
@@ -286,7 +286,7 @@ Gravitino IRC (:9001)
                       task_data = { tableIds, policyIds }; execution_time = now
                       (IRC thread; not expand/table/commit pools)
 
-Node A / Node B / Node C  — expand pool + table pool poll (§5.4); N compete, one pick
+Node A / Node B / Node C  — expand + table + commit pools poll (§5.4); N compete, one pick
         │
         ├─ pick ① tms-policy-expand                 (expand.threads=4)
         │     └─ page → INSERT tms-table-scheduler (table:… / batch:…)
@@ -324,7 +324,7 @@ post-commit hook** invokes a **main-server-registered callback / SPI** (for exam
 `GravitinoEnv`). That callback **upserts** **`tms-table-commit`** with `task_instance = {table_id}`
 and `task_data = { tableIds, policyIds }` (`policyIds` finalized at pick — §5.4). Concurrent upserts coalesce
 on primary key `(task_name, task_instance)`. The IRC thread does **not** call `runJob`, does **not**
-use expand/table pools, and does **not** select `policy_id` — that happens when the **commit** pool
+use expand/table/commit pools, and does **not** select `policy_id` — that happens when the **commit** pool
 picks ③ (§5.4).
 
 | Requirement | Detail                                                                                                                                      |
@@ -680,7 +680,7 @@ Illustrative `content.schedule` (exact field names may be finalized with the Pol
 
 | Field               | UI                           | TMS runtime                                                           |
 | ------------------- | ---------------------------- | --------------------------------------------------------------------- |
-| `schedule.onCommit` | Toggle “run on commit”       | IRC upserts ③; table pool drives §5.6.1 order (§5.1.1)                 |
+| `schedule.onCommit` | Toggle “run on commit”       | IRC upserts ③; commit pool drives §5.6.1 order (§5.1.1)                |
 | `schedule.crontab`  | Crontab picker               | Sets / refreshes ① next `scheduled_tasks.execution_time` after expand |
 
 **Rules:**
@@ -910,7 +910,7 @@ Auth material uses SecretManager. Job-template **parameters** stay on policy att
 ```text
 Policy create → INSERT ① (policy_id)
 crontab due → pick ① (expand.threads) → INSERT many ② → retain ①
-IRC commit → upsert ③ {table_id} (IRC thread; not either pool)
+IRC commit → upsert ③ {table_id} (IRC thread; not any scheduler pool)
 Node A / B / C
         │
         ├─ expand pool: pick ① → INSERT ② → retain ①
