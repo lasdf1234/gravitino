@@ -552,18 +552,19 @@ a late reconcile sweep):
 **Reconcile** (periodic / on pick; only repairs **occupancy**, never Validation metrics):
 
 `finished_at IS NULL` means “TMS has not closed the slot yet.” It does **not** mean “Spark is
-definitely still running.” Truth for job liveness comes from the Jobs API / `job_run_meta`.
+definitely still running.” **Job lifetime and stuck-job handling belong to the Gravitino Jobs
+framework** (status pull, executor retention / stale-active expire — see job docs). TMS only
+mirrors a terminal Job status into `finished_at`.
 
 | `table_maintenance_job` | Job actual status | Action |
 | ----------------------- | ----------------- | ------ |
-| `finished_at IS NULL` | Still queued / started, within `jobTimeoutMs` | Keep in-flight; no submit for same `(table, policy)` |
-| `finished_at IS NULL` | Already SUCCEEDED / FAILED / CANCELLED | Set `finished_at` only; **do not** backfill `before_metrics` or late `after_metrics` (Validation may stay incomplete) |
-| `finished_at IS NULL` | Still running, but past `jobTimeoutMs` | Best-effort `cancelJob`; set `finished_at` (timeout); **no** invented metrics; release slot |
-| `finished_at IS NULL` | Job missing / unknown for too long | Set `finished_at` (abandoned / failed); release slot; **no** metrics backfill |
+| `finished_at IS NULL` | Still queued / started / cancelling | Keep in-flight; no submit for same `(table, policy)` |
+| `finished_at IS NULL` | SUCCEEDED / FAILED / CANCELLED (including Jobs stale-expire → FAILED) | Set `finished_at` only; **do not** backfill `before_metrics` or late `after_metrics` |
+| `finished_at IS NULL` | Job entity missing | Set `finished_at` (abandoned); release slot; **no** metrics backfill |
 
-**`jobTimeoutMs`** (`gravitino.maintenance.scheduler.table.jobTimeoutMs`, default 6h) is a **TMS**
-reconcile bound on in-flight rows — **not** a db-scheduler library knob, and **not** “block a pool
-thread for 6 hours.”
+Do **not** add a parallel TMS wall-clock Spark timeout. Tighter kill behavior belongs in Jobs /
+executor configuration (or a future Jobs-level timeout); TMS reconciles after the Job becomes
+terminal.
 
 **`minIntervalMs` for crontab is judged on ①** before INSERT of `tms-table-scheduler`. Commit resolves
 gates on ③ pick.
@@ -1147,7 +1148,6 @@ gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
 gravitino.maintenance.scheduler.table.threads = 8
-gravitino.maintenance.scheduler.table.jobTimeoutMs = 21600000
 ```
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
@@ -1234,7 +1234,6 @@ db-scheduler has **one** thread pool per `Scheduler`. TMS runs **two** scheduler
 | `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | Poll interval (both) |
 | `gravitino.maintenance.scheduler.heartbeatIntervalMs` | `60000` | Heartbeat while callback runs |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit` | `6` | Misses before dead |
-| `gravitino.maintenance.scheduler.table.jobTimeoutMs` | `21600000` (6h) | Reconcile bound: max age of `finished_at IS NULL` before timeout/abandon (§5.5.3) |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | `true` on MySQL | MySQL timestamp handling |
 
 JDBC pool size ≥ `expand.threads + table.threads` (+ REST/IRC headroom). Defaults are enough for most
@@ -1315,7 +1314,7 @@ SecretManager, and policy `jobOptions`.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **drop** hook to delete outstanding ②+③ + `table_maintenance_job` rows (§6.3).
 - [ ] Sample `before_metrics` before `runJob`; INSERT job row; DELETE ②/③ immediately; Job listener
-      writes `after_metrics` + `finished_at`; reconcile closes slots without late metrics (§5.5.3).
+      writes `after_metrics` + `finished_at`; reconcile on Job terminal / missing only (§5.5.3).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on
       `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve; drop cleans rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.

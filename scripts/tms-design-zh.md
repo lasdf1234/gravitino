@@ -440,18 +440,18 @@ crontab expand 只用 `expand.threads`。
 
 **对账 reconcile**（周期 / pick 时；只修**占坑**，绝不补 Validation 指标）：
 
-`finished_at IS NULL` 只表示「TMS 还没关坑」，**不等于**「Spark 一定还在跑」。是否在跑以 Jobs API /
-`job_run_meta` 为准。
+`finished_at IS NULL` 只表示「TMS 还没关坑」，**不等于**「Spark 一定还在跑」。**Job 生命周期与僵死处理
+归 Gravitino Jobs**（状态拉取、executor retention / 过期 active → FAILED 等，见 Job 文档）。
+TMS 只把 Job **终态**镜像到 `finished_at`。
 
 | `table_maintenance_job` | Job 实际状态 | 动作 |
 | ----------------------- | ------------ | ---- |
-| `finished_at IS NULL` | 仍在 queued / started，且未超 `jobTimeoutMs` | 保持在途；同一 `(table, policy)` 不再 submit |
-| `finished_at IS NULL` | 已是 SUCCEEDED / FAILED / CANCELLED | **只**补 `finished_at`；**不**补 `before_metrics`，也**不**补过期的 `after_metrics`（Validation 可保持不完整） |
-| `finished_at IS NULL` | 仍在跑，但已超 `jobTimeoutMs` | 尽力 `cancelJob`；写 `finished_at`（超时）；**不**编造 metrics；放坑 |
-| `finished_at IS NULL` | Job 查不到 / 异常过久 | 写 `finished_at`（abandoned / 失败）；放坑；**不**补 metrics |
+| `finished_at IS NULL` | 仍为 queued / started / cancelling | 保持在途；同一 `(table, policy)` 不再 submit |
+| `finished_at IS NULL` | SUCCEEDED / FAILED / CANCELLED（含 Jobs 过期 active → FAILED） | **只**补 `finished_at`；**不**补 `before_metrics` / 过期的 `after_metrics` |
+| `finished_at IS NULL` | Job 实体不存在 | 写 `finished_at`（abandoned）；放坑；**不**补 metrics |
 
-**`jobTimeoutMs`**（`gravitino.maintenance.scheduler.table.jobTimeoutMs`，默认 6h）是 TMS 对在途行的
-**对账上限** —— **不是** db-scheduler 库参数，也**不是**「table 池线程堵 6 小时」。
+不要在 TMS 再发明平行的墙钟 Spark 超时。更紧的杀掉行为应落在 Jobs / executor 配置（或未来 Jobs
+级 timeout）；TMS 在 Job 进入终态后再对账即可。
 
 **`minIntervalMs` 在 ① 上判断**（crontab）；commit 在 ③ pick 时决议门控。
 
@@ -979,7 +979,6 @@ gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
 gravitino.maintenance.scheduler.table.threads = 8
-gravitino.maintenance.scheduler.table.jobTimeoutMs = 21600000
 ```
 
 HTTP `tableMaintenance.uri` / Kafka 生产消费键**不在**范围（非目标 #5）。
@@ -1061,7 +1060,6 @@ submit 回调。commit **不得**占用 `expand.threads`。
 | `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | 轮询间隔 |
 | `gravitino.maintenance.scheduler.heartbeatIntervalMs` | `60000` | 心跳 |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit` | `6` | 判死 |
-| `gravitino.maintenance.scheduler.table.jobTimeoutMs` | `21600000`（6h） | 对账上限：`finished_at IS NULL` 最长保留多久后超时/放弃（§5.5.3） |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | MySQL `true` | MySQL 时间戳 |
 
 JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量）。通常保持默认即可。
@@ -1124,7 +1122,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
-- [ ] `runJob` 前采 `before_metrics`；INSERT job 行后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账只关坑不补指标（§5.5.3）。
+- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账仅跟 Job 终态/缺失（§5.5.3）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
