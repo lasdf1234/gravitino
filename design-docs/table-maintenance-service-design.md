@@ -1005,32 +1005,8 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
   COMMENT 'per-run TMS job record: Validation JSON + submit gates';
 ```
 
-**JSON format:** UTF-8 object with flat metric keys. Values are numbers, strings, or booleans.
-Optional top-level fields:
-
-- `task_type` — e.g. `compaction`, `snapshot-expiry` (recommended in `before_metrics`)
-- `passed` — overall validation result (recommended in `after_metrics` only)
-
-Illustrative `before_metrics` / `after_metrics` by task type:
-
-| Task type          | Example keys in JSON                                      | Auto pass/fail            |
-| ------------------ | --------------------------------------------------------- | ------------------------- |
-| `compaction`       | `num_files`, `avg_file_size_bytes`, `snapshot_count`      | Recommended (`passed`)    |
-| `snapshot-expiry`  | `snapshot_count`, optional `deleted_manifest_files_count` | Recommended (`passed`)    |
-| `manifest-rewrite` | `manifest_file_count` (if collected)                      | Optional / skip           |
-| `orphan-cleanup`   | delete summary counts; skip Files before/after compare    | Skip table-metric compare |
-
-Example `after_metrics`:
-
-```json
-{
-  "task_type": "compaction",
-  "num_files": 42,
-  "avg_file_size_bytes": 134217728,
-  "snapshot_count": 8,
-  "passed": true
-}
-```
+**Metrics JSON:** `before_metrics` / `after_metrics` are opaque UTF-8 JSON blobs for Jobs
+Validation. Exact keys and auto pass/fail rules are **product TBD** — not fixed in this design.
 
 ### 6.3 Table drop lifecycle
 

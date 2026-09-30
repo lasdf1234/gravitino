@@ -846,31 +846,8 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
   COMMENT 'per-run TMS job record: Validation JSON + submit gates';
 ```
 
-**JSON 格式：** UTF-8 对象，指标键扁平存放，值为 number / string / boolean。可选顶层字段：
-
-- `task_type` — 如 `compaction`、`snapshot-expiry`（建议写在 `before_metrics`）
-- `passed` — 整体验证结果（建议仅写在 `after_metrics`）
-
-按任务类型的 `before_metrics` / `after_metrics` 示例键：
-
-| 任务类型               | JSON 示例键                                           | 自动通过/失败      |
-| ------------------ | -------------------------------------------------- | ------------ |
-| `compaction`       | `num_files`、`avg_file_size_bytes`、`snapshot_count` | 推荐（`passed`） |
-| `snapshot-expiry`  | `snapshot_count`、可选 `deleted_manifest_files_count` | 推荐（`passed`） |
-| `manifest-rewrite` | `manifest_file_count`（若采集）                         | 可选 / 跳过      |
-| `orphan-cleanup`   | 删除摘要计数；跳过 Files 前后对比                               | 跳过表指标对比      |
-
-`after_metrics` 示例：
-
-```json
-{
-  "task_type": "compaction",
-  "num_files": 42,
-  "avg_file_size_bytes": 134217728,
-  "snapshot_count": 8,
-  "passed": true
-}
-```
+**指标 JSON：** `before_metrics` / `after_metrics` 为 Jobs Validation 用的不透明 UTF-8 JSON。
+具体键与自动通过/失败规则 **产品未定**，本设计不锁定。
 
 ### 6.3 表删除生命周期
 
