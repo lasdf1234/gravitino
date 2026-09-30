@@ -810,9 +810,9 @@ credential-vending baseline.
 No IRC client authentication (typical `simple` / open IRC in lab).
 
 | Property | Required | Description |
-| -------------------------------------------------------- | ---------------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| *(omit `rest.auth.type`)* or `rest.auth.type` = `none`   | no               | no               | No username / password / token.                                                           |
-| Credential-vending properties in 5.8 Credential vending | if using vending | no (header only) | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
+| --- | --- | --- |
+| *(omit `rest.auth.type`)* or `rest.auth.type` = `none` | no | No username / password / token. |
+| Credential-vending properties in 5.8 Credential vending | if using vending | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
 
 No SecretManager entries are required for IRC auth itself.
 
@@ -822,24 +822,24 @@ HTTP Basic against Gravitino IRC (local users / basic authenticator). TMS Jobs a
 the maintenance principal (usually user `tms` when authorization is on).
 
 | Property | Required | Description |
-| -------------------------------------------------------- | ---------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `rest.auth.type`                                         | yes              | no             | `basic`.                                                                                                               |
-| `rest.auth.basic.username`                               | yes              | no             | For automated TMS runs: `tms` (or the configured TMS username).                                                        |
-| `rest.auth.basic.password` | yes | **yes** |
-| Credential-vending properties in 5.8 Credential vending | if using vending | —              | Same as parent section.                                                                                                |
+| --- | --- | --- |
+| `rest.auth.type` | yes | `basic`. |
+| `rest.auth.basic.username` | yes | For automated TMS runs: `tms` (or the configured TMS username). |
+| `rest.auth.basic.password` | yes | Password for that user. Store as a SecretManager secret; Job config holds a URN or resolved value at submit time only. |
+| Credential-vending properties in 5.8 Credential vending | if using vending | Same as parent section. |
 
 #### Auth: oauth
 
 OAuth2 client credentials or bearer token against Gravitino IRC.
 
 | Property | Required | Description |
-| -------------------------------------------------------- | ----------------------------------------- | -------------- | ---------------------------------------------------------------------------------- |
-| `rest.auth.type`                                         | yes                                       | no             | `oauth2`.                                                                          |
-| `token`                                                  | one of token **or** client-credential set | **yes**        | Bearer access token path (short-lived; often minted at submit rather than stored). |
-| `oauth2-server-uri`                                      | for client-credential path                | no             | Token endpoint URI.                                                                |
-| `credential`                                             | for client-credential path                | **yes**        | OAuth client id and secret, typically `client_id:client_secret`.                   |
-| `scope`                                                  | recommended                               | no             | OAuth scope (Iceberg may default to `catalog` if omitted).                         |
-| Credential-vending properties in 5.8 Credential vending | if using vending                          | —              | Same as parent section.                                                            |
+| --- | --- | --- |
+| `rest.auth.type` | yes | `oauth2`. |
+| `token` | one of token **or** client-credential set | Bearer access token path (short-lived; often minted at submit rather than stored). |
+| `oauth2-server-uri` | for client-credential path | Token endpoint URI. |
+| `credential` | for client-credential path | OAuth client id and secret, typically `client_id:client_secret`. |
+| `scope` | recommended | OAuth scope (Iceberg may default to `catalog` if omitted). |
+| Credential-vending properties in 5.8 Credential vending | if using vending | Same as parent section. |
 
 Prefer client-credential + SecretManager for `credential` so TMS does not embed long-lived bearer
 tokens in policy or templates.
@@ -850,12 +850,12 @@ Kerberos / SPNEGO style access when Gravitino authenticators include `kerberos`.
 runtime must be able to obtain a TGT for the TMS service principal.
 
 | Property | Required | Description |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `rest.auth.type`                                                             | yes (when Iceberg REST client exposes it) / Gravitino client `authType` | no                                     | `kerberos` (or deployment-specific key used by the maintenance Job’s Iceberg / Gravitino client).                     |
-| Kerberos principal                                                           | yes                                                                     | no                                     | Service principal used by TMS Jobs (for example `tms/_HOST@REALM`).                                                   |
-| Keytab path or keytab material | yes | **yes** for keytab bytes / path secret |
-| `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | as required by the cluster                                              | no                                     | Cluster Kerberos wiring for the Spark driver/executors.                                                               |
-| Credential-vending properties in 5.8 Credential vending                     | if using vending                                                        | —                                      | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled.     |
+| --- | --- | --- |
+| `rest.auth.type` | yes (when Iceberg REST client exposes it) / Gravitino client `authType` | `kerberos` (or deployment-specific key used by the maintenance Job’s Iceberg / Gravitino client). |
+| Kerberos principal | yes | Service principal used by TMS Jobs (for example `tms/_HOST@REALM`). |
+| Keytab path or keytab material | yes | Keytab must not live in `policy_meta`. Reference via SecretManager or a host path provisioned outside policy content. |
+| `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | as required by the cluster | Cluster Kerberos wiring for the Spark driver/executors. |
+| Credential-vending properties in 5.8 Credential vending | if using vending | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled. |
 
 #### Resolution at submit
 

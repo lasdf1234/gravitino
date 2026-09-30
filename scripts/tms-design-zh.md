@@ -667,9 +667,9 @@ job 模板 / submitter 根据 `jobConfig` 中的 catalog 名应用。
 无 IRC 客户端认证（实验室典型 `simple` / 开放 IRC）。
 
 | 属性 | 必填 | 说明 |
-| --------------------------------------------------- | ----------- | -------------- | ---------------------------------------------------------------- |
-| *（省略 `rest.auth.type`）* 或 `rest.auth.type` = `none` | 否           | 否              | 无用户名 / 密码 / 令牌。                                                  |
-| 5.8 Credential vending 中的属性                        | 若使用 vending | 否（仅 header）    | 存储代发时仍设 `header.X-Iceberg-Access-Delegation=vended-credentials`。 |
+| --- | --- | --- |
+| *（省略 `rest.auth.type`）* 或 `rest.auth.type` = `none` | 否 | 无用户名 / 密码 / 令牌。 |
+| 5.8 Credential vending 中的属性 | 若使用 vending | 存储代发时仍设 `header.X-Iceberg-Access-Delegation=vended-credentials`。 |
 
 IRC 认证本身无需 SecretManager 条目。
 
@@ -678,24 +678,24 @@ IRC 认证本身无需 SecretManager 条目。
 针对 Gravitino IRC 的 HTTP Basic（本地用户 / basic authenticator）。TMS Jobs 以维护主体认证（启用授权时通常为用户 `tms`）。
 
 | 属性 | 必填 | 说明 |
-| ---------------------------- | ----------- | -------------- | ---------------------------------------------------------- |
-| `rest.auth.type`             | 是           | 否              | `basic`。                                                   |
-| `rest.auth.basic.username`   | 是           | 否              | 自动化 TMS 运行：`tms`（或配置的 TMS 用户名）。                            |
-| `rest.auth.basic.password` | 是 | **是** |
-| 5.8 Credential vending 中的属性 | 若使用 vending | —              | 同父节。                                                       |
+| --- | --- | --- |
+| `rest.auth.type` | 是 | `basic`。 |
+| `rest.auth.basic.username` | 是 | 自动化 TMS 运行：`tms`（或配置的 TMS 用户名）。 |
+| `rest.auth.basic.password` | 是 | 该用户密码。存为 SecretManager secret；Job 配置仅在 submit 时持 URN 或解析值。 |
+| 5.8 Credential vending 中的属性 | 若使用 vending | 同父节。 |
 
 #### 认证：oauth
 
 针对 Gravitino IRC 的 OAuth2 client credentials 或 bearer token。
 
 | 属性 | 必填 | 说明 |
-| ---------------------------- | --------------------------------- | -------------- | ------------------------------------------------------ |
-| `rest.auth.type`             | 是                                 | 否              | `oauth2`。                                              |
-| `token`                      | token **或** client-credential 集之一 | **是**          | Bearer 访问令牌路径（短生命周期；常在 submit 时签发而非存储）。                |
-| `oauth2-server-uri`          | client-credential 路径              | 否              | 令牌端点 URI。                                              |
-| `credential`                 | client-credential 路径              | **是**          | OAuth client id 与 secret，通常 `client_id:client_secret`。 |
-| `scope`                      | 推荐                                | 否              | OAuth scope（Iceberg 可默认 `catalog`）。                    |
-| 5.8 Credential vending 中的属性 | 若使用 vending                       | —              | 同父节。                                                   |
+| --- | --- | --- |
+| `rest.auth.type` | 是 | `oauth2`。 |
+| `token` | token **或** client-credential 集之一 | Bearer 访问令牌路径（短生命周期；常在 submit 时签发而非存储）。 |
+| `oauth2-server-uri` | client-credential 路径 | 令牌端点 URI。 |
+| `credential` | client-credential 路径 | OAuth client id 与 secret，通常 `client_id:client_secret`。 |
+| `scope` | 推荐 | OAuth scope（Iceberg 可默认 `catalog`）。 |
+| 5.8 Credential vending 中的属性 | 若使用 vending | 同父节。 |
 
 `credential` 优先 client-credential + SecretManager，避免 TMS 在策略或模板中嵌入长期 bearer token。
 
@@ -704,12 +704,12 @@ IRC 认证本身无需 SecretManager 条目。
 Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job 运行时须能为 TMS 服务主体获取 TGT。
 
 | 属性 | 必填 | 说明 |
-| ---------------------------------------------------------------------------- | ------------------------------------------------ | --------------------------- | ---------------------------------------------------------- |
-| `rest.auth.type`                                                             | 是（Iceberg REST 客户端暴露时）/ Gravitino 客户端 `authType` | 否                           | `kerberos`（或维护 Job 的 Iceberg / Gravitino 客户端使用的部署特定键）。     |
-| Kerberos principal                                                           | 是                                                | 否                           | TMS Jobs 使用的服务主体（如 `tms/_HOST@REALM`）。                     |
-| Keytab 路径或 keytab 材料 | 是 | keytab 字节/路径 secret 时 **是** |
-| `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | 按集群需要                                            | 否                           | Spark driver/executor 的集群 Kerberos 接线。                     |
-| 5.8 Credential vending 中的属性                                                 | 若使用 vending                                      | —                           | 同父节。Kerberos 认证 IRC；启用时存储访问仍用代发凭据。                         |
+| --- | --- | --- |
+| `rest.auth.type` | 是（Iceberg REST 客户端暴露时）/ Gravitino 客户端 `authType` | `kerberos`（或维护 Job 的 Iceberg / Gravitino 客户端使用的部署特定键）。 |
+| Kerberos principal | 是 | TMS Jobs 使用的服务主体（如 `tms/_HOST@REALM`）。 |
+| Keytab 路径或 keytab 材料 | 是 | Keytab 不得放在 `policy_meta`。经 SecretManager 或策略内容外预置的主机路径引用。 |
+| `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | 按集群需要 | Spark driver/executor 的集群 Kerberos 接线。 |
+| 5.8 Credential vending 中的属性 | 若使用 vending | 同父节。Kerberos 认证 IRC；启用时存储访问仍用代发凭据。 |
 
 #### Submit 时解析
 
