@@ -889,10 +889,10 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 
 **Commit 路径：** 仅 `compaction`、`manifest-rewrite`、`snapshot-expiry` 可使用 `onCommit`，且仅对已挂载类型按该顺序（§5.6.1）。**`orphan-cleanup` 仅为 crontab。**
 
-**Catalog / schema 挂载：** 策略（含 snapshot-expiry）挂在 **catalog** 或 **schema** 上时，expand
-遍历挂载范围内的表并**一表一条** crontab ② —— 共用**同一个** `policy_id`（`{table_id}:{policy_id}`），
-并在多次 ① pick 间**分页**（5.4.2，默认每 pick 100 条 ②）。**一表一 Spark job**；无多表合并的
-`task_instance`。
+**Catalog / schema 挂载：** 策略挂在 **catalog** 或 **schema** 上时，expand 遍历范围内的表并写出
+crontab ②（共用同一 `policy_id`，① 分页，§5.4.2）。compaction / manifest-rewrite / orphan-cleanup
+仍为**一表一 Spark job**（`table:{table_id}:{policy_id}`）。**snapshot-expiry** 可将多表打进同一 job
+（`batch:{batch_id}:{policy_id}`，`task_data.tableIds`）。
 
 **解析顺序**（先命中者生效），同 Amoro 表属性 + AMS 默认思路：
 

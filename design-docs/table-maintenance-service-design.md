@@ -1049,10 +1049,12 @@ TMS recognizes four maintenance **task types** (aligned with product Compact pol
 **Commit path:** only `compaction`, `manifest-rewrite`, and `snapshot-expiry` may use `onCommit`,
 and only in that order among attached types (§5.6.1). **`orphan-cleanup` is crontab-only.**
 
-**Catalog / schema attachments:** When a policy (including snapshot-expiry) is attached at
-**catalog** or **schema** scope, expand walks tables under that attachment and enqueues one crontab
-② per table — all with the **same** `policy_id` (`{table_id}:{policy_id}`), **paged** across ① picks
-(5.4.2, default 100 ② per pick). **One table per Spark job**; no multi-table `task_instance`.
+**Catalog / schema attachments:** When a policy is attached at **catalog** or **schema** scope,
+expand walks tables under that attachment and enqueues crontab ② rows with the **same**
+`policy_id`, **paged** across ① picks (§5.4.2, default 100 ② per pick). Compaction /
+manifest-rewrite / orphan-cleanup stay **one table per Spark job**
+(`table:{table_id}:{policy_id}`). **Snapshot-expiry** may pack multiple tables into one job
+(`batch:{batch_id}:{policy_id}`, `task_data.tableIds`).
 
 **Resolution order** (first hit wins), same idea as Amoro table props + AMS defaults:
 
