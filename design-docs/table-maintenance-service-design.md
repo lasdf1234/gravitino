@@ -547,13 +547,34 @@ and outstanding ② for that `policy_id`.
    (§5.9); `runJob` as principal `tms` → `job_run_id`.
 5. **Immediately** `INSERT` `table_maintenance_job` with `job_run_id`, `metalake_id`, `table_id`,
    `policy_id`, and `finished_at = NULL` (§6.2).
-6. **Keep** the ②/③ `scheduled_tasks` row **picked**; refresh heartbeat until Spark is terminal.
-7. On terminal: `UPDATE` `before_metrics` / `after_metrics` + `finished_at`, then **DELETE** the
-   scheduled row. `before_metrics` must be **sampled before** table mutation.
+6. **Keep** the ②/③ `scheduled_tasks` row **picked**; refresh heartbeat until Spark is terminal
+   **or** `jobTimeoutMs` elapses (stuck-job path below).
+7. On terminal **or timeout**: `UPDATE` `before_metrics` / `after_metrics` + `finished_at`, then
+   **DELETE** the scheduled row. `before_metrics` must be **sampled before** table mutation.
 
 **Why hold until terminal:** Deleting at submit would drop the db-scheduler lease and allow another
 node to pick a newly enqueued duplicate. The pick + heartbeat is the primary mutex; `table_maintenance_job`
 is the backup for missed-heartbeat reclaim.
+
+**Stuck / timed-out Spark:** Holding pick + heartbeat means a **live** JVM will never release the
+lease just because Spark is hung — other nodes cannot reclaim that instance. Therefore ②/③ **must**
+enforce a wall-clock **`jobTimeoutMs`** (conf; default **6h**) measured from `runJob` / wait-start:
+
+1. Poll (or await) Gravitino Job status while refreshing db-scheduler heartbeat.
+2. If the job reaches a normal terminal state before the deadline → same path as today (`UPDATE` +
+   **DELETE** scheduled row).
+3. If **`jobTimeoutMs` elapses** first:
+   - Best-effort **cancel** the Spark / Gravitino Job when the Jobs API supports it (do not block
+     forever on cancel).
+   - `UPDATE` `table_maintenance_job`: set `finished_at = now`, `after_metrics` with
+     `passed=false` and a timeout reason (e.g. `"timeout": true`).
+   - **DELETE** the ②/③ `scheduled_tasks` row and return — frees the table-pool thread.
+4. A later crontab expand / commit upsert may enqueue again subject to `minIntervalMs` and gates.
+   Do **not** treat timeout as “still in-flight” (`finished_at` is set).
+
+**Dead JVM vs stuck Spark:** missed heartbeats cover process death; **`jobTimeoutMs`** covers a live
+picker stuck on a hung job. Both end with a terminal `table_maintenance_job` row so re-pick never
+double-submits.
 
 **`minIntervalMs` for crontab is judged on ①** before INSERT of `tms-table-scheduler`. Commit resolves
 gates on ③ pick.
@@ -929,7 +950,11 @@ That lease is the primary anti-double-submit. Backup: in-flight `table_maintenan
 (§5.5.3, §6.2).
 
 **Dead worker:** missed heartbeats unlock / requeue the instance. An already-submitted Spark job is
-**not** cancelled; on re-pick, `finished_at IS NULL` means wait/adopt — **never** a second `runJob`.
+**not** cancelled by reclaim; on re-pick, `finished_at IS NULL` means wait/adopt under the same
+`jobTimeoutMs` — **never** a second `runJob`.
+
+**Stuck Spark (live picker):** heartbeat keeps the lease; only **`jobTimeoutMs`** forces terminal +
+DELETE (§5.5.3).
 
 | Table                                  | Role                                                                    |
 | -------------------------------------- | ----------------------------------------------------------------------- |
@@ -1138,6 +1163,7 @@ gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
 gravitino.maintenance.scheduler.table.threads = 8
+gravitino.maintenance.scheduler.table.jobTimeoutMs = 21600000
 ```
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
@@ -1225,6 +1251,7 @@ db-scheduler has **one** thread pool per `Scheduler`. TMS runs **two** scheduler
 | `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | Poll interval (both) |
 | `gravitino.maintenance.scheduler.heartbeatIntervalMs` | `60000` | Heartbeat while callback runs |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit` | `6` | Misses before dead |
+| `gravitino.maintenance.scheduler.table.jobTimeoutMs` | `21600000` (6h) | Max wait on ②/③ after `runJob` before timeout terminal + DELETE (§5.5.3) |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | `true` on MySQL | MySQL timestamp handling |
 
 JDBC pool size ≥ `expand.threads + table.threads` (+ REST/IRC headroom). Defaults are enough for most
@@ -1304,8 +1331,8 @@ SecretManager, and policy `jobOptions`.
       concurrent commits coalesce on one row.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **drop** hook to delete outstanding ②+③ + `table_maintenance_job` rows (§6.3).
-- [ ] On `runJob`: `INSERT` `table_maintenance_job`; **hold pick** until terminal; then `UPDATE`
-      metrics + `finished_at` and **DELETE** ②/③; ③ may re-upsert (§6.2, §5.7.1).
+- [ ] On `runJob`: `INSERT` `table_maintenance_job`; **hold pick** until terminal **or** `jobTimeoutMs`;
+      then `UPDATE` + **DELETE** ②/③; best-effort cancel on timeout; ③ may re-upsert (§5.5.3, §6.2).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on
       `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve; drop cleans rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
@@ -1348,7 +1375,7 @@ SecretManager, and policy `jobOptions`.
 | Job records  | `table_maintenance_job` one row per `job_run_id` (Validation JSON + submit gates).                                                         |
 | Import       | Lazy `table_meta` import via `TableDispatcher.loadTable` (§5.5.4); not Iceberg `registerTable`.                                            |
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
-| Pipeline     | ①→INSERT ②; ②/③ pick → runJob → hold until Spark terminal → DELETE; ③ may re-upsert.                                                       |
+| Pipeline     | ①→INSERT ②; ②/③ hold until terminal or `jobTimeoutMs` → DELETE; stuck Spark timed out (§5.5.3).                                            |
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Drop         | Drop hook deletes outstanding ②+③ + `table_maintenance_job` rows (§6.3). Rename out of scope.                                              |
 | Multi-node   | N compete, one pick; ②/③ pick+heartbeat anti-double-submit; dead-worker gated by `table_maintenance_job`.                               |
