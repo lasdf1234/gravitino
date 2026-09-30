@@ -54,7 +54,7 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
      `table:{table_id}:{policy_id}` 或 `batch:{batch_id}:{policy_id}`；
      `task_data = { tableIds, policyIds }`。短回调：`runJob` → INSERT job 行 → **DELETE** → return。
    - **`tms-table-commit`（③）**：commit 唤醒；`task_instance = {table_id}`；
-     `task_data = { tableId }`（可选 snapshotId）。**policy 在 pick 时决议**（§5.4）；同样短 submit（终态后可再 upsert）。
+     `task_data = { tableIds, policyIds }`。**policy 在 pick 时决议**（§5.4）；同样短 submit（终态后可再 upsert）。
 4. **复用现有 optimizer 执行核心**：调度器任务处理程序以**进程内方法**调用 `maintenance/optimizer` 中已有的
    `Updater` / `Recommender` / 作业提交路径，而非第二套逻辑。
 5. **作业框架兼容**：Spark 维护工作继续使用 Gravitino 作业框架。TMS 在 `table_maintenance_job` 中记录每次运行，
@@ -229,7 +229,7 @@ crontab 到期 → ① pick（expand.threads）
 
 IRC commit（IRC 线程，短）
   → upsert ③ tms-table-commit / {table_id}
-       task_data = { tableId }
+       task_data = { tableIds, policyIds }
 
 ② / ③ pick（table.threads）
   → 采样 before → runJob → INSERT table_maintenance_job → DELETE → return
@@ -255,8 +255,8 @@ Node A/B/C
 #### 5.1.1 进程内 commit 事件
 
 Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-commit 钩子**调用**主服务注册的回调 / SPI**。
-该回调 **upsert** **`tms-table-commit`**：`task_instance = {table_id}`，`task_data = { tableId }`（可选
-`snapshotId`）。多节点并发 upsert 靠主键 `(task_name, task_instance)` 合并。IRC 线程**不** `runJob`、
+该回调 **upsert** **`tms-table-commit`**：`task_instance = {table_id}`，`task_data = { tableIds, policyIds }`
+（`policyIds` 在 pick 时落定 — §5.4）。多节点并发 upsert 靠主键 `(task_name, task_instance)` 合并。IRC 线程**不** `runJob`、
 **不**占用 `expand.threads`、**不**选定 `policy_id` —— 由 **table** 池 pick ③ 时再决议（§5.4）。
 
 | 要求 | 详情 |
@@ -332,7 +332,7 @@ IRC commit 成功（同 JVM）— 跑在 IRC 回调线程（须短）
         └─ upsert scheduled_tasks
               task_name      = tms-table-commit
               task_instance  = {table_id}
-              task_data      = { "tableId": <id> }   // 可选 snapshotId
+              task_data      = { "tableIds":[<id>], "policyIds":[...] }
               execution_time = now
 ```
 
@@ -398,7 +398,7 @@ crontab expand 只用 `expand.threads`。
 | ---- | ---- | ---- |
 | Policy expand | `tms-policy-expand` | `{policy_id}`；`task_data` 空或 cursor |
 | Crontab / batch submit | `tms-table-scheduler` | `table:…` / `batch:…`；`{tableIds, policyIds}` |
-| Commit 唤醒 | `tms-table-commit` | `{table_id}`；`{tableId}` |
+| Commit 唤醒 | `tms-table-commit` | `{table_id}`；`{tableIds, policyIds}` |
 | jobOptions / 密钥 | `policy_meta` / SecretManager | submit 时加载，**不**进 `task_data` |
 | 按运行 Validation | `table_maintenance_job` | 在途 + 前后 JSON |
 
@@ -408,7 +408,7 @@ crontab expand 只用 `expand.threads`。
 | ------ | --------------- | ----------- | ------ |
 | `tms-policy-expand` | `{policy_id}` | 空；分页中可选 `cursor` | expand（4） |
 | `tms-table-scheduler` | `table:{table_id}:{policy_id}` 或 `batch:{batch_id}:{policy_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table（8） |
-| `tms-table-commit` | `{table_id}` | `{ "tableId": … }`（可选 snapshotId） | table（8） |
+| `tms-table-commit` | `{table_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table（8） |
 
 **唯一性：** 主键 `(task_name, task_instance)`。同表 commit 风暴合并到 `(tms-table-commit, {table_id})`。
 
@@ -832,7 +832,7 @@ Node A / B / C
 -- ① tms-policy-expand / {policy_id}  (task_data 空或 cursor)
 -- ② tms-table-scheduler / table:{table_id}:{policy_id} 或 batch:{batch_id}:{policy_id}
 --    task_data = { tableIds, policyIds }
--- ③ tms-table-commit / {table_id}  task_data = { tableId }
+-- ③ tms-table-commit / {table_id}  task_data = { tableIds, policyIds }
 ```
 
 ### 6.2 按运行维护作业表（`table_maintenance_job`）

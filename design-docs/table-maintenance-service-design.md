@@ -61,7 +61,7 @@ commits.
      `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}`;
      `task_data = { tableIds, policyIds }`. Short callback: `runJob` → INSERT job row → **DELETE** → return.
    - **`tms-table-commit`** (③): commit wake-up; `task_instance = {table_id}`;
-     `task_data = { tableId }` (+ optional `snapshotId`). Policy chosen at **pick** time (§5.4);
+     `task_data = { tableIds, policyIds }`. Policy chosen at **pick** time (§5.4);
      same short submit path (may re-upsert after terminal).
 4. **Reuse existing optimizer execution core**: Scheduler task handlers invoke the same `Updater` /
    `Recommender` / job-submit paths already present in `maintenance/optimizer`, as **in-process
@@ -268,7 +268,7 @@ crontab due → ① picked (expand pool)
   → do NOT delete ① (unless policy disabled / dropped / replaced)
 
 IRC commit (any node that handled the write; not expand/table pool)
-  → upsert tms-table-commit instance={table_id} task_data={ tableId } execution_time=now
+  → upsert tms-table-commit instance={table_id} task_data={ tableIds, policyIds } execution_time=now
 
 ② tms-table-scheduler picked (table pool)
   → in-flight gate → sample before_metrics → Recommender → runJob as tms
@@ -288,7 +288,7 @@ Gravitino IRC (:9001)
         │
         └─ post-commit → IcebergCommitEventHandler (§5.4)
                 └─ upsert tms-table-commit / {table_id}
-                      task_data = { tableId }; execution_time = now
+                      task_data = { tableIds, policyIds }; execution_time = now
                       (IRC thread; not expand.threads)
 
 Node A / Node B / Node C  — expand pool + table pool poll (§5.5); N compete, one pick
@@ -309,7 +309,7 @@ Node A / Node B / Node C  — expand pool + table pool poll (§5.5); N compete, 
         │  scheduled_tasks                                              │
         │  • ① tms-policy-expand — {policy_id}; task_data usually empty │
         │  • ② tms-table-scheduler — table:/batch:; {tableIds,policyIds}│
-        │  • ③ tms-table-commit — {table_id}; { tableId }               │
+        │  • ③ tms-table-commit — {table_id}; {tableIds, policyIds}     │
         └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -327,7 +327,7 @@ Node A / Node B / Node C  — expand pool + table pool poll (§5.5); N compete, 
 Commit events are delivered **only in-process**. After a successful Iceberg commit, the **IRC
 post-commit hook** invokes a **main-server-registered callback / SPI** (for example on
 `GravitinoEnv`). That callback **upserts** **`tms-table-commit`** with `task_instance = {table_id}`
-and `task_data = { tableId }` (optional `snapshotId`). Concurrent upserts from many nodes coalesce
+and `task_data = { tableIds, policyIds }` (`policyIds` finalized at pick — §5.4). Concurrent upserts coalesce
 on primary key `(task_name, task_instance)`. The IRC thread does **not** call `runJob`, does **not**
 use `expand.threads`, and does **not** select `policy_id` — that happens when the **table** pool
 picks ③ (§5.4).
@@ -421,7 +421,7 @@ IRC commit succeeded (same JVM) — runs on the IRC callback thread (keep short)
         └─ upsert scheduled_tasks
               task_name      = tms-table-commit
               task_instance  = {table_id}
-              task_data      = { "tableId": <id> }   // optional snapshotId
+              task_data      = { "tableIds":[<id>], "policyIds":[...] }
               execution_time = now
 ```
 
@@ -497,7 +497,7 @@ listener / reconcile (§5.5.3).
 | ---- | -------------- | ----- |
 | Policy expand | `tms-policy-expand` | `{policy_id}`; `task_data` empty or cursor |
 | Crontab / batch submit | `tms-table-scheduler` | `table:…` / `batch:…`; `task_data` `{tableIds, policyIds}` |
-| Commit wake-up | `tms-table-commit` | `{table_id}`; `task_data` `{tableId}` |
+| Commit wake-up | `tms-table-commit` | `{table_id}`; `task_data` `{tableIds, policyIds}` |
 | jobOptions / secrets | `policy_meta` / SecretManager | Loaded at submit — **not** in `task_data` |
 | Per-run Validation | `table_maintenance_job` | In-flight + before/after JSON |
 
@@ -507,7 +507,7 @@ listener / reconcile (§5.5.3).
 | --------- | --------------- | ----------- | ---- |
 | `tms-policy-expand` | `{policy_id}` | empty; optional expand `cursor` while paging | expand (4) |
 | `tms-table-scheduler` | `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table (8) |
-| `tms-table-commit` | `{table_id}` | `{ "tableId": … }` (+ optional `snapshotId`) | table (8) |
+| `tms-table-commit` | `{table_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table (8) |
 
 **Uniqueness:** primary key `(task_name, task_instance)`. Same-table commit bursts coalesce on
 `(tms-table-commit, {table_id})`. Crontab units coalesce per `table:{table_id}:{policy_id}` (or batch key).
@@ -984,7 +984,7 @@ Illustrative `scheduled_tasks` usage (db-scheduler owned; MySQL-shaped):
 -- ① tms-policy-expand / {policy_id}  (task_data empty or cursor)
 -- ② tms-table-scheduler / table:{table_id}:{policy_id} or batch:{batch_id}:{policy_id}
 --    task_data = { tableIds, policyIds }
--- ③ tms-table-commit / {table_id}  task_data = { tableId }
+-- ③ tms-table-commit / {table_id}  task_data = { tableIds, policyIds }
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- ②/③: DELETE after short submit path (do not wait for Spark).
 -- ③ may upsert the same {table_id} again after Job terminal (§5.7.1).
