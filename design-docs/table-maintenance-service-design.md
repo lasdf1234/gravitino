@@ -188,7 +188,7 @@ threads (7.4).
 | Cluster CAS / single-flight      | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`)           | Yes                                          | Lock only                                            | Yes (`QRTZ_*` row locks)                                 |
 | Heartbeat for short lease        | Yes (`last_heartbeat`)                                               | Yes                                          | N/A                                                  | Yes                                                      |
 | Fits per-policy + one-shot Spark | Yes                                                                  | Yes                                          | No (lock only)                                       | Yes (heavier)                                            |
-| H2 unit-test path                | Degraded: disable scheduler; run pipeline directly in tests (7.4) | Better H2 story                              | Yes                                                  | RAMJobStore only in tests                                |
+| H2 unit-test path                | Degraded: run expand/submit pipelines directly in tests (7.4) | Better H2 story                              | Yes                                                  | RAMJobStore only in tests                                |
 | Extra ops component              | No                                                                   | Optional dashboard server                    | No                                                   | No                                                       |
 | Decision                         | **Chosen**                                                           | Rejected — license + overlaps Gravitino Jobs | Rejected — not a scheduler                           | Rejected — ~11 tables, heavy                             |
 
@@ -340,16 +340,15 @@ Deployment:
 1. Package the TMS plugin jars with the main Gravitino server and set
    `gravitino.server.rest.extensionPackages` to include the TMS Feature package (see 7.1).
 2. Enable `iceberg-rest` in `gravitino.auxService.names` (same process as the main server).
-3. Enable in-process commit events (`tableMaintenance.inProcess` — 7.2).
-4. Enable the embedded scheduler (`gravitino.maintenance.scheduler.enabled` — 7.4).
-5. Attach Govern maintenance policies (e.g. `system_iceberg_compaction`) to catalogs/schemas/tables
+3. Attach Govern maintenance policies (e.g. `system_iceberg_compaction`) to catalogs/schemas/tables
    via existing Policy APIs on the main server (**8090**).
 
 ### 5.3 User process
 
-1. Operator enables the TMS REST plugin (`extensionPackages`), `iceberg-rest` **in the same JVM**,
-   in-process commit events (§5.1.1 / 7.2), and the embedded scheduler (7.4). If authorization is
-   enabled, TMS bootstraps the metalake user `tms` and grants (§5.5).
+1. Operator enables the TMS REST plugin (`extensionPackages`) and `iceberg-rest` **in the same JVM**
+   (§5.1.1, §7.1). The plugin registers the commit callback and starts the three db-scheduler pools
+   (no separate enable toggles). If authorization is enabled, TMS bootstraps the metalake user
+   `tms` and grants (§5.5).
 2. Operator creates / enables a maintenance policy (including non-auth `jobOptions`) and associates
    it to catalogs / schemas / tables via metalake Policy APIs. On create/enable, TMS **INSERT**s
    **`tms-policy-expand`** ① for that `policy_id` (5.4, §6.1). Example:
@@ -1015,13 +1014,12 @@ Validation. Exact keys and auto pass/fail rules are **product TBD** — not fixe
 | `gravitino.server.rest.extensionPackages` | none    | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
 | `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                       |
 
-### 7.2 Iceberg REST → TMS in-process event keys
+### 7.2 Iceberg REST → TMS in-process commit wiring
 
-Illustrative keys (exact names may be finalized in implementation).
-
-| Key (illustrative)                                  | Default | Description                                                                                |
-| --------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------ |
-| `gravitino.iceberg-rest.tableMaintenance.inProcess` | `false` | When `true`, IRC invokes the **main-server-registered event callback / SPI** after commit. |
+When the TMS plugin and `iceberg-rest` are enabled (§7.1), IRC invokes the
+**main-server-registered event callback / SPI** after commit — **always in-process** (no separate
+enable toggle). The three db-scheduler pools start with the plugin (no separate scheduler enable
+toggle either).
 
 Because IRC may use an isolated classloader, the callback must be registered by the TMS plugin (for
 example on `GravitinoEnv`), not a direct cast to TMS implementation classes. IRC and the main
@@ -1030,10 +1028,8 @@ server must share **one JVM**.
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
 gravitino.auxService.names = iceberg-rest
-gravitino.iceberg-rest.tableMaintenance.inProcess = true
-gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
-gravitino.maintenance.scheduler.table.threads = 7
+gravitino.maintenance.scheduler.table.threads = 8
 gravitino.maintenance.scheduler.commit.threads = 4
 ```
 
@@ -1117,7 +1113,6 @@ not IRC, not `expand.threads`, not `table.threads`.
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `gravitino.maintenance.scheduler.enabled` | `true` on MySQL/PostgreSQL; `false` on H2 | Enables all three schedulers |
 | `gravitino.maintenance.scheduler.expand.threads` | `4` | Expand pool (① only) |
 | `gravitino.maintenance.scheduler.table.threads` | `7` | Table pool (② only) |
 | `gravitino.maintenance.scheduler.commit.threads` | `4` | Commit pool (③ only): post-IRC decide + short submit |
@@ -1186,7 +1181,7 @@ SecretManager, and policy `jobOptions`.
 - [ ] Add `TableMaintenanceScheduler` with expand (4) + table (7) + commit (4) pools (7.4).
 - [ ] Add entity-store migration for `scheduled_tasks` (MySQL / PostgreSQL).
 - [ ] Wire `DataSource` from the relational entity store; honor 7.4 heartbeat keys.
-- [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (7.4).
+- [ ] On H2 backends: invoke expand/submit pipelines directly in tests when needed (§7.4).
 - [ ] Integration test: two nodes; one pick wins; in-flight blocks second submit; reconcile closes
       stale `finished_at IS NULL` without inventing metrics.
 
@@ -1200,7 +1195,7 @@ SecretManager, and policy `jobOptions`.
       does **not** `runJob` on the IRC thread (decide/execute on `commit.threads`).
 - [ ] Tests: attached subset runs in fixed order; missing types skipped; terminal re-upserts ③;
       concurrent commits coalesce on one row.
-- [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
+- [ ] Wire IRC post-commit hook to the in-process callback (§5.1.1 / §7.2).
 - [ ] Sample `before_metrics` before `runJob`; INSERT job row; DELETE ②/③ immediately; Job listener
       writes `after_metrics` + `finished_at`; reconcile: terminal → `finished_at` only; missing Job → **DELETE** occupancy (§5.4.2).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on

@@ -158,7 +158,7 @@ TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，�
 | 集群 CAS / 单飞             | 是（`scheduled_tasks` 乐观锁 / `SKIP LOCKED`）                        | 是                                  | 仅锁                                                   | 是（`QRTZ_*` 行锁）                                      |
 | 短租约 heartbeat           | 是（`last_heartbeat`）                                             | 是                                  | 不适用                                                  | 是                                                   |
 | 适合按 (table,policy) 到期任务 | 是                                                               | 是                                  | 否（仅锁）                                                | 是（更重）                                               |
-| H2 单元测试路径               | 降级：禁用调度器；测试中直接跑管线（7.4）                                       | H2 支持更好                            | 是                                                    | 仅测试用 RAMJobStore                                    |
+| H2 单元测试路径               | 降级：测试中直接跑 expand/submit 管线（§7.4）                                       | H2 支持更好                            | 是                                                    | 仅测试用 RAMJobStore                                    |
 | 额外运维组件                  | 无                                                               | 可选 dashboard 服务                    | 无                                                    | 无                                                   |
 | 决策                      | **选定**                                                          | 否决 — 许可证 + 与 Gravitino Jobs 重叠     | 否决 — 非调度器                                            | 否决 — 约 11 张表，过重                                     |
 
@@ -267,8 +267,9 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
 
 ### 5.3 用户流程
 
-1. 运维启用 TMS REST 插件（`extensionPackages`）、**同 JVM** 的 `iceberg-rest`、进程内 commit 事件（§5.1.1 / 7.2）
-   与嵌入式调度器（7.4）。若启用授权，TMS bootstrap metalake 用户 `tms` 并授予权限（§5.5）。
+1. 运维启用 TMS REST 插件（`extensionPackages`）与**同 JVM** 的 `iceberg-rest`（§5.1.1、§7.1）。
+   插件注册 commit 回调并启动三个 db-scheduler 池（无单独 enable 开关）。若启用授权，TMS bootstrap
+   metalake 用户 `tms` 并授予权限（§5.5）。
 2. 运维创建 / 启用维护策略（含非认证 `jobOptions`），并通过 metalake Policy API 挂载到 catalog / schema / table。创建/启用时 TMS **INSERT**
    **`tms-policy-expand`** ①（该 `policy_id`）（5.4、§6.1）。例如：
 
@@ -857,13 +858,10 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
 | `gravitino.server.rest.extensionPackages` | none | 须包含 TMS Feature 包（示例：`org.apache.gravitino.maintenance.web.rest.feature`）。 |
 | `gravitino.auxService.names`              | none | 使用 IRC 时须包含 `iceberg-rest`。TMS 本身**不**以此方式启动。                              |
 
-### 7.2 Iceberg REST → TMS 进程内事件键
+### 7.2 Iceberg REST → TMS 进程内 commit 接线
 
-示例键（实现时可能最终确定名称）。
-
-| 键（示例）                                               | 默认      | 说明                                               |
-| --------------------------------------------------- | ------- | ------------------------------------------------ |
-| `gravitino.iceberg-rest.tableMaintenance.inProcess` | `false` | 为 `true` 时，IRC 在 commit 后调用**主服务注册的事件回调 / SPI**。 |
+启用 TMS 插件与 `iceberg-rest`（§7.1）后，IRC 在 commit 后调用**主服务注册的事件回调 / SPI** ——
+**始终进程内**，无需单独开关。
 
 因 IRC 可能用隔离 classloader，回调须由 TMS 插件注册（如在 `GravitinoEnv`），不能直接 cast 到 TMS 实现类。
 IRC 与主服务器须共享**同一 JVM**。
@@ -871,10 +869,8 @@ IRC 与主服务器须共享**同一 JVM**。
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
 gravitino.auxService.names = iceberg-rest
-gravitino.iceberg-rest.tableMaintenance.inProcess = true
-gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
-gravitino.maintenance.scheduler.table.threads = 7
+gravitino.maintenance.scheduler.table.threads = 8
 gravitino.maintenance.scheduler.commit.threads = 4
 ```
 
@@ -953,7 +949,6 @@ db-scheduler **每个** `Scheduler` 一个线程池。TMS 在同一张 `schedule
 
 | 键 | 默认 | 说明 |
 | -- | ---- | ---- |
-| `gravitino.maintenance.scheduler.enabled` | MySQL/PG `true`；H2 `false` | 启用三个调度器 |
 | `gravitino.maintenance.scheduler.expand.threads` | `4` | expand 池（仅 ①） |
 | `gravitino.maintenance.scheduler.table.threads` | `7` | table 池（仅 ②） |
 | `gravitino.maintenance.scheduler.commit.threads` | `4` | commit 池（仅 ③）：IRC 后判断 + 短 submit |
@@ -1009,7 +1004,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 添加 `TableMaintenanceScheduler`：expand（4）+ table（7）+ commit（4）三池（7.4）。
 - [ ] 为 `scheduled_tasks` 添加 entity-store 迁移（MySQL / PostgreSQL）。
 - [ ] 从关系 entity store 接线 `DataSource`；遵守 7.4 heartbeat 键。
-- [ ] H2 后端：调度器禁用；测试中直接调用管线（7.4）。
+- [ ] H2 后端：需要时在测试中直接调用 expand/submit 管线（§7.4）。
 - [ ] 集成测试：两节点；仅一个 pick 胜出；死 JVM 经错过 heartbeat 释放租约。
 
 #### 阶段 4 检查清单
@@ -1019,7 +1014,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 策略创建/启用时 INSERT **`tms-policy-expand`** ①（`policy_id`）（§5.4.2）。
 - [ ] IRC post-commit **upsert** `tms-table-commit` `{table_id}`；拒绝 orphan-cleanup 的 `onCommit`；**不**在 IRC 线程 `runJob`（判断/执行走 `commit.threads`）。
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
-- [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
+- [ ] IRC post-commit 钩子接到进程内回调（§5.1.1 / §7.2）。
 - [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账：终态补 `finished_at`；Job 缺失则 DELETE 占坑（§5.4.2）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
