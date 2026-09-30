@@ -93,10 +93,6 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 5. **Commit 路径 HTTP 或 Kafka**：无 `POST …/events/iceberg-commit`、无健康检查资源、无 Kafka 生产/消费路径。
    commit 处理**仅进程内**（§5.1.1）。替代 optimizer CLI 的 API 在 **§7**，不是 commit 入口。
    远程 IRC / 跨 JVM 投递不在范围（如需可后续跟进）。
-6. **持有 db-scheduler pick 直到 Spark 完成**：① / ② / ③ 回调必须在入队 / submit（或 skip）后返回。
-   防双提交靠在途 `table_maintenance_job` 占坑；Validation 指标只在热路径写入（§5.5.3）。
-7. **自动化 TMS 的按人用户模板**：手动 Automate Jobs UI 日后可存按用户默认值；自动化事件/定时运行始终使用
-   **`tms`** 主体与策略 `jobOptions`（§5.6–§5.8）。
 
 ## 4. 方案调研
 

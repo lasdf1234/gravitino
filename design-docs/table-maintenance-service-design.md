@@ -117,12 +117,6 @@ commits.
    produce/consume path. Commit handling is **in-process only** (§5.1.1). APIs that replace the
    optimizer CLI are **§7**, and they are not a commit ingress. Remote IRC / cross-JVM delivery is
    out of scope (follow-up if needed).
-6. **Holding db-scheduler pick until Spark completes**: ① / ② / ③ callbacks must return after
-   enqueue / submit (or skip). Anti-double-submit uses in-flight `table_maintenance_job` occupancy;
-   Validation metrics are written on the hot path only (§5.5.3).
-7. **Per-human-user templates for automated TMS**: Manual Automate Jobs UI may later store
-   per-user defaults; automated event/timed runs always use the **`tms`** principal and policy
-   `jobOptions` (§5.6–§5.8).
 
 ## 4. Solution Investigations
 
