@@ -500,14 +500,13 @@ a late reconcile sweep):
 
 `finished_at IS NULL` means “TMS has not closed the slot yet.” It does **not** mean “Spark is
 definitely still running.” **Job lifetime and stuck-job handling belong to the Gravitino Jobs
-framework** (status pull, executor retention / stale-active expire — see job docs). TMS only
-mirrors a terminal Job status into `finished_at`.
+framework** (status pull, executor retention / stale-active expire — see job docs). TMS mirrors a terminal Job status into `finished_at`. If the Job entity is **missing**, **DELETE** the occupancy row instead (no `finished_at`) so the run is treated as never happened.
 
 | `table_maintenance_job` | Job actual status | Action |
 | ----------------------- | ----------------- | ------ |
 | `finished_at IS NULL` | Still queued / started / cancelling | Keep in-flight; no submit for same `(table, policy)` |
 | `finished_at IS NULL` | SUCCEEDED / FAILED / CANCELLED (including Jobs stale-expire → FAILED) | Set `finished_at` only; **do not** backfill `before_metrics` or late `after_metrics` |
-| `finished_at IS NULL` | Job entity missing | Set `finished_at` (abandoned); release slot; **no** metrics backfill |
+| `finished_at IS NULL` | Job entity missing | **DELETE** the occupancy row (treat as job never ran); do **not** set `finished_at`; **no** metrics; allow waiting `(table, policy)` work to proceed |
 
 Do **not** add a parallel TMS wall-clock Spark timeout. Tighter kill behavior belongs in Jobs /
 executor configuration (or a future Jobs-level timeout); TMS reconciles after the Job becomes
@@ -1266,7 +1265,7 @@ SecretManager, and policy `jobOptions`.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **drop** hook to delete outstanding ②+③ + `table_maintenance_job` rows (§6.3).
 - [ ] Sample `before_metrics` before `runJob`; INSERT job row; DELETE ②/③ immediately; Job listener
-      writes `after_metrics` + `finished_at`; reconcile on Job terminal / missing only (§5.4.2).
+      writes `after_metrics` + `finished_at`; reconcile: terminal → `finished_at` only; missing Job → **DELETE** occupancy (§5.4.2).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on
       `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve; drop cleans rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
@@ -1309,7 +1308,7 @@ SecretManager, and policy `jobOptions`.
 | Job records  | `table_maintenance_job` one row per `job_run_id` (Validation JSON + submit gates).                                                         |
 | Import       | Lazy `table_meta` import via `TableDispatcher.loadTable` (§5.4.3); not Iceberg `registerTable`.                                            |
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
-| Pipeline     | ①→INSERT ②; ②/③ short submit; listener writes after; reconcile only sets `finished_at` (§5.4.2).                                          |
+| Pipeline     | ①→INSERT ②; ②/③ short submit; listener writes after; reconcile: terminal → `finished_at`; missing Job → DELETE occupancy (§5.4.2).       |
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Drop         | Drop hook deletes outstanding ②+③ + `table_maintenance_job` rows (§6.3). Rename out of scope.                                              |
 | Multi-node   | N compete, one pick; ②/③ pick+heartbeat anti-double-submit; dead-worker gated by `table_maintenance_job`.                               |

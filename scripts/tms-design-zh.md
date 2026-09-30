@@ -393,13 +393,13 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 
 `finished_at IS NULL` 只表示「TMS 还没关坑」，**不等于**「Spark 一定还在跑」。**Job 生命周期与僵死处理
 归 Gravitino Jobs**（状态拉取、executor retention / 过期 active → FAILED 等，见 Job 文档）。
-TMS 只把 Job **终态**镜像到 `finished_at`。
+TMS 把 Job **终态**镜像到 `finished_at`。若 Job **实体不存在**，则 **DELETE** 占坑行（不写 `finished_at`），当作本次 Job 未发生，后续任务放行。
 
 | `table_maintenance_job` | Job 实际状态 | 动作 |
 | ----------------------- | ------------ | ---- |
 | `finished_at IS NULL` | 仍为 queued / started / cancelling | 保持在途；同一 `(table, policy)` 不再 submit |
 | `finished_at IS NULL` | SUCCEEDED / FAILED / CANCELLED（含 Jobs 过期 active → FAILED） | **只**补 `finished_at`；**不**补 `before_metrics` / 过期的 `after_metrics` |
-| `finished_at IS NULL` | Job 实体不存在 | 写 `finished_at`（abandoned）；放坑；**不**补 metrics |
+| `finished_at IS NULL` | Job 实体不存在 | **DELETE** 占坑行（当作 Job 未发生）；**不**补 `finished_at`；**不**补 metrics；待执行任务放行 |
 
 不要在 TMS 再发明平行的墙钟 Spark 超时。更紧的杀掉行为应落在 Jobs / executor 配置（或未来 Jobs
 级 timeout）；TMS 在 Job 进入终态后再对账即可。
@@ -739,7 +739,7 @@ pick 给定实例（CAS + heartbeat）。
 防双提交：在途 `table_maintenance_job` + `minIntervalMs`（5.4.2、§6.2）。
 
 **死 worker / 卡住的 Spark：** missed heartbeat 只释放**卡住的短回调**（回调本应很短）。
-长 Spark / 丢失的终态更新由对账修理 `finished_at IS NULL`（§5.4.2）—— **只**写 `finished_at`，从不补采 Validation 指标。
+长 Spark / 丢失的终态由对账处理 `finished_at IS NULL`（§5.4.2）：终态 **只**写 `finished_at`；Job 实体缺失则 **DELETE** 占坑行；从不补采 Validation 指标。
 
 | 表                                      | 角色                                                    |
 | -------------------------------------- | ----------------------------------------------------- |
@@ -1078,7 +1078,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
-- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账仅跟 Job 终态/缺失（§5.4.2）。
+- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账：终态补 `finished_at`；Job 缺失则 DELETE 占坑（§5.4.2）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
@@ -1117,7 +1117,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 | 作业记录       | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                     |
 | Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.4.3）；非 Iceberg `registerTable`。                      |
 | Ops API    | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                      |
-| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账只补 `finished_at`（§5.4.2）。                                    |
+| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账：终态补 `finished_at`；Job 缺失则 DELETE 占坑（§5.4.2）。              |
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
 | Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期实例 N 抢 1；②/③ pick+heartbeat 防双提交；死节点靠 `table_maintenance_job` 备份门控。                                    |
