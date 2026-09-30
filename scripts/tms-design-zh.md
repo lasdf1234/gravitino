@@ -210,7 +210,7 @@ expand 池与 table 池轮询；每个到期实例 **N 抢 1**。
 | ---- | ----------- | ------ | --------- |
 | ① Policy expand | `tms-policy-expand` | `{policy_id}` | 分页 INSERT ②；保留 ① |
 | ② Table scheduler | `tms-table-scheduler` | `table:{table_id}:{policy_id}` / `batch:{batch_id}:{policy_id}` | 短 submit → job 行 → DELETE |
-| ③ Table commit | `tms-table-commit` | `{table_id}` | resolve → 短 submit → DELETE；终态后可再 upsert |
+| ③ Table commit | `tms-table-commit` | `{table_id}` | 短 submit → job 行 → DELETE；终态后可再 upsert |
 
 **生命周期概要：**
 

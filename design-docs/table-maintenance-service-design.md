@@ -244,7 +244,7 @@ per due instance.
 | ----------------------- | -------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | ① Policy expand | `tms-policy-expand` | Policy **create / enable** | `{policy_id}` | Page → INSERT ②; **keep** ① |
 | ② Table scheduler | `tms-table-scheduler` | Written by ① (crontab) | `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}` | Short submit → job row → **DELETE** |
-| ③ Table commit | `tms-table-commit` | IRC upsert | `{table_id}` | Resolve → short submit → **DELETE**; may re-upsert after terminal |
+| ③ Table commit | `tms-table-commit` | IRC upsert | `{table_id}` | Short submit → job row → **DELETE**; may re-upsert after terminal |
 
 **Lifecycle sketch:**
 
