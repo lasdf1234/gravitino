@@ -36,10 +36,10 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 5. 多节点部署下缺少用于过期 claim 回收的**嵌入式调度器**。
 
 本设计将 TMS 做成主服务 **8090** 上的 **REST 插件**（与 IdP 相同，通过
-`gravitino.server.rest.extensionPackages`），以便同机部署的 IRC 在 commit 后**触发**按策略的 expand。
-**db-scheduler** 在 `scheduled_tasks` 上持有**两类**任务租约：① **policy-expand**（把 policy 解析成 Spark 工作单元；长期保留）与
-② **spark-submit**（一次性；pick 完成后删除）。`table_maintenance_job` 为每次 Spark 运行存一行（Validation JSON + submit 门控）。
-optimizer 执行核心在 ② pick 后以进程内方式运行。
+`gravitino.server.rest.extensionPackages`），以便同机部署的 IRC 在 commit 后**唤醒**表维护。
+**db-scheduler** 在 `scheduled_tasks` 上持有**三类**任务：① **policy-expand**（crontab → Spark 单元；长期保留）、
+② **table-scheduler**（一次性 submit；pick 后 DELETE）、③ **table-commit**（commit 唤醒；pick 后 DELETE，可再 upsert）。
+双池：`expand.threads=4`（仅 ①）与 `table.threads=8`（②+③）。`table_maintenance_job` 为每次 Spark 运行存一行。
 
 ---
 
@@ -98,7 +98,7 @@ optimizer 执行核心在 ② pick 后以进程内方式运行。
 5. **Commit 路径 HTTP 或 Kafka**：无 `POST …/events/iceberg-commit`、无健康检查资源、无 Kafka 生产/消费路径。
    commit 处理**仅进程内**（§5.1.1）。替代 optimizer CLI 的 API 在 **§7**，不是 commit 入口。
    远程 IRC / 跨 JVM 投递不在范围（如需可后续跟进）。
-6. **持有 db-scheduler pick 直到 Spark 完成**：expand 与 spark-submit 回调必须在入队 / submit（或 skip）后返回。
+6. **持有 db-scheduler pick 直到 Spark 完成**：① / ② / ③ 回调必须在入队 / submit（或 skip）后返回。
    长 Spark 生命周期由 `table_maintenance_job` 与作业框架门控；② 行在 submit 后**删除**，不靠长期 `picked`。
 7. **自动化 TMS 的按人用户模板**：手动 Automate Jobs UI 日后可存按用户默认值；自动化事件/定时运行始终使用
    **`tms`** 主体与策略 `jobOptions`（§5.6–§5.8）。
@@ -120,7 +120,7 @@ optimizer 执行核心在 ② pick 后以进程内方式运行。
 通过 `gravitino.server.rest.extensionPackages` 注册 Jersey 2 `Feature`，在主服务进程内运行。
 commit 路径**不使用 HTTP**。每次 Iceberg commit 后，**同机** IRC 钩子调用主服务注册的**进程内**回调，
 **bump** 长期 **`tms-policy-expand`** 任务。**所有** TMS 节点运行 db-scheduler；一个节点 pick 每个到期实例
-（expand ① 或 spark-submit ②）。
+（expand ① 或 table ②/③）。
 
 **优点：** 无额外进程或端口；commit 路径无远程事件跳转；通过调度器 pick 在副本间分发工作；
 复用 Policy + Jobs；匹配插件打包；租约 heartbeat 内置于 db-scheduler。
@@ -146,17 +146,18 @@ TMS 不在主 8090 JAX-RS 应用上。
 
 **决策：** 否决。优先选项 B。
 
-### 4.5 两层调度任务 + 按运行作业记录（db-scheduler — 选定）
+### 4.5 三类调度任务 + 按运行作业记录（db-scheduler — 选定）
 
-TMS 需要在 `scheduled_tasks` 上对**两类**工作做集群安全调度，外加持久的按运行作业记录：
+TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，外加持久的按运行作业记录：
 
-1. **Policy-expand** — 把维护策略解析成 Spark 工作单元（每个 `policy_id` 长期一行）。
-2. **Spark-submit** — 真正 `runJob` 的一次性单元（多行；**pick 后删除**）。
-3. **`table_maintenance_job`** — 在途 Spark / `minIntervalMs` / Validation 跨过 spark-submit pick 仍有效。
+1. **Policy-expand**（①）— crontab：把策略解析成 Spark 工作单元（每个 `policy_id` 长期一行）。
+2. **Table-scheduler**（②）— crontab/batch 一次性 `runJob`（**pick 后 DELETE**）。
+3. **Table-commit**（③）— 每表 `{table_id}` 的 commit 唤醒；pick 时 resolve；**DELETE**；可再 upsert。
 
-这与 Spark 作业执行（已由 Gravitino Jobs 拥有）**不是**同一问题。单独的臃肿 evaluate 状态表（带 `evaluate_pending` +
-`IDLE`/`RUNNING` + 应用 heartbeat）重复了 db-scheduler 已为短任务提供的能力。持有 `picked` 直到
-Spark 完成会把调度器线程绑在长作业上，已否决（非目标 #6）。
+另加 **`table_maintenance_job`** 使在途 Spark / `minIntervalMs` / Validation 跨过 submit pick 仍有效。
+双池：expand（①）与 table（②+③），避免 commit 执行抢 crontab expand 线程（§8.4）。
+
+持有 `picked` 直到 Spark 完成会把调度器线程绑在长作业上，已否决（非目标 #6）。
 
 #### 行业与项目内替代方案
 
@@ -178,11 +179,11 @@ Spark 完成会把调度器线程绑在长作业上，已否决（非目标 #6�
 2. **可嵌入且轻量** — 租约用一张 `scheduled_tasks` 表；随 `TableMaintenanceRESTFeature` 启停。
 3. **内置 heartbeat** — 短 evaluate 回调运行期间，db-scheduler 刷新 `last_heartbeat`；死 JVM 释放 pick，
    无需在 TMS 状态表上手写租约列。
-4. **职责清晰** — `tms-policy-expand` = 解析 policy → 入队 spark 单元；`tms-table-scheduler` = submit 后 **DELETE**；
-   `table_maintenance_job` = Validation + submit 门控；Gravitino Jobs 跑 Spark。
+4. **职责清晰** — ① = crontab expand → INSERT ②；②/③ = submit 后 **DELETE**；③ 按 `{table_id}` 合并；
+   `table_maintenance_job` = Validation + 门控；Gravitino Jobs 跑 Spark。
 5. **无臃肿 TMS 状态机** — 无 `evaluate_pending` / `IDLE`/`RUNNING` 与 `picked` 的双份实现。
 
-**决策：** **选定** — db-scheduler 两类任务名；`table_maintenance_job` 用于按运行记录与 submit 门控。
+**决策：** **选定** — db-scheduler 三类任务名 + 双池；`table_maintenance_job` 用于按运行记录与 submit 门控。
 
 ### 4.6 自动化 Job 配置存放位置
 
@@ -286,8 +287,8 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
 | `TmsPrincipalBootstrapListener`  | 监听 `CreateMetalakeEvent` 的 `EventListenerPlugin`；启用授权时确保 metalake 用户 `tms` + 内置角色（§5.6）。                                     |
 | `TmsAuthConfigResolver`          | 解析 IRC 认证 + credential-vending Spark conf；经 SecretManager 加载 secret（§5.9）。                                                   |
 | `TableMaintenanceJobStore`       | 读写 `table_maintenance_job` 按运行行；submit 门控 + Validation JSON（§6.2–§6.3）。                                                      |
-| `IcebergTableLifecycleHook`      | 进程内 IRC **drop** 钩子：删除相关 ② + `table_maintenance_job`；① 除非策略移除否则不动（§6.3）。                                                     |
-| 现有 optimizer 类                   | `Updater`、`Recommender`、providers、`JobSubmitter` — spark-submit 路径契约不变。                                                      |
+| `IcebergTableLifecycleHook`      | 进程内 IRC **drop** 钩子：删除相关 ②+③ + `table_maintenance_job`；① 除非策略移除否则不动（§6.3）。                                                   |
+| 现有 optimizer 类                   | `Updater`、`Recommender`、providers、`JobSubmitter` — ②/③ submit 路径契约不变。                                                         |
 | db-scheduler `scheduled_tasks`   | ① expand + ② table-scheduler + ③ table-commit。不能替代 `table_maintenance_job`。                                                      |
 
 ### 5.3 用户流程
@@ -441,7 +442,7 @@ TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tas
 | ---------- | ------------------------------------------------------------------------------------------------ |
 | API        | 对 `metalake.catalog.schema.table` 调用 `TableDispatcher.loadTable`（与 IRC `importTableEntity` 同路径）。 |
 | **不是**     | Iceberg REST `registerTable`、新建 TMS 表、或直接 `INSERT` `table_meta`。                                 |
-| 时机（commit） | 可选：bump ① 前 import 已提交表，或在 ① expand 时按 commit 提示 import。                                         |
+| 时机（commit） | 可选：upsert ③ 前 import 已提交表，或在后续 ① expand / ③ pick 时再 import。                                      |
 | 时机（expand） | 展开 catalog / schema 挂载时：**从 catalog backend list tables**，对每张候选表 import 后再 INSERT ②。             |
 | 幂等         | `table_meta` 已有该表时，`loadTable` 不再重复 import。                                                      |
 | 失败         | 记录日志并**跳过**该表的调度 / submit；无 `table_id` 时不写 `table_maintenance_job`。                              |
@@ -744,41 +745,45 @@ Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job �
 
 ## 6. 多节点协调
 
-在**多个** Gravitino / TMS 节点上，commit 可能在 IRC 节点 bump ①，但**每个**节点都运行 db-scheduler。
+在**多个** Gravitino / TMS 节点上，IRC 在 commit 节点 **upsert** ③，但**每个**节点都运行 db-scheduler。
 写入 `scheduled_tasks` **不会**让所有节点都执行；当 `execution_time` 到期时，节点**竞争**，**只有一个**
 pick 给定实例（CAS + heartbeat）。
 
-**入队 ①：** 策略创建/启用 INSERT；commit / crontab bump `execution_time`（§5.4、§5.7）。
+**入队 ①：** 策略创建/启用 INSERT；crontab 设下次 `execution_time`（§5.5、§5.7）。
 
 **入队 ②：** 仅由成功的 ① expand pick 写入（§5.5）。
 
-**Expand 互斥：** ① `tms-policy-expand` 上的 pick（§6.1）。
+**入队 ③：** IRC upsert `(tms-table-commit, {table_id})`（§5.4）。
 
-**Spark-submit 互斥：** 每条 ② `tms-table-scheduler` 上的 pick；pick 路径后 **DELETE** 该行。同一 `(table, policy)`
-另有 expand 时的 `minIntervalMs` + 在途 `table_maintenance_job`（§5.5.3、§6.2）。
+**Expand 互斥：** ① 上的 pick（`expand.threads`）（§6.1）。
+
+**Table 互斥：** 每条 ② 或 ③ 上的 pick（`table.threads`）；pick 路径后 **DELETE**。同一 `(table, policy)`
+另有 `minIntervalMs` + 在途 `table_maintenance_job`（§5.5.3、§6.2）。
 
 **死 worker：** 错过 heartbeat 解锁 / 重新入队。已提交的 Spark job **不**取消；`finished_at IS NULL` 仍挡双 submit。
 
 | 表                                      | 角色                                                    |
 | -------------------------------------- | ----------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **expand 什么**、`schedule`（§5.7）与非认证 `jobOptions`（§5.8） |
-| `scheduled_tasks`                      | ① 长期 expand + ② 一次性 spark-submit（pick 后 DELETE）       |
+| `scheduled_tasks`                      | ① 长期 expand + ②/③ 一次性（pick 后 DELETE）                  |
 | `table_maintenance_job`                | 按运行 Validation JSON + submit 门控（§6.2）                 |
 | SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.9）；无 `tms_credential` 表      |
 | `user_meta`                            | 启用授权时的内置 `tms` 用户（§5.6）                               |
 
 认证材料用 SecretManager。Job-template **参数**留在策略挂载上。
 
-### 6.1 两层租约（`scheduled_tasks`）
+### 6.1 双池租约（`scheduled_tasks`）
 
 ```text
 策略创建 → INSERT ①（policy_id）
-Commit / crontab → bump ① 到期
-Node A / B / C 轮询
+crontab 到期 → pick ①（expand.threads）→ INSERT 多条 ② → 保留 ①
+IRC commit → upsert ③ {table_id}（IRC 线程；不进任一池）
+Node A / B / C
         │
-        ├─ pick ① → INSERT 多条 ② → 保留 ① → unpick
-        ├─ pick ②ₐ → submit → DELETE ②ₐ
-        ├─ pick ②ᵦ → submit → DELETE ②ᵦ   （可在另一节点）
+        ├─ expand 池：pick ① → INSERT ② → 保留 ①
+        ├─ table 池： pick ② → submit → DELETE ②
+        ├─ table 池： pick ③ → resolve → submit → DELETE ③
+        │               （终态可再 upsert 同一 {table_id}）
         └─ picker 死亡 → 错过 heartbeat → 实例可再次运行
 ```
 

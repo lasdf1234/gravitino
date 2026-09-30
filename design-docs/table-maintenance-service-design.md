@@ -38,12 +38,12 @@ Today that core is not hosted as a long-running Gravitino service. Without a ser
 5. There is no **embedded scheduler** for stale-claim reclaim on multi-node deployments.
 
 This design turns TMS into a **main-server REST plugin** on port **8090** (same pattern as IdP
-via `gravitino.server.rest.extensionPackages`) so colocated IRC can **enqueue** per-policy expand
-work after commits. **db-scheduler** owns leases on `scheduled_tasks` for **two** task kinds:
-**(1) policy-expand** (parse a policy into Spark work units; long-lived) and **(2) spark-submit**
-(one-shot; deleted after pick). One Gravitino table (`table_maintenance_job`) stores each
-maintenance job run, Validation snapshots, and submit gates. The optimizer execution core runs
-in-process after a spark-submit pick.
+via `gravitino.server.rest.extensionPackages`) so colocated IRC can **wake** table maintenance after
+commits. **db-scheduler** owns leases on `scheduled_tasks` for **three** task names: **① policy-expand**
+(crontab → Spark units; long-lived), **② table-scheduler** (one-shot submit; DELETE after pick), and
+**③ table-commit** (commit wake-up; DELETE after pick; may re-upsert). Dual pools: `expand.threads=4`
+(① only) and `table.threads=8` (②+③). One Gravitino table (`table_maintenance_job`) stores each
+maintenance job run, Validation snapshots, and submit gates.
 
 ---
 
@@ -78,8 +78,8 @@ in-process after a spark-submit pick.
    APIs (create / alter / enable / disable / associate). TMS does **not** introduce a parallel policy
    store or `/api/maintenance/table/policies` CRUD.
 7. **Multi-node safe execution**: db-scheduler pick + heartbeat is the mutex for each
-   `scheduled_tasks` instance — expand and spark-submit alike (§5.5, §6). Concurrent Spark submits
-   for the same `(table, policy)` are also gated by an in-flight `table_maintenance_job` row
+   `scheduled_tasks` instance — ① / ② / ③ alike (§5.5, §6). Concurrent Spark submits for the same
+   `(table, policy)` are also gated by an in-flight `table_maintenance_job` row
    (`finished_at IS NULL`) (§6.2).
 8. **Per-run maintenance job table**: Gravitino persists one `table_maintenance_job` row per Spark
    `job_run_id` (Validation JSON + `finished_at`). Enqueue / reclaim for **scheduler tasks** live in
@@ -122,7 +122,7 @@ in-process after a spark-submit pick.
    produce/consume path. Commit handling is **in-process only** (§5.1.1). APIs that replace the
    optimizer CLI are **§7**, and they are not a commit ingress. Remote IRC / cross-JVM delivery is
    out of scope (follow-up if needed).
-6. **Holding db-scheduler pick until Spark completes**: Expand and spark-submit callbacks must return
+6. **Holding db-scheduler pick until Spark completes**: ① / ② / ③ callbacks must return
    after enqueue / submit (or skip). Long Spark lifetimes are gated by `table_maintenance_job` and
    the job framework, not by holding `picked` on a `tms-table-scheduler` row (that row is deleted after
    submit).
@@ -149,7 +149,7 @@ Register Table Maintenance as a Jersey 2 `Feature` through
 process. The commit path does **not** use HTTP. After each Iceberg commit, the **colocated** IRC hook
 invokes a main-server-registered **in-process** callback that **bumps** long-lived
 **`tms-policy-expand`** tasks. **All** TMS nodes run db-scheduler; one node picks each due instance
-(expand ① or spark-submit ②) under a short lease.
+(expand ① or table ②/③) under a short lease.
 
 **Pros:** No extra process or port; no remote event hop on the commit path; work is distributed
 across replicas via scheduler pick; reuses Policy + Jobs; matches plugin packaging; lease heartbeat
@@ -178,20 +178,20 @@ listener (default **9301**), and keep TMS off the main 8090 JAX-RS app.
 
 **Decision:** Rejected. Prefer Option B.
 
-### 4.5 Two-tier scheduler tasks + per-run job records (db-scheduler — Chosen)
+### 4.5 Three scheduler task names + per-run job records (db-scheduler — Chosen)
 
-TMS needs cluster-safe scheduling for **two** kinds of work, both on `scheduled_tasks`:
+TMS needs cluster-safe scheduling for **three** kinds of work on `scheduled_tasks`:
 
-1. **Policy-expand** — parse a maintenance policy into Spark work units (long-lived row per
-   `policy_id`).
-2. **Spark-submit** — one-shot units that actually call `runJob` (many rows; **deleted after pick**).
+1. **Policy-expand** (①) — crontab: parse a policy into Spark work units (long-lived row per `policy_id`).
+2. **Table-scheduler** (②) — one-shot crontab/batch units that call `runJob` (**DELETE** after pick).
+3. **Table-commit** (③) — commit wake-up per `{table_id}`; resolve policy at pick; **DELETE**; may re-upsert.
 
 Plus durable **`table_maintenance_job`** rows so in-flight Spark and `minIntervalMs` / Validation
-survive beyond the spark-submit pick.
+survive beyond the submit pick. Dual pools: expand (①) vs table (②+③) so commit execute does not
+steal crontab expand threads (§8.4).
 
 Holding `picked` until Spark finishes ties scheduler threads to long jobs and is rejected
-(Non-Goal #6). Spark execution stays in the Gravitino job framework; `tms-table-scheduler` only covers the
-short submit callback.
+(Non-Goal #6). Spark execution stays in the Gravitino job framework; ②/③ only cover the short submit callback.
 
 #### Industry and in-project alternatives
 
@@ -207,19 +207,18 @@ short submit callback.
 | Extra ops component              | No                                                                   | Optional dashboard server                    | No                                                   | No                                                       |
 | Decision                         | **Chosen**                                                           | Rejected — license + overlaps Gravitino Jobs | Rejected — not a scheduler                           | Rejected — ~11 tables, heavy                             |
 
-#### Why db-scheduler + two task kinds + job table
+#### Why db-scheduler + three task names + job table
 
 1. **Apache License 2.0** — safe for an ASF project; JobRunr is LGPL v3.
-2. **Embeddable and light** — one `scheduled_tasks` table for both expand and spark-submit leases;
-   starts/stops with `TableMaintenanceRESTFeature`.
+2. **Embeddable and light** — one `scheduled_tasks` table for ①/②/③ leases; starts/stops with
+   `TableMaintenanceRESTFeature`.
 3. **Built-in heartbeat** — while a short callback runs, db-scheduler refreshes `last_heartbeat`.
-4. **Clear split** — `tms-policy-expand` = parse policy → enqueue spark units; `tms-table-scheduler` =
-   submit one unit then **DELETE**; `table_maintenance_job` = Validation + submit gates; Gravitino
-   Jobs runs Spark.
+4. **Clear split** — ① = crontab expand → INSERT ②; ②/③ = submit then **DELETE**; ③ coalesce on
+   `{table_id}`; `table_maintenance_job` = Validation + gates; Gravitino Jobs runs Spark.
 5. **No fat TMS state machine** — no `evaluate_pending` / `IDLE`/`RUNNING` twin of `picked`.
 
-**Decision:** **Chosen** — db-scheduler with two task names; `table_maintenance_job` for per-run
-records and submit gates.
+**Decision:** **Chosen** — db-scheduler with three task names + dual pools; `table_maintenance_job`
+for per-run records and submit gates.
 
 ### 4.6 Where automated Job configuration lives
 
@@ -251,8 +250,9 @@ keytabs, and similar).
 
 ### 5.1 Architecture
 
-TMS uses **two kinds of rows in `scheduled_tasks`** (db-scheduler). Writing a row does **not** mean
-every node runs it: **every** node polls; **N compete, one pick wins** per due instance.
+TMS uses **three** task names on `scheduled_tasks` (db-scheduler) and **two** pools. Writing a row
+does **not** mean every node runs it: expand and table pools poll; **N compete, one pick wins**
+per due instance.
 
 | Kind                    | `task_name` (illustrative) | When created                                        | Instance key                                                                      | After pick                                                                            |
 | ----------------------- | -------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -267,10 +267,7 @@ Create / enable maintenance policy (policy_id = P)
   → INSERT scheduled_tasks ① tms-policy-expand / {policy_id}
      execution_time = next crontab (or far-future if onCommit-only until first commit)
 
-onCommit / crontab due
-  → bump ① execution_time = now (commit) or leave crontab due time
-
-① picked (expand pool)
+crontab due → ① picked (expand pool)
   → load policy by {policy_id}; task_data empty or expand cursor only
   → page candidates (default **100**); expand gates; INSERT tms-table-scheduler
        instance = table:{table_id}:{policy_id}
@@ -376,7 +373,7 @@ Deployment:
 | `TmsAuthConfigResolver`          | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.9).                                             |
 | `TableMaintenanceJobStore`       | Read/write `table_maintenance_job` per-run rows; submit gates + Validation JSON (§6.2–§6.3).                                           |
 | `IcebergTableLifecycleHook`      | In-process IRC **drop** hook: delete related ②+③ rows + `table_maintenance_job`; ① unchanged unless policy removed (§6.3).             |
-| Existing optimizer classes       | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for spark-submit path.                                       |
+| Existing optimizer classes       | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for ②/③ submit path.                                          |
 | db-scheduler `scheduled_tasks`   | ① expand + ② table-scheduler + ③ table-commit. Not a substitute for `table_maintenance_job` / `job_run_meta`.                          |
 
 ### 5.3 User process
@@ -564,7 +561,7 @@ not yet imported, writes a `TableEntity` row to **`table_meta`** (and imports th
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | API           | `TableDispatcher.loadTable` on `metalake.catalog.schema.table` (same path IRC `importTableEntity` uses).                      |
 | **Not**       | Iceberg REST `registerTable`, a new TMS table, or direct `INSERT` into `table_meta`.                                          |
-| When (commit) | Optional: import committed table before bumping ①, or during ① expand when the commit hint is present.                        |
+| When (commit) | Optional: import committed table before upserting ③, or later on ① expand / ③ pick.                                             |
 | When (expand) | When expanding catalog / schema attachments: **list tables from the catalog backend**, import each candidate before INSERT ②. |
 | Idempotent    | If `table_meta` already has the table, `loadTable` is a no-op import.                                                         |
 | Failure       | Log and **skip** schedule / submit for that table; do not write `table_maintenance_job` without a `table_id`.                 |
@@ -903,18 +900,20 @@ provider configuration change only.
 
 ## 6. Multi-node coordination
 
-On **multiple** Gravitino / TMS nodes, a commit may bump ① on the IRC node, but **every** node runs
+On **multiple** Gravitino / TMS nodes, IRC on the commit node **upserts** ③, but **every** node runs
 db-scheduler. Writing `scheduled_tasks` does **not** cause all nodes to execute; when
 `execution_time` is due, nodes **compete** and **only one** picks a given instance (CAS + heartbeat).
 
-**Enqueue ①:** policy create/enable INSERT; commit / crontab bump `execution_time` (§5.4, §5.7).
+**Enqueue ①:** policy create/enable INSERT; crontab sets next `execution_time` (§5.5, §5.7).
 
 **Enqueue ②:** written only by a successful ① expand pick (§5.5).
 
-**Expand mutex:** pick on ① `tms-policy-expand` (§6.1).
+**Enqueue ③:** IRC upsert `(tms-table-commit, {table_id})` (§5.4).
 
-**Spark-submit mutex:** pick on each ② `tms-table-scheduler` row; after the pick path, **DELETE** that row.
-Additional `(table, policy)` protection: expand-time `minIntervalMs` + in-flight `table_maintenance_job` (§5.5.3, §6.2).
+**Expand mutex:** pick on ① (`expand.threads`) (§6.1).
+
+**Table mutex:** pick on each ② or ③ (`table.threads`); after the pick path, **DELETE**.
+Additional `(table, policy)` protection: `minIntervalMs` + in-flight `table_maintenance_job` (§5.5.3, §6.2).
 
 **Dead worker:** missed heartbeats unlock / requeue the instance. An already-submitted Spark job is
 **not** cancelled; `table_maintenance_job.finished_at IS NULL` still blocks a second submit.
@@ -922,23 +921,25 @@ Additional `(table, policy)` protection: expand-time `minIntervalMs` + in-flight
 | Table                                  | Role                                                                    |
 | -------------------------------------- | ----------------------------------------------------------------------- |
 | `policy_meta` / `policy_relation_meta` | **What** to expand, `schedule` (§5.7), and non-auth `jobOptions` (§5.8) |
-| `scheduled_tasks`                      | ① long-lived expand + ② one-shot spark-submit (DELETE after pick)       |
+| `scheduled_tasks`                      | ① long-lived expand + ②/③ one-shot (DELETE after pick)                  |
 | `table_maintenance_job`                | Per-run Validation JSON + submit gates (§6.2)                           |
 | SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.9); no `tms_credential` table            |
 | `user_meta`                            | Built-in `tms` user when authorization is enabled (§5.6)                |
 
 Auth material uses SecretManager. Job-template **parameters** stay on policy attachments.
 
-### 6.1 Two-tier leases (`scheduled_tasks`)
+### 6.1 Dual-pool leases (`scheduled_tasks`)
 
 ```text
 Policy create → INSERT ① (policy_id)
-Commit / crontab → bump ① due
-Node A / B / C poll
+crontab due → pick ① (expand.threads) → INSERT many ② → retain ①
+IRC commit → upsert ③ {table_id} (IRC thread; not either pool)
+Node A / B / C
         │
-        ├─ pick ① → INSERT many ② → retain ① → unpick
-        ├─ pick ②ₐ → submit → DELETE ②ₐ
-        ├─ pick ②ᵦ → submit → DELETE ②ᵦ   (may be another node)
+        ├─ expand pool: pick ① → INSERT ② → retain ①
+        ├─ table pool:  pick ② → submit → DELETE ②
+        ├─ table pool:  pick ③ → resolve → submit → DELETE ③
+        │                 (terminal may re-upsert same {table_id})
         └─ picker dies → missed heartbeats → instance runnable again
 ```
 
@@ -955,8 +956,8 @@ Illustrative `scheduled_tasks` usage (db-scheduler owned; MySQL-shaped):
 --    task_data = { tableIds, policyIds }
 -- ③ tms-table-commit / {table_id}  task_data = { tableId }
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
--- After ② pick path completes successfully (submit or gated skip): DELETE that row.
--- Commit remainder (if any) is a new INSERT with a shorter commit key.
+-- After ②/③ pick path: DELETE that row.
+-- ③ terminal may upsert the same {table_id} again for the next type (§5.7.1).
 -- ① is deleted only on policy disable / drop / replace (§5.5.2).
 ```
 
@@ -1227,23 +1228,19 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 ---
 
 ## 9. Work Plan and Checklist
----
-
-## 9. Work Plan and Checklist
 
 ### 9.1 Suggested Work Plan
 
-This design delivers the in-process plugin, IRC commit **bump** of policy-expand ①, two-tier
-`scheduled_tasks` (① retain / ② DELETE after pick), per-run `table_maintenance_job` records,
-`tms` principal + SecretManager auth / credential vending, policy `jobOptions`, and expand →
-spark-submit pipeline.
+This design delivers the in-process plugin, three `scheduled_tasks` names (①/②/③), dual pools
+(`expand.threads=4` / `table.threads=8`), per-run `table_maintenance_job`, `tms` principal +
+SecretManager, and policy `jobOptions`.
 
 | Phase | Work item                                | Notes                                                                                                                          |
 | ----- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | 1     | Load the in-process plugin               | `TableMaintenanceRESTFeature`; start/stop db-scheduler; `TmsPrincipalBootstrapListener`.                                       |
 | 2     | Internal expand + spark-submit pipelines | `PolicyExpandPipeline` + `MaintenanceSparkSubmitPipeline`; unit tests.                                                         |
-| 3     | db-scheduler two task kinds              | `tms-policy-expand` + `tms-table-scheduler` handlers; `scheduled_tasks` migration; heartbeats (§5.5).                                    |
-| 4     | In-process IRC hook (bump ①)             | Bump expand (§5.4); policy create inserts ①; expand writes ② (§6.1).                                                           |
+| 3     | db-scheduler three tasks + dual pools    | ①+②+③; `expand.threads=4` / `table.threads=8`; migration; heartbeats (§5.5, §8.4).                                              |
+| 4     | In-process IRC hook (upsert ③)           | Upsert `tms-table-commit` (§5.4); policy create inserts ①; expand writes ② (§6.1).                                              |
 | 5     | Hardening                                | Service metrics, graceful shutdown, H2 path tests, user docs.                                                                  |
 | 6     | Optimizer CLI replacement APIs           | Ops resources in §7. Same commands as `gravitino-optimizer`.                                                                   |
 | 7     | TMS principal + SecretManager auth       | `tms` user/role (§5.6); credential vending + none/basic/oauth/kerberos (§5.9); policy `schedule` (§5.7) + `jobOptions` (§5.8). |
