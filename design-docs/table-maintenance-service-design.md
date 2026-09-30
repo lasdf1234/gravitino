@@ -512,42 +512,10 @@ gates on ③ pick.
 
 #### 5.4.3 Lazy Gravitino metadata import (`table_meta`)
 
-TMS needs stable `schema_id` / `table_id` for `table_maintenance_job` and `scheduled_tasks` keys.
-Those ids live in Gravitino **`schema_meta`** / **`table_meta`**, not in the Iceberg catalog backend
-alone.
-
-**When:** only as maintenance is about to run (① expand before INSERT ②, or ②/③ submit before
-`runJob`). If the target schema or table has **no corresponding id** in Gravitino metadata yet,
-`ensureTableImported` fills it in then — not on a separate background scan, and not as a required
-step before IRC upserts ③.
-
-This is **Gravitino import**, not Iceberg REST `registerTable`. Reuse core
-`TableDispatcher.loadTable(NameIdentifier)` — it loads from the catalog backend and, when missing,
-writes **`table_meta`** (importing the parent schema into **`schema_meta`** first when that id is
-also missing).
-
-| Piece      | Detail                                                                                                            |
-| ---------- | ----------------------------------------------------------------------------------------------------------------- |
-| API        | `TableDispatcher.loadTable` on `metalake.catalog.schema.table` (same path IRC `importTableEntity` uses).          |
-| **Not**    | Iceberg REST `registerTable`, a new TMS table, or direct `INSERT` into `table_meta`.                              |
-| Trigger    | Maintenance path needs a `table_id` (and parent `schema_id`) and Gravitino metadata does not have them yet.       |
-| Where      | `ensureTableImported` on ① expand (before INSERT ②) and on ②/③ submit (before `runJob`).                          |
-| Expand tip | Catalog / schema attachments: **list tables from the catalog backend**, then `ensureTableImported` per candidate. |
-| Idempotent | If `schema_meta` / `table_meta` already have the ids, `loadTable` is a no-op import.                              |
-| Failure    | Log and **skip** that unit’s schedule / submit; never write `table_maintenance_job` without a `table_id`.         |
-
-**Owner after import** (optional, separate from `table_meta` row):
-
-1. Resolve owner from the **catalog backend** (for example Iceberg table property `owner`) via a
-   backend-aware resolver — not from the `tms` principal.
-2. If resolved and the user exists in metalake `user_meta`, call `OwnerDispatcher.setOwner`.
-3. If missing or unknown user, leave Gravitino owner unset — **do not** default to `tms`.
-4. If the table was already imported, do not overwrite an existing owner.
-
-**Why not `metalake_id` / `schema_id` on `table_maintenance_job`:** rows are per **table** + policy.
-`table_id` is the globally unique `table_meta` primary key, so metalake / catalog / schema are
-recoverable via `table_meta` (namespace `metalake.catalog.schema`). Denormalizing those ids would
-only help metalake-wide scans without a join — not needed for TMS gates or Validation.
+When maintenance is about to run (① expand before INSERT ②, or ②/③ submit before `runJob`) and
+Gravitino metadata has no `table_id` yet, `ensureTableImported` calls
+`TableDispatcher.loadTable` to import into `table_meta` (parent `schema_meta` first if needed).
+Skip that unit on failure; never write `table_maintenance_job` without a `table_id`.
 
 ### 5.5 TMS execution principal (`tms`)
 
@@ -1172,7 +1140,6 @@ SecretManager, and policy `jobOptions`.
 #### Phase 2 checklist
 
 - [ ] Implement `GravitinoTableImportService` (`TableDispatcher.loadTable` → `table_meta`; 5.4.3).
-- [ ] Backend-aware owner resolution after import; never default owner to `tms`.
 - [ ] Implement `PolicyExpandPipeline` (attachments → expand gates → INSERT ungated `tms-table-scheduler` ②; retain ①).
 - [ ] Implement `MaintenanceSparkSubmitPipeline` calling `Recommender.submitForStrategyName`.
 - [ ] Enforce gates: in-flight / min-interval on ①; ②/③ short submit then DELETE; Job listener + reconcile (§5.4.2).
