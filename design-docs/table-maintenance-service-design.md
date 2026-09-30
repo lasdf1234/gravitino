@@ -39,11 +39,7 @@ Today that core is not hosted as a long-running Gravitino service. Without a ser
 
 This design turns TMS into a **main-server REST plugin** on port **8090** (same pattern as IdP
 via `gravitino.server.rest.extensionPackages`) so colocated IRC can **wake** table maintenance after
-commits. **db-scheduler** owns leases on `scheduled_tasks` for **three** task names: **① policy-expand**
-(crontab → Spark units; long-lived; returns after enqueue), **② table-scheduler** and **③ table-commit**
-(submit → INSERT occupancy + `before_metrics` → **DELETE** scheduled row → return; ③ may re-upsert).
-Dual pools: `expand.threads=4` (① only) and `table.threads=8` (②+③). `table_maintenance_job` holds
-Validation + in-flight occupancy; Job listener writes `after_metrics` + `finished_at`; reconcile only closes slots (§5.5.3).
+commits.
 
 ---
 

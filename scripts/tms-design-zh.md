@@ -37,19 +37,7 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
 
 本设计将 TMS 做成主服务 **8090** 上的 **REST 插件**（与 IdP 相同，通过
 `gravitino.server.rest.extensionPackages`），以便同机部署的 IRC 在 commit 后**唤醒**表维护。
-**db-scheduler** 在 `scheduled_tasks` 上持有**三类**任务：① **policy-expand**（crontab → Spark 单元；长期保留；入队后即返回）、
-② **table-scheduler** / ③ **table-commit**（短回调：submit → INSERT 占坑+`before_metrics` → **DELETE** → return；③ 可再 upsert）。
-双池：`expand.threads=4`（仅 ①）与 `table.threads=8`（②+③）。`table_maintenance_job` 记 Validation + 在途占坑；Job 监听写 `after_metrics`+`finished_at`；对账只关坑（§5.5.3）。
-
----
-
-## 2. 目标
-
-1. **主服务进程内插件**：通过 `gravitino.server.rest.extensionPackages` 加载 Table Maintenance（Jersey 2
-   `Feature`，与 IdP 相同），IRC 回调注册在主 JVM。commit 路径**不使用 HTTP**。替代 optimizer CLI
-   的运维调用见 **§7** ops API。
-2. **IRC 进程内 commit 事件**：经 IRC 成功提交 Iceberg 后，TMS 通过**主服务注册的进程内回调 / SPI**
-   收到 commit 事件（见 **§5.1.1**）。处理程序 **upsert** **`tms-table-commit`**（`task_instance = {table_id}`），
+ {table_id}`），
    多节点靠唯一键合并。不在 IRC 线程 `runJob`，也不占用 expand 线程（§5.4）。
 3. **`scheduled_tasks` 上三类 db-scheduler 任务**：
    - **`tms-policy-expand`（①）**：`task_instance = {policy_id}`；`task_data` 默认空，仅分页时临时写
