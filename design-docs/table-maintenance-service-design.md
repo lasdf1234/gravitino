@@ -63,8 +63,6 @@ commits.
    - **`tms-table-commit`** (③): commit wake-up; `task_instance = {table_id}`;
      `task_data = { tableId }` (+ optional `snapshotId`). Policy chosen at **pick** time (§5.4);
      same short submit path (may re-upsert after terminal).
-   Two `Scheduler` instances: **expand** pool (① only) and **table** pool (② + ③). All nodes poll;
-   **N compete, one pick wins**. Do **not** hold a pick until Spark finishes.
 4. **Reuse existing optimizer execution core**: Scheduler task handlers invoke the same `Updater` /
    `Recommender` / job-submit paths already present in `maintenance/optimizer`, as **in-process
    methods**, not as a second copy of the logic.

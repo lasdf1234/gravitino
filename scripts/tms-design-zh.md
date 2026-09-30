@@ -55,7 +55,6 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
      `task_data = { tableIds, policyIds }`。短回调：`runJob` → INSERT job 行 → **DELETE** → return。
    - **`tms-table-commit`（③）**：commit 唤醒；`task_instance = {table_id}`；
      `task_data = { tableId }`（可选 snapshotId）。**policy 在 pick 时决议**（§5.4）；同样短 submit（终态后可再 upsert）。
-   两个 Scheduler：**expand** 池（仅 ①）与 **table** 池（②+③）。**N 抢 1**。不要持有 pick 直到 Spark 完成。
 4. **复用现有 optimizer 执行核心**：调度器任务处理程序以**进程内方法**调用 `maintenance/optimizer` 中已有的
    `Updater` / `Recommender` / 作业提交路径，而非第二套逻辑。
 5. **作业框架兼容**：Spark 维护工作继续使用 Gravitino 作业框架。TMS 在 `table_maintenance_job` 中记录每次运行，
