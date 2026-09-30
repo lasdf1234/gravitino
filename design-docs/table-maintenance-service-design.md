@@ -94,8 +94,8 @@ commits.
     (§5.7).
 13. **Auth credentials via SecretManager**: Passwords, tokens, and access keys used to run Spark
     Jobs are **not** stored in `policy_meta` or a TMS-owned credential table. Sensitive values are
-    referenced through Gravitino **SecretManager** (URN / provider), aligned with the pluggable
-    secret approach for server config. Opt-in: plaintext / missing secrets still work when the
+    referenced through Gravitino **SecretManager** (URN), aligned with the pluggable secret approach
+    for server config. Opt-in: plaintext / missing secrets still work when the
     secret solution is not enabled (§5.7).
 
 ---
@@ -224,7 +224,7 @@ keytabs, and similar).
 
 |          | Auth keys in policy `jobOptions`           | Dedicated `tms_credential` table                  | SecretManager + URN (Chosen)                                              |
 | -------- | ------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------- |
-| Pros     | One map with Spark options                 | Explicit TMS overlay                              | Pluggable providers (file / Vault / KMS); opt-in; shared with server conf |
+| Pros     | One map with Spark options                 | Explicit TMS overlay                              | Pluggable SecretManager backends (file / Vault / KMS); opt-in; shared with server conf |
 | Cons     | Policies are widely readable; secrets leak | Second keystore beside SecretManager; no KMS path | Needs bootstrap for TMS principal secrets                                 |
 | Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.7)                                                         |
 
@@ -310,7 +310,7 @@ Node A / Node B / Node C  — expand + table + commit pools poll (§5.4); N comp
 | `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7)      |
 | `scheduled_tasks`                                              | ① expand + ② table-scheduler + ③ table-commit (5.4, §6.1)                               |
 | `table_maintenance_job`                                        | Per-run Validation JSON + `finished_at`; submit gates (§6.2)                            |
-| SecretManager / SecretProvider                                 | TMS Spark / Iceberg **auth** material via URN (§5.7); not a TMS-owned table             |
+| SecretManager                                                   | TMS Spark / Iceberg **auth** material via URN (§5.7); not a TMS-owned table             |
 | `user_meta`                                                    | Built-in metalake user `tms` when authorization is enabled (§5.5)                       |
 | `job_run_meta`                                                 | Spark job run **record** (status + `runtime_job_template` snapshot); not default config |
 
@@ -737,8 +737,8 @@ Automated TMS Jobs talk to Gravitino **Iceberg REST** as Spark catalogs. Two ort
 
 Sensitive values (passwords, client secrets, keytabs contents, static cloud keys if ever needed)
 must **not** sit in `policy_meta`. They are stored and resolved through Gravitino
-**SecretManager** / **SecretProvider** (URN references). The solution is **opt-in**: when
-SecretManager is not configured,
+**SecretManager** (URN references). The solution is **opt-in**: when SecretManager is not
+configured,
 non-secret auth properties and plaintext test values can still be used for local runs.
 
 Keys below are written into the Job's `spark_conf` map (Iceberg REST catalog properties). Exact
@@ -836,8 +836,8 @@ runtime must be able to obtain a TGT for the TMS service principal.
 6. runJob as principal tms
 ```
 
-No `tms_credential` table. Switching from a local file SecretProvider to Vault / cloud KMS is a
-provider configuration change only.
+No `tms_credential` table. Switching SecretManager backends (for example local file to Vault /
+cloud KMS) is a configuration change only.
 
 ---
 
@@ -868,7 +868,7 @@ set `finished_at` only; never late-sample Validation metrics.
 | `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7) |
 | `scheduled_tasks`                                              | ① long-lived expand + ②/③ one-shot (DELETE after short submit)                     |
 | `table_maintenance_job`                                        | Per-run Validation JSON + submit gates (§6.2)                                      |
-| SecretManager / SecretProvider                                 | IRC auth secrets for `tms` (§5.7); no `tms_credential` table                       |
+| SecretManager                                                   | IRC auth secrets for `tms` (§5.7); no `tms_credential` table                       |
 | `user_meta`                                                    | Built-in `tms` user when authorization is enabled (§5.5)                           |
 
 Auth material uses SecretManager. Job-template **parameters** stay on policy attachments.
