@@ -73,8 +73,9 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
     提交 Jobs，而非创建策略的运维人员（§5.5）。
 11. **策略 evaluate 触发方式**：自动化维护在 `policy_version_info.content.schedule` 中配置
     `onCommit` 和/或 `crontab`（§5.6）。同一策略一行即可同时启用两种触发；拆成两条 policy 仅因维护**类型**不同。
-12. **策略上的作业模板参数**：非认证的 Spark / job-template 参数存放在维护策略内容
-    （`jobOptions` / 现有 `rewriteOptions`）。在 catalog / schema / table 挂载同类型策略；
+12. **策略上的作业模板参数**：非认证的 Spark / job-template 参数存放在
+    `policy_version_info.content`（`jobOptions` / 现有 `rewriteOptions`）—— 不是单独 TMS 表，
+    也不是 `policy_meta` 列。在 catalog / schema / table 挂载同类型策略；
     **最近挂载优先**（table > schema > catalog）（§5.7）。
 13. **通过 SecretManager 管理认证凭据**：运行 Spark Jobs 所需的密码、令牌、访问密钥**不**存放在
     `policy_meta` 或 TMS 自有凭据表。敏感值通过 Gravitino **SecretManager**（URN / provider）引用，
@@ -183,7 +184,7 @@ TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，�
 
 |     | 按 catalog / schema / table 的额外表 | 策略内容 `jobOptions`（选定）                             |
 | --- | ------------------------------- | ------------------------------------------------- |
-| 优点  | 显式                              | 复用 `policy_meta` / `policy_relation_meta`；最近挂载已定义 |
+| 优点  | 显式                              | 复用 `policy_version_info.content` + `policy_relation_meta`；最近挂载已定义 |
 | 缺点  | 与策略并行的挂载 + 优先级 + UI；易漂移         | 认证材料见 §4.6.2，不放在此处                                |
 | 决策  | 否决                              | **选定**（§5.7）                                      |
 
@@ -244,7 +245,7 @@ Node A/B/C
 
 | 表 | 角色 |
 | -- | ---- |
-| `policy_meta` / `policy_relation_meta` | expand 什么、schedule、jobOptions |
+| `policy_meta` / `policy_relation_meta` / `policy_version_info` | expand 什么；`schedule` + 非认证 `jobOptions` 在 **content** |
 | `scheduled_tasks` | ① + ② + ③ |
 | `table_maintenance_job` | 按运行 Validation + 门控 |
 | SecretManager | 认证材料（不进 task_data） |
@@ -349,7 +350,7 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 | Policy expand | `tms-policy-expand` | `{policy_id}`；`task_data` 空或 cursor |
 | Crontab / batch submit | `tms-table-scheduler` | `table:…` / `batch:…`；`{tableIds, policyIds}` |
 | Commit 唤醒 | `tms-table-commit` | `{table_id}`；`{tableIds, policyIds}` |
-| jobOptions / 密钥 | `policy_meta` / SecretManager | submit 时加载，**不**进 `task_data` |
+| jobOptions / 密钥 | `policy_version_info.content` / SecretManager | submit 时加载，**不**进 `task_data` |
 | 按运行 Validation | `table_maintenance_job` | 在途 + 前后 JSON |
 
 #### 5.4.2 db-scheduler 任务
@@ -590,13 +591,15 @@ table_maintenance_job + minIntervalMs →  在途 + expand 冷却（INSERT ② �
 `execution_time = 02:00` 在 ① 上是 **expand 到期时间**。Spark 单元 ② 在 expand 写出后到期（通常立刻）。
 ② **不是**再盖一个墙钟 02:00:00；与 ① 不同，每条 ② 在短 submit 路径后即 **DELETE**，Spark 异步继续。
 
-### 5.7 策略上的作业模板参数（`policy_meta`）
+### 5.7 策略上的作业模板参数（`policy_version_info.content`）
 
 `job_run_meta.runtime_job_template` 是**运行快照**（该 Job 实际所用）。自动化维护的默认参数**不**存那里。
 
 非认证 job-template 参数（Spark 资源与策略选项，如 `spark.executor.memory`、`spark.sql.shuffle.partitions`、
-Iceberg rewrite 选项）存放在**维护策略内容**，已持久化在 `policy_meta`。Compaction 已将 `rewriteOptions` 转发为
-`job.options.*`；其他内置类型（`system_iceberg_snapshot_expiration`、orphan cleanup、manifest rewrite）在 content 中使用同一 `jobOptions` map。
+Iceberg rewrite 选项）存放在 **`policy_version_info.content`**（与 `schedule` 同处 — §5.6），一般为
+`jobOptions` / `rewriteOptions`。它们**不是** `policy_meta` 列，TMS 也**不**另建参数表。Compaction
+已将 `rewriteOptions` 转发为 `job.options.*`；其他内置类型（`system_iceberg_snapshot_expiration`、
+orphan cleanup、manifest rewrite）在 content 中使用同一 `jobOptions` map。
 
 **优先级**（先命中者生效），与策略挂载一致：
 
@@ -607,8 +610,8 @@ Iceberg rewrite 选项）存放在**维护策略内容**，已持久化在 `poli
   > job 模板基线配置
 ```
 
-在 catalog 挂载一种类型的策略作为集群默认。仅在参数不同的 schema 或 table 再挂载**同类型**另一策略。TMS **不**再建按
-catalog / schema / table 的第二张表 —— 会重复 `policy_relation_meta` 并漂移。
+在 catalog 挂载一种类型的策略作为集群默认。仅在参数不同的 schema 或 table 再挂载**同类型**另一策略。
+按 catalog / schema / table 再建一张 TMS 参数表会重复 `policy_relation_meta` 并漂移 —— **否决**（§4.6.1）。
 
 Submit 时：
 
@@ -748,7 +751,7 @@ pick 给定实例（CAS + heartbeat）。
 
 | 表                                      | 角色                                                    |
 | -------------------------------------- | ----------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **expand 什么**、`schedule`（§5.6）与非认证 `jobOptions`（§5.7） |
+| `policy_meta` / `policy_relation_meta` / `policy_version_info` | **expand 什么**；`schedule` + 非认证 `jobOptions` 在 **content**（§5.6、§5.7） |
 | `scheduled_tasks`                      | ① 长期 expand + ②/③ 一次性（短 submit 后 DELETE）            |
 | `table_maintenance_job`                | 按运行 Validation JSON + submit 门控（§6.2）                 |
 | SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.8）；无 `tms_credential` 表      |
@@ -1126,7 +1129,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
 | Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期实例 N 抢 1；②/③ pick+heartbeat 防双提交；死节点靠 `table_maintenance_job` 备份门控。                                    |
-| 策略         | 复用 metalake Policy API + `policy_meta`；`schedule`（§5.6）+ `jobOptions`；最近挂载优先（§5.7）。                         |
+| 策略         | 复用 metalake Policy API；`schedule` + `jobOptions` 在 `policy_version_info.content`（§5.6、§5.7）；最近挂载优先。              |
 | Job 边界     | evaluate 到期时间 ≠ Spark 墙钟启动；Validation 指标在 `table_maintenance_job`（§6.2）。                                    |
 | 主体         | 自动化 Jobs 以 `tms` 运行；启用授权时由 `TmsPrincipalBootstrapListener` 在插件启动 + `CreateMetalakeEvent` 时 bootstrap（§5.5）。 |
 | 凭据         | 认证经 SecretManager（none/basic/oauth/kerberos）+ credential vending（§5.8）；不在策略 / 不在 `tms_credential`。          |

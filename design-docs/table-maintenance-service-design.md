@@ -216,7 +216,7 @@ Non-auth Spark / job-template parameters (for example executor memory, shuffle p
 
 |          | Extra table keyed by catalog / schema / table                 | Policy content `jobOptions` (Chosen)                                              |
 | -------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Pros     | Explicit                                                      | Reuses `policy_meta` / `policy_relation_meta`; nearest attachment already defined |
+| Pros     | Explicit                                                      | Reuses `policy_version_info.content` + `policy_relation_meta`; nearest attachment already defined |
 | Cons     | Parallel attachment + precedence + UI beside policies; drifts | Auth material belongs in §4.6.2, not here                                         |
 | Decision | Rejected                                                      | **Chosen** (§5.7)                                                                 |
 
@@ -310,7 +310,7 @@ Node A / Node B / Node C  — expand pool + table pool poll (§5.4); N compete, 
 
 | Table                                  | Role                                                                                    |
 | -------------------------------------- | --------------------------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **What** to expand, `schedule` triggers (§5.6), and non-auth `jobOptions` (§5.7)        |
+| `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7) |
 | `scheduled_tasks`                      | ① expand + ② table-scheduler + ③ table-commit (5.4, §6.1)                              |
 | `table_maintenance_job`                | Per-run Validation JSON + `finished_at`; submit gates (§6.2)                            |
 | SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.8); not a TMS-owned table             |
@@ -445,7 +445,7 @@ listener / reconcile (§5.4.2).
 | Policy expand | `tms-policy-expand` | `{policy_id}`; `task_data` empty or cursor |
 | Crontab / batch submit | `tms-table-scheduler` | `table:…` / `batch:…`; `task_data` `{tableIds, policyIds}` |
 | Commit wake-up | `tms-table-commit` | `{table_id}`; `task_data` `{tableIds, policyIds}` |
-| jobOptions / secrets | `policy_meta` / SecretManager | Loaded at submit — **not** in `task_data` |
+| jobOptions / secrets | `policy_version_info.content` / SecretManager | Loaded at submit — **not** in `task_data` |
 | Per-run Validation | `table_maintenance_job` | In-flight + before/after JSON |
 
 #### 5.4.2 db-scheduler tasks
@@ -721,16 +721,18 @@ table_maintenance_job + minIntervalMs →  in-flight + expand cooldown before IN
 writes them (typically immediately after). They are **not** also stamped for wall-clock 02:00:00.
 Unlike ①, each ② is **DELETE**d after the short submit path; Spark continues asynchronously.
 
-### 5.7 Job template parameters on policy (`policy_meta`)
+### 5.7 Job template parameters on policy (`policy_version_info.content`)
 
 `job_run_meta.runtime_job_template` is a **run snapshot** (what that Job actually used). Default
 parameters for automated maintenance are **not** stored there.
 
 Non-auth job-template parameters (Spark resource and strategy options such as
 `spark.executor.memory`, `spark.sql.shuffle.partitions`, Iceberg rewrite options) live in
-**maintenance policy content**, which is already persisted in `policy_meta`. Compaction already
-forwards `rewriteOptions` as `job.options.*`; other built-in types (`system_iceberg_snapshot_expiration`,
-orphan cleanup, manifest rewrite) use the same `jobOptions` map in content.
+**`policy_version_info.content`** (same place as `schedule` — §5.6), typically as `jobOptions` /
+`rewriteOptions`. They are **not** `policy_meta` columns, and TMS does **not** add a separate
+options table. Compaction already forwards `rewriteOptions` as `job.options.*`; other built-in
+types (`system_iceberg_snapshot_expiration`, orphan cleanup, manifest rewrite) use the same
+`jobOptions` map in content.
 
 **Precedence** (first hit wins), matching policy attachment:
 
@@ -742,9 +744,9 @@ table-attached policy of that type
 ```
 
 Attach one policy of the type at catalog for cluster defaults. Attach another policy of the **same
-type** at a schema or table only where parameters differ. TMS does **not** add a second table keyed
-by catalog / schema / table for these options — that would duplicate `policy_relation_meta` and
-drift.
+type** at a schema or table only where parameters differ. A TMS-owned table keyed by catalog /
+schema / table for these options would duplicate `policy_relation_meta` and drift — **rejected**
+(§4.6.1).
 
 At submit:
 
@@ -897,7 +899,7 @@ set `finished_at` only; never late-sample Validation metrics.
 
 | Table                                  | Role                                                                    |
 | -------------------------------------- | ----------------------------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **What** to expand, `schedule` (§5.6), and non-auth `jobOptions` (§5.7) |
+| `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7) |
 | `scheduled_tasks`                      | ① long-lived expand + ②/③ one-shot (DELETE after short submit)          |
 | `table_maintenance_job`                | Per-run Validation JSON + submit gates (§6.2)                           |
 | SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.8); no `tms_credential` table            |
@@ -1319,7 +1321,7 @@ SecretManager, and policy `jobOptions`.
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Drop         | Drop hook deletes outstanding ②+③ + `table_maintenance_job` rows (§6.3). Rename out of scope.                                              |
 | Multi-node   | N compete, one pick; ②/③ pick+heartbeat anti-double-submit; dead-worker gated by `table_maintenance_job`.                               |
-| Policy       | Reuses metalake Policy APIs + `policy_meta`; create inserts ①; `schedule` (§5.6) + `jobOptions` (§5.7).                                    |
+| Policy       | Reuses metalake Policy APIs; create inserts ①; `schedule` + `jobOptions` in `policy_version_info.content` (§5.6, §5.7).                   |
 | Job boundary | Expand due ≠ Spark wall-clock; Spark in Jobs; Validation on `table_maintenance_job` (§6.2).                                                |
 | Principal    | Automated Jobs run as `tms`; `TmsPrincipalBootstrapListener` on plugin start + `CreateMetalakeEvent` when authorization is enabled (§5.5). |
 | Credentials  | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.8); not policy / not `tms_credential`.                         |
