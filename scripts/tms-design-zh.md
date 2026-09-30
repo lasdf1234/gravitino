@@ -371,7 +371,7 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 **Expand 门控**（在 **① `tms-policy-expand`** 内，按候选工作单元，**INSERT ② 之前**）：
 
 1. `ensureTableImported`（§5.4.3）—— import 失败则跳过该单元。
-2. 若该 `(metalake_id, table_id, policy_id)` 存在在途行（`finished_at IS NULL`）：**跳过**（不 INSERT ②）。
+2. 若该 `(table_id, policy_id)` 存在在途行（`finished_at IS NULL`）：**跳过**（不 INSERT ②）。
 3. 否则若该键的 `MAX(finished_at)` 仍在解析的 `minIntervalMs` 内（表属性 → 全局 conf → 代码默认；§8.3）：**跳过**（不 INSERT ②）。
 
 **Submit 路径**（② 在 table 池 pick，或 ③ 在 commit 池 pick）：
@@ -437,8 +437,9 @@ TMS 需要稳定的 `schema_id` / `table_id` 作为 `table_maintenance_job` 与 
 3. 缺失或未知用户则**不**设 Gravitino owner —— **不要**默认 `tms`。
 4. 表已 import 则不覆盖已有 owner。
 
-**为何 `table_maintenance_job` 不存 `schema_id`：** 行粒度是 **表 + 策略**。`table_id` 经 `table_meta`
-命名空间（`metalake.catalog.schema`）已隐含 schema。仅 schema 粒度的 TMS 状态本设计不存在，故不需要 `schema_id`。
+**为何 `table_maintenance_job` 不存 `metalake_id` / `schema_id`：** 行粒度是 **表 + 策略**。
+`table_id` 是 `table_meta` 全局唯一主键，metalake / catalog / schema 可经 `table_meta` 反查
+（命名空间 `metalake.catalog.schema`）。门控与 Validation 不需要再冗余这些 id。
 
 ### 5.5 TMS 执行主体（`tms`）
 
@@ -795,14 +796,14 @@ Node A / B / C
 | 列                | 类型                         | 说明                                                |
 | ---------------- | -------------------------- | ------------------------------------------------- |
 | `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`；主键                      |
-| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                       |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（5.4.3 import 后）               |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（§5.4.3 import 后；全局唯一主键）         |
 | `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                           |
 | `before_metrics` | `MEDIUMTEXT NULL`          | 改表**前**采样的 JSON；可延迟到终态才落库                         |
 | `after_metrics`  | `MEDIUMTEXT NULL`          | Job 终态后的 JSON；待处理时为 null                          |
 | `finished_at`    | `BIGINT UNSIGNED NULL`     | 任务结束时间（epoch 毫秒）；**null = 在途**；驱动 `minIntervalMs` |
 
-**主键：**（`job_run_id`）。不存 `table_identifier` 或 `schema_id` —— `table_id` 已足够，并与表级
+**主键：**（`job_run_id`）。不存 `metalake_id`、`schema_id`、`table_identifier` —— `table_id` 是
+`table_meta` 全局唯一主键（metalake / catalog / schema 可经 `table_meta` 反查），并与表级
 `policy_relation_meta.metadata_object_id` 对齐。
 
 无 `evaluate_pending`、无 `IDLE`/`RUNNING`、无应用租约 heartbeat —— 这些是 `scheduled_tasks` 的事。
@@ -814,7 +815,7 @@ Node A / B / C
 | `job_metrics`           | Job 范围 optimizer 时序 | 否 — 非表前后 UI         |
 | `table_maintenance_job` | 每 job 冻结前后 JSON     | **是**               |
 
-**Expand / submit 门控**（给定 `(metalake_id, table_id, policy_id)`）：
+**Expand / submit 门控**（给定 `(table_id, policy_id)`）：
 
 1. **最小间隔（在 ①）：** `SELECT MAX(finished_at) …` 对比解析的 `minIntervalMs`（§8.3）—— 冷却期内 **不 INSERT** ②。
 2. **在途（在 ①，② 再复检）：** `SELECT 1 … WHERE finished_at IS NULL LIMIT 1` —— 若存在则跳过入队 / 跳过 submit。
@@ -822,7 +823,7 @@ Node A / B / C
 **生命周期：**
 
 1. 门控 + `Recommender` 通过后：`runJob` → 得到 `job_run_id`。
-2. **立刻** `INSERT`（`job_run_id`、`metalake_id`、`table_id`、`policy_id`），`finished_at = NULL`
+2. **立刻** `INSERT`（`job_run_id`、`table_id`、`policy_id`），`finished_at = NULL`
    （在途占坑）。此时 `before_metrics` / `after_metrics` 可为 null。
 3. Spark 异步跑。在任何改表前**采样** `before_metrics`（TMS submit 路径或 Spark 任务开头）。JSON 可等到步骤 4 再落库。
 4. Job 终态（回调 / 监听器）：`UPDATE` `before_metrics`（若尚未写入）、`after_metrics` 与 `finished_at`。
@@ -834,14 +835,13 @@ Node A / B / C
 ```sql
 CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
     `job_run_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'job run id',
-    `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
-    `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta',
+    `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta (globally unique)',
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
     `before_metrics` MEDIUMTEXT NULL COMMENT 'JSON sampled before mutation; may persist at terminal',
     `after_metrics` MEDIUMTEXT NULL COMMENT 'JSON object string after job; null while pending',
     `finished_at` BIGINT(20) UNSIGNED NULL COMMENT 'maintenance task end time (epoch millis); null = in-flight',
     PRIMARY KEY (`job_run_id`),
-    KEY `idx_tmj_table_policy_finished` (`metalake_id`, `table_id`, `policy_id`, `finished_at`)
+    KEY `idx_tmj_table_policy_finished` (`table_id`, `policy_id`, `finished_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
   COMMENT 'per-run TMS job record: Validation JSON + submit gates';
 ```
@@ -878,7 +878,7 @@ Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`
 
 1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
 2. `DELETE` 该表相关未完成 **`tms-table-scheduler`** ②（`table:{table_id}:…`）以及 **`tms-table-commit`** ③ `{table_id}`。
-3. 对 `(metalake_id, table_id)` `DELETE` `table_maintenance_job`。
+3. 按 `table_id` `DELETE` `table_maintenance_job`。
 4. **不**删除 **`tms-policy-expand`** ①（策略级）；该 policy 下其余表仍可在下次到期 expand。在途 Spark job **不**由此钩子取消。
 
 **表重命名不在范围。**

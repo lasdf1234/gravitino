@@ -470,7 +470,7 @@ and outstanding ② for that `policy_id`.
 **Expand gates** (inside **① `tms-policy-expand`**, per candidate, **before** INSERT `tms-table-scheduler`):
 
 1. `ensureTableImported` (§5.4.3) — skip unit on import failure.
-2. If an in-flight row exists for this `(metalake_id, table_id, policy_id)` (`finished_at IS NULL`):
+2. If an in-flight row exists for this `(table_id, policy_id)` (`finished_at IS NULL`):
    **skip** (do not INSERT ②).
 3. Else if `MAX(finished_at)` for that key is still within the resolved `minIntervalMs` (table prop →
    global conf → code default; §8.3): **skip** (do not INSERT ②).
@@ -549,9 +549,10 @@ also missing).
 3. If missing or unknown user, leave Gravitino owner unset — **do not** default to `tms`.
 4. If the table was already imported, do not overwrite an existing owner.
 
-**Why not `schema_id` on `table_maintenance_job`:** rows are per **table** + policy. `table_id` already
-identifies the schema through `table_meta` namespace (`metalake.catalog.schema`). `schema_id` would
-only matter for schema-scoped TMS state, which this design does not have.
+**Why not `metalake_id` / `schema_id` on `table_maintenance_job`:** rows are per **table** + policy.
+`table_id` is the globally unique `table_meta` primary key, so metalake / catalog / schema are
+recoverable via `table_meta` (namespace `metalake.catalog.schema`). Denormalizing those ids would
+only help metalake-wide scans without a join — not needed for TMS gates or Validation.
 
 ### 5.5 TMS execution principal (`tms`)
 
@@ -949,15 +950,15 @@ on this row as the task end time, not `job_run_meta.job_finished_at`.
 | Column           | Type                       | Notes                                                                        |
 | ---------------- | -------------------------- | ---------------------------------------------------------------------------- |
 | `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`; primary key                                       |
-| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                                  |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after 5.4.3 import)                              |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after §5.4.3 import); globally unique PK          |
 | `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                      |
 | `before_metrics` | `MEDIUMTEXT NULL`          | JSON sampled **before** table mutation; may stay null until terminal persist |
 | `after_metrics`  | `MEDIUMTEXT NULL`          | JSON after job terminal status; null while pending                           |
 | `finished_at`    | `BIGINT UNSIGNED NULL`     | Task end time (epoch millis); **null = in-flight**; drives `minIntervalMs`   |
 
-**Primary key:** (`job_run_id`). No `table_identifier` or `schema_id` column — `table_id` is
-sufficient and aligns with `policy_relation_meta.metadata_object_id` for table policies.
+**Primary key:** (`job_run_id`). No `metalake_id`, `schema_id`, or `table_identifier` column —
+`table_id` is the globally unique `table_meta` PK (metalake / catalog / schema are recoverable via
+`table_meta`), and aligns with `policy_relation_meta.metadata_object_id` for table policies.
 
 No `evaluate_pending`, no `IDLE`/`RUNNING`, no application lease heartbeat — those are
 `scheduled_tasks` concerns.
@@ -969,7 +970,7 @@ No `evaluate_pending`, no `IDLE`/`RUNNING`, no application lease heartbeat — t
 | `job_metrics`           | Job-scoped optimizer time series       | No — not table before/after UI |
 | `table_maintenance_job` | Frozen before/after JSON per job       | **Yes**                        |
 
-**Expand / submit gates** (for a given `(metalake_id, table_id, policy_id)`):
+**Expand / submit gates** (for a given `(table_id, policy_id)`):
 
 1. **Min interval (on ①):** `SELECT MAX(finished_at) …` vs resolved `minIntervalMs` (§8.3) — if
    within cooldown, **do not INSERT** ②.
@@ -979,7 +980,7 @@ No `evaluate_pending`, no `IDLE`/`RUNNING`, no application lease heartbeat — t
 **Lifecycle:**
 
 1. After gates + `Recommender` pass: `runJob` → obtain `job_run_id`.
-2. **Immediately** `INSERT` (`job_run_id`, `metalake_id`, `table_id`, `policy_id`) with
+2. **Immediately** `INSERT` (`job_run_id`, `table_id`, `policy_id`) with
    `finished_at = NULL` (in-flight claim). `before_metrics` / `after_metrics` may be null here.
 3. Spark runs asynchronously. **Sample** `before_metrics` before any table mutation (TMS submit
    path or Spark job start). Persisting that JSON may wait until step 4.
@@ -993,14 +994,13 @@ Illustrative MySQL DDL:
 ```sql
 CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
     `job_run_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'job run id',
-    `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
-    `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta',
+    `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta (globally unique)',
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
     `before_metrics` MEDIUMTEXT NULL COMMENT 'JSON sampled before mutation; may persist at terminal',
     `after_metrics` MEDIUMTEXT NULL COMMENT 'JSON object string after job; null while pending',
     `finished_at` BIGINT(20) UNSIGNED NULL COMMENT 'maintenance task end time (epoch millis); null = in-flight',
     PRIMARY KEY (`job_run_id`),
-    KEY `idx_tmj_table_policy_finished` (`metalake_id`, `table_id`, `policy_id`, `finished_at`)
+    KEY `idx_tmj_table_policy_finished` (`table_id`, `policy_id`, `finished_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
   COMMENT 'per-run TMS job record: Validation JSON + submit gates';
 ```
@@ -1039,7 +1039,7 @@ After a successful Iceberg **table drop**, IRC invokes an in-process `IcebergTab
 1. Resolve dropped `catalog.schema.table` → `table_id` when present in `table_meta`.
 2. `DELETE` outstanding **`tms-table-scheduler`** rows for that table (`table:{table_id}:…`) and
    **`tms-table-commit`** `{table_id}`.
-3. `DELETE` from `table_maintenance_job` for `(metalake_id, table_id)`.
+3. `DELETE` from `table_maintenance_job` for `table_id`.
 4. Do **not** delete **`tms-policy-expand`** ① (policy-scoped); remaining tables under the policy
    still expand on the next due. In-flight Spark jobs are **not** cancelled by this hook.
 
