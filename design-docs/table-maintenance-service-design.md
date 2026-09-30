@@ -737,8 +737,8 @@ Automated TMS Jobs talk to Gravitino **Iceberg REST** as Spark catalogs. Two ort
 
 Sensitive values (passwords, client secrets, keytabs contents, static cloud keys if ever needed)
 must **not** sit in `policy_meta`. They are stored and resolved through Gravitino
-**SecretManager** / **SecretProvider** (URN references), the same pluggable path Jerry asked for
-on server JDBC passwords. The solution is **opt-in**: when SecretManager is not configured,
+**SecretManager** / **SecretProvider** (URN references). The solution is **opt-in**: when
+SecretManager is not configured,
 non-secret auth properties and plaintext test values can still be used for local runs.
 
 Keys below are written into the Job's `spark_conf` map (Iceberg REST catalog properties). Exact
