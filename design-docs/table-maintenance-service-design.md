@@ -222,11 +222,11 @@ Non-auth Spark / job-template parameters (for example executor memory, shuffle p
 IRC client auth and credential-vending secrets for TMS Jobs (passwords, OAuth client credentials,
 keytabs, and similar).
 
-|          | Auth keys in policy `jobOptions`           | Dedicated `tms_credential` table                  | SecretManager + URN (Chosen)                                              |
-| -------- | ------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------- |
+|          | Auth keys in policy `jobOptions`           | Dedicated `tms_credential` table                  | SecretManager + URN (Chosen)                                                           |
+| -------- | ------------------------------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | Pros     | One map with Spark options                 | Explicit TMS overlay                              | Pluggable SecretManager backends (file / Vault / KMS); opt-in; shared with server conf |
-| Cons     | Policies are widely readable; secrets leak | Second keystore beside SecretManager; no KMS path | Needs bootstrap for TMS principal secrets                                 |
-| Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.7)                                                         |
+| Cons     | Policies are widely readable; secrets leak | Second keystore beside SecretManager; no KMS path | Needs bootstrap for TMS principal secrets                                              |
+| Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.7)                                                                      |
 
 ---
 
@@ -310,7 +310,7 @@ Node A / Node B / Node C  — expand + table + commit pools poll (§5.4); N comp
 | `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7)      |
 | `scheduled_tasks`                                              | ① expand + ② table-scheduler + ③ table-commit (5.4, §6.1)                               |
 | `table_maintenance_job`                                        | Per-run Validation JSON + `finished_at`; submit gates (§6.2)                            |
-| SecretManager                                                   | TMS Spark / Iceberg **auth** material via URN (§5.7); not a TMS-owned table             |
+| SecretManager                                                  | TMS Spark / Iceberg **auth** material via URN (§5.7); not a TMS-owned table             |
 | `user_meta`                                                    | Built-in metalake user `tms` when authorization is enabled (§5.5)                       |
 | `job_run_meta`                                                 | Spark job run **record** (status + `runtime_job_template` snapshot); not default config |
 
@@ -868,7 +868,7 @@ set `finished_at` only; never late-sample Validation metrics.
 | `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7) |
 | `scheduled_tasks`                                              | ① long-lived expand + ②/③ one-shot (DELETE after short submit)                     |
 | `table_maintenance_job`                                        | Per-run Validation JSON + submit gates (§6.2)                                      |
-| SecretManager                                                   | IRC auth secrets for `tms` (§5.7); no `tms_credential` table                       |
+| SecretManager                                                  | IRC auth secrets for `tms` (§5.7); no `tms_credential` table                       |
 | `user_meta`                                                    | Built-in `tms` user when authorization is enabled (§5.5)                           |
 
 Auth material uses SecretManager. Job-template **parameters** stay on policy attachments.
