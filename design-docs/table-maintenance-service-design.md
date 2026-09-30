@@ -85,9 +85,9 @@ in-process after a spark-submit pick.
    `job_run_id` (Validation JSON + `finished_at`). Enqueue / reclaim for **scheduler tasks** live in
    `scheduled_tasks` (two kinds above).
 9. **Commit / crontab drive expand; expand drives spark rows**: IRC commit and crontab only make
-   **`tms-policy-expand` due** (§5.4, §5.7). Expand writes **`tms-spark`** rows. `minIntervalMs` is a
-   **runtime gate** on the spark-submit path using `MAX(finished_at)` on `table_maintenance_job`
-   (§5.5, §6.2).
+   **`tms-policy-expand` due** (§5.4, §5.7). Expand applies **`minIntervalMs`** (and in-flight) per
+   work unit, then writes **`tms-spark`** rows using `table_maintenance_job` (`MAX(finished_at)` /
+   `finished_at IS NULL`) (§5.5, §6.2). ② re-checks **in-flight** before `runJob`.
 10. **Dedicated TMS execution principal**: All automated maintenance (event enqueue after commit
     and timed policy due) submits Jobs as a built-in metalake user **`tms`**, not as the operator
     who created the policy (§5.6).
@@ -271,12 +271,12 @@ onCommit / crontab due
 
 ① picked (one node)
   → read policy_meta + attachments; list / filter tables (§5.5.4)
-  → for each work unit that should run: INSERT ② tms-spark (execution_time = now)
+  → for each work unit: skip if in-flight or within minIntervalMs; else INSERT ② tms-spark
   → set ① next execution_time from crontab (or leave until next commit bump)
   → do NOT delete ① (unless policy disabled / dropped / replaced)
 
 ② picked (one node per row; many ② may run on different nodes in parallel)
-  → gates (in-flight / minInterval) → Recommender → runJob as tms
+  → gate (in-flight) → Recommender → runJob as tms
   → INSERT table_maintenance_job (job_run_id + keys; finished_at NULL)
   → DELETE this ② scheduled_tasks row
   → return; Spark continues in job framework
@@ -302,7 +302,7 @@ Node A / Node B / Node C  — each polls db-scheduler (§5.5); N compete, one pi
         │
         ├─ pick due ② tms-spark
         │     ├─ ensureTableImported (§5.5.4)
-        │     ├─ gates: in-flight? / minIntervalMs? → else DELETE ② and return
+        │     ├─ gate: in-flight? → else DELETE ② and return
         │     ├─ Recommender → runJob as `tms` → job_run_id
         │     ├─ INSERT table_maintenance_job (§6.2)
         │     ├─ DELETE this ② scheduled_tasks row
@@ -364,8 +364,8 @@ Deployment:
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`; starts/stops db-scheduler; registers in-process callback and ops (§7); bootstraps `tms` user (§5.6).               |
 | `TableMaintenanceScheduler`      | Wraps db-scheduler; registers **`tms-policy-expand`** and **`tms-spark`** handlers; reconciles ① on policy create/alter (§5.5).        |
 | `IcebergCommitEventHandler`      | IRC commit callback; ordered commit chain for attached `onCommit` types (§5.4, §5.7.1).                                                |
-| `PolicyExpandPipeline`           | Runs inside ① pick: resolve attachments → list tables → INSERT **`tms-spark`** rows; retain ① (§5.5).                                  |
-| `MaintenanceSparkSubmitPipeline` | Runs inside ② pick: `ensureTableImported` → gates → `Recommender` → `runJob` as `tms` → `table_maintenance_job` → **DELETE** ② (§5.5). |
+| `PolicyExpandPipeline`           | Runs inside ① pick: resolve → list tables → expand gates (`minIntervalMs` / in-flight) → INSERT ungated **`tms-spark`**; retain ① (§5.5). |
+| `MaintenanceSparkSubmitPipeline` | Runs inside ② pick: `ensureTableImported` → in-flight re-check → `Recommender` → `runJob` as `tms` → `table_maintenance_job` → **DELETE** ② (§5.5). |
 | `GravitinoTableImportService`    | Lazy import into `table_meta` via `TableDispatcher.loadTable` (§5.5.4); backend-aware owner resolution.                                |
 | `TmsPrincipalBootstrapListener`  | `EventListenerPlugin` on `CreateMetalakeEvent`; ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).      |
 | `TmsAuthConfigResolver`          | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.9).                                             |
@@ -450,9 +450,11 @@ db-scheduler (every TMS node polls; only one pick wins per due instance)
         │     ├─ load policy_meta / content.schedule / attachments
         │     ├─ resolve target tables (commit hint → one table; crontab → list under attach)
         │     ├─ ensureTableImported for candidates (§5.5.4)
-        │     ├─ crontab path: for each work unit INSERT tms-spark ② (execution_time = now)
+        │     ├─ for each work unit: apply expand gates (in-flight / minIntervalMs; §5.5.3)
+        │     │     → skip (do not INSERT ②) when gated
+        │     ├─ crontab path: INSERT due ② for ungated units (execution_time = now)
         │     │     task_instance = {policy_id}:{table_id}
-        │     ├─ commit path: enqueue ② for this table **in §5.7.1 order** (chain; §5.7.1)
+        │     ├─ commit path: enqueue ungated ② for this table **in §5.7.1 order** (chain)
         │     ├─ set ① next execution_time from crontab (if any); else wait for next commit bump
         │     └─ return (① NOT deleted)
         └─ dead JVM → missed heartbeats → ① runnable again
@@ -462,7 +464,6 @@ db-scheduler (every TMS node polls; only one pick wins per due instance)
         ├─ MaintenanceSparkSubmitPipeline:
         │     ├─ ensureTableImported (§5.5.4)
         │     ├─ if in-flight (finished_at IS NULL) → DELETE ②; return
-        │     ├─ if within minIntervalMs → DELETE ②; return
         │     ├─ Recommender → overlay jobOptions / SecretManager; runJob as tms
         │     ├─ INSERT table_maintenance_job (job_run_id + keys; finished_at NULL) (§6.2)
         │     ├─ DELETE this ② scheduled_tasks row
@@ -515,24 +516,30 @@ Instance keys use surrogate ids only (`policy_id`, `table_id`). Those ids are tr
 | MySQL / PostgreSQL (production) | db-scheduler **enabled**; `scheduled_tasks` migrated with entity store                                       |
 | H2 (unit / local tests)         | `gravitino.maintenance.scheduler.enabled = false`; tests call the pipeline **directly** after a fake enqueue |
 
-**Gate order** (inside **② `tms-spark`** pick):
+**Expand gates** (inside **① `tms-policy-expand`**, per candidate work unit, **before** INSERT ②):
 
-1. `ensureTableImported` (§5.5.4) — must succeed before submit gates when import is enabled.
+1. `ensureTableImported` (§5.5.4) — skip unit on import failure.
 2. If an in-flight row exists for this `(metalake_id, table_id, policy_id)` (`finished_at IS NULL`):
-   **DELETE** this ② row and return (do not submit).
+   **skip** (do not INSERT ②).
 3. Else if `MAX(finished_at)` for that key is still within the resolved `minIntervalMs` (table prop →
-   global conf → code default; §8.3): **DELETE** this ② row and return.
-4. Policy trigger (`Recommender`).
-5. Overlay nearest-policy `jobOptions` (§5.8) and SecretManager auth / credential-vending conf
+   global conf → code default; §8.3): **skip** (do not INSERT ②).
+
+**Submit path** (inside **② `tms-spark`** pick):
+
+1. `ensureTableImported` (§5.5.4) — must succeed when import is enabled.
+2. Re-check in-flight (`finished_at IS NULL`): if found, **DELETE** this ② and return (race after
+   expand wrote ②).
+3. Policy trigger (`Recommender`).
+4. Overlay nearest-policy `jobOptions` (§5.8) and SecretManager auth / credential-vending conf
    (§5.9); `runJob` as principal `tms` → `job_run_id`.
-6. **Immediately** `INSERT` `table_maintenance_job` with `job_run_id`, `metalake_id`, `table_id`,
+5. **Immediately** `INSERT` `table_maintenance_job` with `job_run_id`, `metalake_id`, `table_id`,
    `policy_id`, and `finished_at = NULL` (§6.2).
-7. **DELETE** this ② `scheduled_tasks` row. Do **not** wait for Spark. `before_metrics` must be
+6. **DELETE** this ② `scheduled_tasks` row. Do **not** wait for Spark. `before_metrics` must be
    **sampled before** table mutation and **may** be persisted on INSERT or deferred to the terminal
    `UPDATE` with `after_metrics` + `finished_at`.
 
-**① expand pick** does not apply minInterval / in-flight gates to skip writing ②; those gates run on
-②. Expand may still skip creating a ② for tables that fail import.
+**`minIntervalMs` is judged on ①**, so cooldown does not create throwaway ② rows. ② keeps the
+in-flight re-check only.
 
 #### 5.5.4 Lazy Gravitino metadata import (`table_meta`)
 
@@ -643,9 +650,8 @@ Use **two policies** only when maintenance **types** differ, not because `onComm
 are both set on one policy.
 
 These are **not** the same as `minIntervalMs` (§8.3): `onCommit` / `crontab` decide **when
-evaluate / expand runs**; `minIntervalMs` caps how soon another **successful submit** may repeat
-after the last finished job (`MAX(finished_at)` on `table_maintenance_job` for that policy
-attachment).
+① expand runs**; `minIntervalMs` caps how soon expand may enqueue another ② after the last
+finished job (`MAX(finished_at)` on `table_maintenance_job` for that `(table, policy)`).
 
 **`orphan-cleanup` must not use `onCommit`.** Policy create/alter rejects `schedule.onCommit = true`
 for orphan-cleanup (or ignores it). Orphan cleanup is **crontab-only** (or ops API).
@@ -713,7 +719,7 @@ Illustrative `content.schedule` (exact field names may be finalized with the Pol
 policy_version_info.content.schedule  →  what the UI shows; source of truth for triggers
 scheduled_tasks ① tms-policy-expand   →  next expand pick (crontab or commit bump); long-lived
 scheduled_tasks ② tms-spark           →  one-shot spark units; DELETE after pick path
-table_maintenance_job + minIntervalMs →  in-flight job + submit cooldown (not crontab)
+table_maintenance_job + minIntervalMs →  in-flight + expand cooldown before INSERT ② (not crontab)
 ```
 
 **Crontab timeline (example: `0 2 * * *`):**
@@ -897,7 +903,7 @@ db-scheduler. Writing `scheduled_tasks` does **not** cause all nodes to execute;
 **Expand mutex:** pick on ① `tms-policy-expand` (§6.1).
 
 **Spark-submit mutex:** pick on each ② `tms-spark` row; after the pick path, **DELETE** that row.
-Additional `(table, policy)` protection: in-flight `table_maintenance_job` + `minIntervalMs` (§6.2).
+Additional `(table, policy)` protection: expand-time `minIntervalMs` + in-flight `table_maintenance_job` (§5.5.3, §6.2).
 
 **Dead worker:** missed heartbeats unlock / requeue the instance. An already-submitted Spark job is
 **not** cancelled; `table_maintenance_job.finished_at IS NULL` still blocks a second submit.
@@ -945,8 +951,8 @@ Illustrative `scheduled_tasks` usage (db-scheduler owned; MySQL-shaped):
 **Table name:** `table_maintenance_job`
 
 One row per Spark `job_run_id`. The same table serves Automate **Jobs → Validation** (before/after
-JSON) and submit gates (in-flight row + `minIntervalMs`). `minIntervalMs` uses `finished_at` on
-this row as the task end time, not `job_run_meta.job_finished_at`.
+JSON), expand-time `minIntervalMs`, and in-flight submit guards. `minIntervalMs` uses `finished_at`
+on this row as the task end time, not `job_run_meta.job_finished_at`.
 
 | Column           | Type                       | Notes                                                                        |
 | ---------------- | -------------------------- | ---------------------------------------------------------------------------- |
@@ -971,10 +977,12 @@ No `evaluate_pending`, no `IDLE`/`RUNNING`, no application lease heartbeat — t
 | `job_metrics`           | Job-scoped optimizer time series       | No — not table before/after UI |
 | `table_maintenance_job` | Frozen before/after JSON per job       | **Yes**                        |
 
-**Submit gates** (for a given `(metalake_id, table_id, policy_id)`), applied **before** `runJob`:
+**Expand / submit gates** (for a given `(metalake_id, table_id, policy_id)`):
 
-1. **In-flight:** `SELECT 1 … WHERE finished_at IS NULL LIMIT 1` — if found, skip submit.
-2. **Min interval:** `SELECT MAX(finished_at) …` and compare to resolved `minIntervalMs` (§8.3).
+1. **Min interval (on ①):** `SELECT MAX(finished_at) …` vs resolved `minIntervalMs` (§8.3) — if
+   within cooldown, **do not INSERT** ②.
+2. **In-flight (on ① and re-checked on ②):** `SELECT 1 … WHERE finished_at IS NULL LIMIT 1` — if
+   found, skip enqueue / skip submit.
 
 **Lifecycle:**
 
@@ -1150,11 +1158,12 @@ Table-attached snapshot-expiry policies still use **one table per job** (commit-
 | `maintenance.manifest-rewrite.minIntervalMs` | Manifest rewrite min interval for this table |
 | `maintenance.orphan-cleanup.minIntervalMs`   | Orphan cleanup min interval for this table   |
 
-The pipeline checks `MAX(finished_at)` on `table_maintenance_job` for that `(table_id, policy_id)`
-against the resolved `minIntervalMs` for that task type on each scheduler-driven invoke (§5.5). An
-in-flight row (`finished_at IS NULL`) blocks concurrent submits. Policy content still owns **trigger
-thresholds** (e.g. MSE); interval only caps how often a successful submit may repeat when evaluate
-runs (scheduler pick or ops API).
+On each **① expand**, for every candidate work unit the pipeline checks `MAX(finished_at)` on
+`table_maintenance_job` for that `(table_id, policy_id)` against the resolved `minIntervalMs` for
+that task type (§5.5.3). An in-flight row (`finished_at IS NULL`) also skips INSERT ② (and ②
+re-checks before `runJob`). Policy content still owns **trigger thresholds** (e.g. MSE); the
+interval only limits how often expand may enqueue another unit once ① runs (scheduler pick or ops
+API).
 
 Example table override:
 
@@ -1222,7 +1231,7 @@ spark-submit pipeline.
 
 - [ ] Implement `GravitinoTableImportService` (`TableDispatcher.loadTable` → `table_meta`; §5.5.4).
 - [ ] Backend-aware owner resolution after import; never default owner to `tms`.
-- [ ] Implement `PolicyExpandPipeline` (attachments → INSERT `tms-spark` ②; retain ①).
+- [ ] Implement `PolicyExpandPipeline` (attachments → expand gates → INSERT ungated `tms-spark` ②; retain ①).
 - [ ] Implement `MaintenanceSparkSubmitPipeline` calling `Recommender.submitForStrategyName`.
 - [ ] Enforce per-policy gates on ② via `table_maintenance_job`: in-flight / min-interval; DELETE ②.
 - [ ] Resolve Active attached policies via existing Policy / `StrategyProvider` (no new policy store).
@@ -1251,8 +1260,8 @@ spark-submit pipeline.
 - [ ] Wire IRC **drop** hook to delete outstanding ② + `table_maintenance_job` rows (§6.3).
 - [ ] On `runJob` success: `INSERT` `table_maintenance_job`; **DELETE** ②; on terminal: `UPDATE`
       metrics + `finished_at` (§6.2).
-- [ ] Integration tests: commit only bumps ①; expand writes ②; ② pick submits then deletes row;
-      in-flight / minInterval skip; drop cleans ② + job rows.
+- [ ] Integration tests: commit drives ordered chain; expand applies minInterval / in-flight before
+      INSERT ②; ② pick submits then deletes row; in-flight race skip; drop cleans ② + job rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 5 checklist
