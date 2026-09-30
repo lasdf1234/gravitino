@@ -217,7 +217,7 @@ TMS 在 `scheduled_tasks`（db-scheduler）上使用**两类**行。写入一行
 | 种类                      | `task_name`（示例）     | 何时创建                         | 实例键                                                                | pick 之后                                                           |
 | ----------------------- | ------------------- | ---------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | ① Policy → Spark expand | `tms-policy-expand` | 策略**创建 / 启用**（变更时 reconcile） | `{policy_id}`                                                      | 解析 policy → **INSERT** 零或多条 ②；**保留** ①（设下次 `execution_time`）      |
-| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | crontab：`{policy_id}:{table_id}` / batch；**commit：** `{table_id}:{policy_id}[:{policy_id}…]`（§5.5.2） | submit 队首 → `table_maintenance_job` → **DELETE** ②；commit 可再入队剩余 |
+| ② Spark submit 单元       | `tms-spark`         | 由 ① expand 时写入               | 表单元：`{table_id}:{policy_id}`（crontab）或 `{table_id}:{policy_id}[:…]`（commit）；batch：`{policy_id}:batch:{batch_id}`（§5.5.2） | submit 队首 → `table_maintenance_job` → **DELETE** ②；commit 可再入队剩余 |
 
 **生命周期概要：**
 
@@ -232,7 +232,7 @@ onCommit / crontab 到期
 ① 被 pick（一个节点）
   → 读 policy_meta + 挂载；列出 / 过滤表（§5.5.4）
   → 对候选应用 expand 门控（在途 / minIntervalMs）
-  → crontab：每个未门控单元 INSERT ②（`{policy_id}:{table_id}`）
+  → crontab：每个未门控单元 INSERT ②（`{table_id}:{policy_id}`）
   → commit：为该表 INSERT **一条** ② `{table_id}:{policy_id}:…`
        （仅未门控的 policy_id，按 §5.7.1；被门控的不写入，键里 policy 更少）
   → 按 crontab 设 ① 下次 execution_time（或等待下次 commit bump）
@@ -407,7 +407,7 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
         │     ├─ 对每个候选：应用 expand 门控（在途 / minIntervalMs；§5.5.3）
         │     │     → 被门控者不入队
         │     ├─ crontab 路径：每个未门控单元 INSERT 一条 ②（execution_time = now）
-        │     │     task_instance = {policy_id}:{table_id}
+        │     │     task_instance = {table_id}:{policy_id}
         │     │     task_data.path = crontab
         │     ├─ commit 路径：为该表 INSERT **一条** ②（execution_time = now）
         │     │     task_instance = {table_id}:{policy_id1}:{policy_id2}:…
@@ -423,8 +423,8 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
         │     ├─ ensureTableImported（§5.5.4）
         │     ├─ 若在途（finished_at IS NULL）→ DELETE ②；返回
         │     ├─ 解析目标 policy_id：
-        │     │     crontab → 键中唯一的 policy_id
-        │     │     commit → 键中 table_id 后的**第一个** policy_id
+        │     │     crontab → table_id 后的唯一 policy_id
+        │     │     commit → table_id 后的**第一个** policy_id
         │     ├─ Recommender → 叠加 jobOptions / SecretManager；以 tms 的 runJob
         │     ├─ INSERT table_maintenance_job（job_run_id + 键；finished_at NULL）（§6.2）
         │     ├─ DELETE 该 ② scheduled_tasks 行
@@ -459,15 +459,17 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
 | 任务名                 | 实例键                                                       | 何时创建 / 到期                             | 动作                                                    |
 | ------------------- | --------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------- |
 | `tms-policy-expand` | `{policy_id}` | 策略创建/启用；crontab 或 commit bump 到期 | Expand → INSERT ②；保留 ① |
-| `tms-spark`（crontab） | `{policy_id}:{table_id}` 或 `{policy_id}:batch:{batch_id}` | ① crontab expand 写入；通常立即到期 | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| `tms-spark`（crontab，单表） | `{table_id}:{policy_id}` | ① crontab expand 写入；通常立即到期 | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| `tms-spark`（crontab，batch） | `{policy_id}:batch:{batch_id}` | snapshot-expiry 多表 job | 同样 submit / DELETE |
 | `tms-spark`（commit） | `{table_id}:{policy_id}[:{policy_id}…]` | commit expand 过门控后写入；通常立即到期 | Submit **第一个** policy_id → DELETE ②；终态再入队剩余（若有） |
 
 实例键只使用代理 id（`policy_id`、`table_id`）。在 entity store 中将其视为**全局唯一**，因此 `task_instance` **不需要** `metalake_id`（需要 metalake 时从 `policy_meta` / `table_meta` 反查即可）。
 
-**Commit ② 命名：** 先 `{table_id}`，再按 §5.7.1 依次追加**将要执行的** `policy_id`。Expand 门控在拼键
-**之前**执行 —— 仍在 `minIntervalMs`（或在途）内的 policy **不追加**，因此三策略表可能只入队
-`{table_id}:{p_compaction}:{p_expiry}`（manifest-rewrite 被门控掉）。用 `task_data.path =
-commit|crontab` 区分两段式键，避免与 crontab `{policy_id}:{table_id}` 歧义。
+**表单元命名（crontab + commit）：** 一律先 `{table_id}`，再跟 `policy_id`。crontab 一表一 policy 一行
+（`{table_id}:{policy_id}`）。commit 一行列出全部**未门控** policy（§5.7.1 顺序
+`{table_id}:{p1}:{p2}:…`）；被门控的不追加，键可能更短。用 `task_data.path = commit|crontab`
+区分「单 policy 的 commit 键」与 crontab 键。多表 snapshot-expiry batch 仍用
+`{policy_id}:batch:{batch_id}`（没有单一 `table_id`）。
 
 **策略生命周期 → ①：** 创建/启用 → INSERT ①；变更 schedule → 更新 ① `execution_time` / `task_data`；禁用/删除 → DELETE ① 并 DELETE 该 `policy_id` 下未完成的 ②。
 
@@ -858,9 +860,10 @@ Node A / B / C 轮询
 -- 由 db-scheduler 拥有；见上游 DDL
 -- PRIMARY KEY (task_name, task_instance)
 -- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
--- ② crontab: task_name = 'tms-spark', task_instance = '{policy_id}:{table_id}' or batch
--- ② commit:  task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
---            （仅未门控 policy_id；task_data.path = commit）
+-- ② crontab 单表: task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}'
+-- ② crontab batch: task_name = 'tms-spark', task_instance = '{policy_id}:batch:{batch_id}'
+-- ② commit:        task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
+--                  （仅未门控 policy_id；task_data.path = commit|crontab）
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- ② pick 路径成功结束后（submit 或门控跳过）：DELETE 该行。
 -- commit 剩余（若有）用更短 commit 键再 INSERT。
@@ -959,7 +962,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
 Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`：
 
 1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
-2. `DELETE` 该表相关未完成 **`tms-spark`** ②（crontab 键含 `{table_id}`；commit 键以 `{table_id}:` 开头）。
+2. `DELETE` 该表相关未完成 **`tms-spark`** ②（以 `{table_id}:` 开头的 crontab / commit 表单元键）。
 3. 对 `(metalake_id, table_id)` `DELETE` `table_maintenance_job`。
 4. **不**删除 **`tms-policy-expand`** ①（策略级）；该 policy 下其余表仍可在下次到期 expand。在途 Spark job **不**由此钩子取消。
 
@@ -1155,7 +1158,7 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ② + `table_maintenance_job` 行（§6.3）。
 - [ ] `runJob` 成功后：`INSERT` `table_maintenance_job`；**DELETE** ②；终态：`UPDATE` 指标 + `finished_at`（§6.2）。
-- [ ] 集成测试：commit ② 键为过 minInterval 后的 `{table_id}:{policy_ids…}`；有门控则键更短；终态入队剩余；crontab 键不变；drop 清理 ② + 作业行。
+- [ ] 集成测试：crontab ② 为 `{table_id}:{policy_id}`；commit ② 为过 minInterval 后的 `{table_id}:{policy_ids…}`（有门控则更短）；终态入队剩余；drop 清理 ② + 作业行。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
 #### 阶段 5 检查清单

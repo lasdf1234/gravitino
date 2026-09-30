@@ -257,7 +257,7 @@ every node runs it: **every** node polls; **N compete, one pick wins** per due i
 | Kind                    | `task_name` (illustrative) | When created                                        | Instance key                                                                      | After pick                                                                            |
 | ----------------------- | -------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | ① Policy → Spark expand | `tms-policy-expand`        | Policy **create / enable** (and reconcile on alter) | `{policy_id}`                                                                     | Parse policy → **INSERT** zero or more ② rows; **keep** ① (set next `execution_time`) |
-| ② Spark submit unit     | `tms-spark`                | Written by ① when expand runs                       | Crontab: `{policy_id}:{table_id}` / batch; **commit:** `{table_id}:{policy_id}[:{policy_id}…]` (§5.5.2) | Submit head → `table_maintenance_job` → **DELETE** ②; commit may enqueue remainder     |
+| ② Spark submit unit     | `tms-spark`                | Written by ① when expand runs                       | Table unit: `{table_id}:{policy_id}` (crontab) or `{table_id}:{policy_id}[:…]` (commit); batch: `{policy_id}:batch:{batch_id}` (§5.5.2) | Submit head → `table_maintenance_job` → **DELETE** ②; commit may enqueue remainder     |
 
 **Lifecycle sketch:**
 
@@ -272,7 +272,7 @@ onCommit / crontab due
 ① picked (one node)
   → read policy_meta + attachments; list / filter tables (§5.5.4)
   → apply expand gates (in-flight / minIntervalMs) per candidate
-  → crontab: INSERT ② per ungated unit (`{policy_id}:{table_id}`)
+  → crontab: INSERT ② per ungated unit (`{table_id}:{policy_id}`)
   → commit: INSERT one ② `{table_id}:{policy_id}:…` for ungated policies in §5.7.1 order
        (gated-out policies omitted — fewer policy_ids in the key)
   → set ① next execution_time from crontab (or leave until next commit bump)
@@ -467,7 +467,7 @@ db-scheduler (every TMS node polls; only one pick wins per due instance)
         │     ├─ for each candidate: apply expand gates (in-flight / minIntervalMs; §5.5.3)
         │     │     → gated candidates omitted from enqueue
         │     ├─ crontab path: INSERT one ② per ungated unit (execution_time = now)
-        │     │     task_instance = {policy_id}:{table_id}
+        │     │     task_instance = {table_id}:{policy_id}
         │     │     task_data.path = crontab
         │     ├─ commit path: INSERT **one** ② for the table (execution_time = now)
         │     │     task_instance = {table_id}:{policy_id1}:{policy_id2}:…
@@ -483,7 +483,7 @@ db-scheduler (every TMS node polls; only one pick wins per due instance)
         │     ├─ ensureTableImported (§5.5.4)
         │     ├─ if in-flight (finished_at IS NULL) → DELETE ②; return
         │     ├─ resolve target policy_id:
-        │     │     crontab → the single policy_id in the key
+        │     │     crontab → the policy_id after table_id (single segment)
         │     │     commit → **first** policy_id after table_id in the key
         │     ├─ Recommender → overlay jobOptions / SecretManager; runJob as tms
         │     ├─ INSERT table_maintenance_job (job_run_id + keys; finished_at NULL) (§6.2)
@@ -522,18 +522,20 @@ NULL` gates further submits for that `(table, policy)`.
 | Task name           | Instance key                                               | When created / due                                     | Action                                                |
 | ------------------- | ---------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------- |
 | `tms-policy-expand` | `{policy_id}` | Policy create/enable; due on crontab or commit bump | Expand → INSERT ②; retain ① |
-| `tms-spark` (crontab) | `{policy_id}:{table_id}` or `{policy_id}:batch:{batch_id}` | Written by ① crontab expand; due immediately | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| `tms-spark` (crontab, per table) | `{table_id}:{policy_id}` | Written by ① crontab expand; due immediately | Submit Spark → `table_maintenance_job` → **DELETE** ② |
+| `tms-spark` (crontab, batch) | `{policy_id}:batch:{batch_id}` | Snapshot-expiry multi-table jobs | Same submit / DELETE path |
 | `tms-spark` (commit) | `{table_id}:{policy_id}[:{policy_id}…]` | Written by commit expand after gates; due immediately | Submit **first** policy_id → DELETE ②; on terminal enqueue remainder if any |
 
 Instance keys use surrogate ids only (`policy_id`, `table_id`). Those ids are treated as **globally
 unique** in the entity store, so `metalake_id` is not required in `task_instance` (metalake remains
 available via `policy_meta` / `table_meta` when needed).
 
-**Commit ② naming:** `{table_id}` first, then each **`policy_id` that will execute**, colon-separated,
-already sorted by §5.7.1. Expand gates run **before** building the key — policies still inside
-`minIntervalMs` (or in-flight) are **not** appended, so a three-policy table may enqueue
-`{table_id}:{p_compaction}:{p_expiry}` if manifest-rewrite was gated out. Prefer `task_data.path =
-commit|crontab` so a two-segment key is never ambiguous.
+**Table-unit naming (crontab + commit):** always `{table_id}` first, then `policy_id`(s). Crontab
+enqueues one policy per row (`{table_id}:{policy_id}`). Commit enqueues one row listing every
+**ungated** policy in §5.7.1 order (`{table_id}:{p1}:{p2}:…`); gated-out policies are omitted, so
+the key may be shorter. Use `task_data.path = commit|crontab` to tell a one-policy commit key from
+a crontab key. Multi-table snapshot-expiry batches keep `{policy_id}:batch:{batch_id}` (no single
+`table_id`).
 
 **Policy lifecycle → ①:** create/enable → INSERT ①; alter schedule → update ① `execution_time` /
 `task_data`; disable/drop → DELETE ① and DELETE outstanding ② for that `policy_id`.
@@ -971,9 +973,10 @@ Illustrative `scheduled_tasks` usage (db-scheduler owned; MySQL-shaped):
 -- owned by db-scheduler; see upstream DDL
 -- PRIMARY KEY (task_name, task_instance)
 -- ① task_name = 'tms-policy-expand', task_instance = '{policy_id}'
--- ② crontab: task_name = 'tms-spark', task_instance = '{policy_id}:{table_id}' or batch
--- ② commit:  task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
---            (only ungated policy_ids; task_data.path = commit)
+-- ② crontab table: task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}'
+-- ② crontab batch: task_name = 'tms-spark', task_instance = '{policy_id}:batch:{batch_id}'
+-- ② commit:        task_name = 'tms-spark', task_instance = '{table_id}:{policy_id}:{policy_id}:…'
+--                  (only ungated policy_ids; task_data.path = commit|crontab)
 -- execution_time, picked, picked_by, last_heartbeat, version, task_data, ...
 -- After ② pick path completes successfully (submit or gated skip): DELETE that row.
 -- Commit remainder (if any) is a new INSERT with a shorter commit key.
@@ -1079,8 +1082,8 @@ Example `after_metrics`:
 After a successful Iceberg **table drop**, IRC invokes an in-process `IcebergTableLifecycleHook`:
 
 1. Resolve dropped `catalog.schema.table` → `table_id` when present in `table_meta`.
-2. `DELETE` outstanding **`tms-spark`** ② rows for that table (crontab keys containing
-   `{table_id}`; commit keys starting with `{table_id}:`).
+2. `DELETE` outstanding **`tms-spark`** ② rows for that table (keys starting with
+   `{table_id}:` — crontab and commit table-units).
 3. `DELETE` from `table_maintenance_job` for `(metalake_id, table_id)`.
 4. Do **not** delete **`tms-policy-expand`** ① (policy-scoped); remaining tables under the policy
    still expand on the next due. In-flight Spark jobs are **not** cancelled by this hook.
@@ -1295,9 +1298,9 @@ spark-submit pipeline.
 - [ ] Wire IRC **drop** hook to delete outstanding ② + `table_maintenance_job` rows (§6.3).
 - [ ] On `runJob` success: `INSERT` `table_maintenance_job`; **DELETE** ②; on terminal: `UPDATE`
       metrics + `finished_at` (§6.2).
-- [ ] Integration tests: commit ② key is `{table_id}:{policy_ids…}` after minInterval filter;
-      shorter key when some gated; remainder enqueued on terminal; crontab keys unchanged; drop
-      cleans ② + job rows.
+- [ ] Integration tests: crontab ② is `{table_id}:{policy_id}`; commit ② is
+      `{table_id}:{policy_ids…}` after minInterval filter (shorter when gated); remainder on
+      terminal; drop cleans ② + job rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 5 checklist
