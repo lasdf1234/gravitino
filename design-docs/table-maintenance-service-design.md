@@ -177,7 +177,8 @@ TMS needs cluster-safe scheduling for **three** kinds of work on `scheduled_task
    may re-upsert after Job terminal.
 
 Plus durable **`table_maintenance_job`** for Validation, `minIntervalMs`, and in-flight occupancy.
-Dual pools: expand (①) vs table (②+③) so commit execute does not steal crontab expand threads (§8.4).
+Three pools: expand (①) / table (②) / commit (③) so commit decide/submit does not steal crontab
+threads (§8.4).
 
 #### Industry and in-project alternatives
 
@@ -203,7 +204,7 @@ Dual pools: expand (①) vs table (②+③) so commit execute does not steal cro
    Validation on `table_maintenance_job`; ③ coalesce on `{table_id}`.
 5. **No fat TMS state machine** — no `evaluate_pending` / `IDLE`/`RUNNING` twin of `picked`.
 
-**Decision:** **Chosen** — db-scheduler with three task names + dual pools; `table_maintenance_job`
+**Decision:** **Chosen** — db-scheduler with three task names + three pools; `table_maintenance_job`
 for per-run records and submit gates.
 
 ### 4.6 Where automated Job configuration lives
@@ -283,7 +284,7 @@ Gravitino IRC (:9001)
         └─ post-commit → IcebergCommitEventHandler (§5.4)
                 └─ upsert tms-table-commit / {table_id}
                       task_data = { tableIds, policyIds }; execution_time = now
-                      (IRC thread; not expand.threads)
+                      (IRC thread; not expand/table/commit pools)
 
 Node A / Node B / Node C  — expand pool + table pool poll (§5.5); N compete, one pick
         │
@@ -293,8 +294,8 @@ Node A / Node B / Node C  — expand pool + table pool poll (§5.5); N compete, 
         ├─ pick ② tms-table-scheduler               (table.threads=8)
         │     └─ runJob → INSERT job row → DELETE → return
         │
-        ├─ pick ③ tms-table-commit                  (table.threads=8)
-        │     └─ resolve → runJob → INSERT → DELETE → return
+        ├─ pick ③ tms-table-commit                  (commit.threads=4)
+        │     └─ resolve/gate → decide → runJob → INSERT → DELETE → return
         │           (Job terminal may upsert same {table_id} again)
         v
                  Gravitino Job framework (async)
@@ -323,7 +324,7 @@ post-commit hook** invokes a **main-server-registered callback / SPI** (for exam
 `GravitinoEnv`). That callback **upserts** **`tms-table-commit`** with `task_instance = {table_id}`
 and `task_data = { tableIds, policyIds }` (`policyIds` finalized at pick — §5.4). Concurrent upserts coalesce
 on primary key `(task_name, task_instance)`. The IRC thread does **not** call `runJob`, does **not**
-use `expand.threads`, and does **not** select `policy_id` — that happens when the **table** pool
+use expand/table pools, and does **not** select `policy_id` — that happens when the **commit** pool
 picks ③ (§5.4).
 
 | Requirement | Detail                                                                                                                                      |
@@ -332,7 +333,7 @@ picks ③ (§5.4).
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka.                                                  |
 | Payload     | `table_id` / table identifier and optional committed `snapshot_id`.                                                                         |
 | Enqueue     | Upsert `(tms-table-commit, {table_id})` on the IRC thread (must stay short).                                                                |
-| Execute     | **`table.threads`** picks ③ (never IRC / `expand.threads`); resolve at pick; short submit; re-upsert after Job terminal if needed (§5.4). |
+| Execute     | **`commit.threads`** picks ③ (never IRC / expand / table); resolve + gate + short submit; re-upsert after Job terminal if needed (§5.4). |
 | Scheduling  | Expand pool (① only) + table pool (② + ③); same JDBC DataSource as MySQL / PostgreSQL entity store (§8.4).                                  |
 
 
@@ -351,8 +352,8 @@ Deployment:
 | Part                             | Responsibility                                                                                                                         |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`; starts/stops db-scheduler; registers in-process callback and ops (§7); bootstraps `tms` user (§5.6).               |
-| `TableMaintenanceScheduler`      | Two schedulers: expand (①, `expand.threads=4`) + table (②+③, `table.threads=8`) (§8.4). |
-| `IcebergCommitEventHandler`      | IRC-thread upsert of `tms-table-commit` `{table_id}` only; execute later on `table.threads` (§5.4).                                    |
+| `TableMaintenanceScheduler`      | Three schedulers: expand (①,4) + table (②,8) + commit (③,4) (§8.4). |
+| `IcebergCommitEventHandler`      | IRC-thread upsert of `tms-table-commit` `{table_id}` only; execute later on `commit.threads` (§5.4).                                   |
 | `PolicyExpandPipeline`           | ① pick: page → gates → INSERT `tms-table-scheduler`; `task_data` cursor only while paging (§5.5).                                     |
 | `MaintenanceSparkSubmitPipeline` | ②/③ short pick: resolve → gates → sample before → `runJob` → INSERT job row → **DELETE** (§5.5).                                     |
 | `GravitinoTableImportService`    | Lazy import into `table_meta` via `TableDispatcher.loadTable` (§5.5.4); backend-aware owner resolution.                                |
@@ -419,33 +420,37 @@ IRC commit succeeded (same JVM) — runs on the IRC callback thread (keep short)
               execution_time = now
 ```
 
-**Do not** use `expand.threads` here. **Do not** embed `policy_id` in `task_instance` (gate results
+**Do not** use `expand.threads` or `table.threads` here. **Do not** embed `policy_id` in `task_instance` (gate results
 change across commits). Multi-node / burst commits for the same table all upsert the **same** row;
 primary key `(tms-table-commit, {table_id})` is the coalesce point.
 
-**Pick (table pool, `table.threads`):** resolve Active `onCommit` policies for that table **now**,
+**Pick (commit pool, `commit.threads`):** resolve Active `onCommit` policies for that table **now**,
 drop orphan-cleanup / gated types, take the §5.7.1 head, short-submit (before_metrics → runJob →
-INSERT job row → **DELETE**). On Job terminal, if another type is still needed, upsert the same
-`(tms-table-commit, {table_id})` again. If every type is gated at pick time, DELETE without submit.
+INSERT job row → **DELETE**). **`commit.threads` (default 4)** is dedicated to post-IRC **decide
+whether to submit Spark** + short submit — must not steal crontab `table.threads` / `expand.threads`.
+On Job terminal, if another type is still needed, upsert the same `(tms-table-commit, {table_id})`
+again. If every type is gated at pick time, DELETE without submit.
 
 **Commit / pool threads** (do not conflate with Spark executor threads):
 
 | Step | Runs on | Does |
 | ---- | ------- | ---- |
 | Enqueue ③ after Iceberg commit | **IRC callback thread** | Upsert `(tms-table-commit, {table_id})` only — must stay short |
-| Execute ③ | **`table.threads`** (table Scheduler; shared with ②) | Pick → resolve policy → short submit → **DELETE** |
-| Execute ② | **`table.threads`** | Short crontab/batch submit → **DELETE** |
-| Execute ① | **`expand.threads`** (expand Scheduler) | Page / gate / INSERT ② — never runs Spark submit for commit |
-| Forbidden | IRC thread or `expand.threads` | `runJob` / long work for the commit path |
+| Execute ③ (decide + submit) | **`commit.threads`** (commit Scheduler; ③ only; default **4**) | Pick → resolve/gate → **whether to submit Spark** → short submit → **DELETE** |
+| Execute ② | **`table.threads`** (table Scheduler; ② only) | Short crontab/batch submit → **DELETE** |
+| Execute ① | **`expand.threads`** (expand Scheduler; ① only) | Page / gate / INSERT ② |
+| Forbidden | IRC / `expand.threads` / `table.threads` for ③ | Block IRC; let commit steal crontab pools |
 
-Why split pools: a burst of commits must not starve crontab expand on `expand.threads`. Commit
-**enqueue** is never on either db-scheduler pool; commit **execute** shares `table.threads` with ②.
+Why three pools: IRC stays short (enqueue only). Post-IRC **decide + short submit** uses
+**`commit.threads=4`** so commit storms neither block IRC nor starve crontab **`table.threads`** /
+**`expand.threads`**.
 
 ### 5.5 Execute path — expand + table-scheduler + table-commit
 
 ```text
 Expand Scheduler (expand.threads=4) — registers tms-policy-expand only
-Table Scheduler  (table.threads=8)  — registers tms-table-scheduler + tms-table-commit
+Table Scheduler  (table.threads=8)  — registers tms-table-scheduler only
+Commit Scheduler (commit.threads=4) — registers tms-table-commit only
 
 ① tms-policy-expand due:
         ├─ pick ①
@@ -469,9 +474,10 @@ Table Scheduler  (table.threads=8)  — registers tms-table-scheduler + tms-tabl
         ├─ INSERT table_maintenance_job → DELETE ② → return
         └─ (Spark async; terminal listener writes after_metrics + finished_at)
 
-③ tms-table-commit due (table pool; same threads as ②):
+③ tms-table-commit due (commit pool, `commit.threads`):
         ├─ pick ③
-        ├─ resolve onCommit policy at pick (§5.7.1) → short submit as above → DELETE ③
+        ├─ resolve / gate onCommit at pick (§5.7.1) → **decide whether to submit Spark**
+        ├─ short submit as above → DELETE ③
         └─ on Job terminal: upsert ③ again if next type still needed
 ```
 
@@ -482,8 +488,9 @@ execute the same instance.
 one-shot submit units; Spark lifetime and anti-double-submit live on `table_maintenance_job` + Job
 listener / reconcile (§5.5.3).
 
-**Threads:** Commit **enqueue** = IRC thread. Commit **execute** = short `table.threads` callback
-(shared with ②). Crontab expand = `expand.threads` only.
+**Threads:** Commit **enqueue** = IRC thread (upsert only). Commit **decide + execute** =
+`commit.threads` (③ only). Crontab submit = `table.threads` (② only). Expand = `expand.threads`
+(① only).
 
 #### 5.5.1 Where schedule state lives
 
@@ -501,7 +508,7 @@ listener / reconcile (§5.5.3).
 | --------- | --------------- | ----------- | ---- |
 | `tms-policy-expand` | `{policy_id}` | empty; optional expand `cursor` while paging | expand (4) |
 | `tms-table-scheduler` | `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table (8) |
-| `tms-table-commit` | `{table_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table (8) |
+| `tms-table-commit` | `{table_id}` | `{ "tableIds":[…], "policyIds":[…] }` | commit (4) |
 
 **Uniqueness:** primary key `(task_name, task_instance)`. Same-table commit bursts coalesce on
 `(tms-table-commit, {table_id})`. Crontab units coalesce per `table:{table_id}:{policy_id}` (or batch key).
@@ -529,7 +536,7 @@ and outstanding ② for that `policy_id`.
 3. Else if `MAX(finished_at)` for that key is still within the resolved `minIntervalMs` (table prop →
    global conf → code default; §8.3): **skip** (do not INSERT ②).
 
-**Submit path** (inside **② `tms-table-scheduler`** or **③ `tms-table-commit`** pick on the table pool):
+**Submit path** (② on the table pool, or ③ on the commit pool):
 
 1. `ensureTableImported` (§5.5.4) — must succeed when import is enabled.
 2. Re-check in-flight (`finished_at IS NULL`): if found, **do not** `runJob` — **DELETE** this
@@ -935,7 +942,8 @@ db-scheduler. Writing `scheduled_tasks` does **not** cause all nodes to execute;
 
 **Expand mutex:** pick on ① (`expand.threads`) (§6.1).
 
-**Table mutex:** pick on each ② or ③ (`table.threads`); after short submit, **DELETE**.
+**Table mutex:** pick on each ② (`table.threads`); after short submit, **DELETE**.
+**Commit mutex:** pick on each ③ (`commit.threads`); after decide/submit, **DELETE**.
 Anti-double-submit: in-flight `table_maintenance_job` + `minIntervalMs` (§5.5.3, §6.2).
 
 **Dead worker / stuck Spark:** missed heartbeats only free a **hung callback** (callbacks are short).
@@ -952,7 +960,7 @@ set `finished_at` only; never late-sample Validation metrics.
 
 Auth material uses SecretManager. Job-template **parameters** stay on policy attachments.
 
-### 6.1 Dual-pool leases (`scheduled_tasks`)
+### 6.1 Three-pool leases (`scheduled_tasks`)
 
 ```text
 Policy create → INSERT ① (policy_id)
@@ -961,8 +969,8 @@ IRC commit → upsert ③ {table_id} (IRC thread; not either pool)
 Node A / B / C
         │
         ├─ expand pool: pick ① → INSERT ② → retain ①
-        ├─ table pool:  pick ② → short submit → DELETE ②
-        ├─ table pool:  pick ③ → resolve → short submit → DELETE ③
+        ├─ table pool:   pick ② → short submit → DELETE ②
+        ├─ commit pool:  pick ③ → decide/submit → DELETE ③
         │                 (Job terminal may re-upsert same {table_id})
         └─ picker dies → missed heartbeats → instance runnable again
 ```
@@ -1149,6 +1157,7 @@ gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
 gravitino.maintenance.scheduler.table.threads = 8
+gravitino.maintenance.scheduler.commit.threads = 4
 ```
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
@@ -1216,30 +1225,32 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 
 ### 8.4 db-scheduler keys (`gravitino.conf`)
 
-db-scheduler has **one** thread pool per `Scheduler`. TMS runs **two** schedulers on one
+db-scheduler has **one** thread pool per `Scheduler`. TMS runs **three** schedulers on one
 `scheduled_tasks` table:
 
 | Scheduler | Registers | Default threads | conf key |
 | --------- | --------- | --------------- | -------- |
 | Expand | `tms-policy-expand` only | `4` | `…scheduler.expand.threads` |
-| Table | `tms-table-scheduler` + `tms-table-commit` | `8` | `…scheduler.table.threads` |
+| Table | `tms-table-scheduler` only | `8` | `…scheduler.table.threads` |
+| Commit | `tms-table-commit` only | `4` | `…scheduler.commit.threads` |
 
-**Commit threading:** see §5.4 table. IRC callback only **upserts** ③ (not on either db-scheduler
-pool). **Executing** ③ shares `table.threads` with ② for a **short** submit callback. Commit must
-**not** use `expand.threads` (would steal crontab expand under commit bursts).
+**Commit threading:** see §5.4. IRC only **upserts** ③ (short; not on any db-scheduler pool).
+**Decide whether to submit Spark + short submit** for ③ runs only on **`commit.threads=4`** —
+not IRC, not `expand.threads`, not `table.threads`.
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `gravitino.maintenance.scheduler.enabled` | `true` on MySQL/PostgreSQL; `false` on H2 | Enables both schedulers |
+| `gravitino.maintenance.scheduler.enabled` | `true` on MySQL/PostgreSQL; `false` on H2 | Enables all three schedulers |
 | `gravitino.maintenance.scheduler.expand.threads` | `4` | Expand pool (① only) |
-| `gravitino.maintenance.scheduler.table.threads` | `8` | Table pool (② + ③) |
-| `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | Poll interval (both) |
+| `gravitino.maintenance.scheduler.table.threads` | `8` | Table pool (② only) |
+| `gravitino.maintenance.scheduler.commit.threads` | `4` | Commit pool (③ only): post-IRC decide + short submit |
+| `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | Poll interval (all) |
 | `gravitino.maintenance.scheduler.heartbeatIntervalMs` | `60000` | Heartbeat while callback runs |
 | `gravitino.maintenance.scheduler.missedHeartbeatsLimit` | `6` | Misses before dead |
 | `gravitino.maintenance.scheduler.alwaysPersistTimestampInUTC` | `true` on MySQL | MySQL timestamp handling |
 
-JDBC pool size ≥ `expand.threads + table.threads` (+ REST/IRC headroom). Defaults are enough for most
-deployments; override only when tuning.
+JDBC pool size ≥ `expand.threads + table.threads + commit.threads` (+ REST/IRC headroom). Defaults
+are enough for most deployments; override only when tuning.
 
 Dependency (illustrative):
 
@@ -1256,15 +1267,15 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 ### 9.1 Suggested Work Plan
 
-This design delivers the in-process plugin, three `scheduled_tasks` names (①/②/③), dual pools
-(`expand.threads=4` / `table.threads=8`), per-run `table_maintenance_job`, `tms` principal +
+This design delivers the in-process plugin, three `scheduled_tasks` names (①/②/③), three pools
+(`expand.threads=4` / `table.threads=8` / `commit.threads=4`), per-run `table_maintenance_job`, `tms` principal +
 SecretManager, and policy `jobOptions`.
 
 | Phase | Work item                                | Notes                                                                                                                          |
 | ----- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | 1     | Load the in-process plugin               | `TableMaintenanceRESTFeature`; start/stop db-scheduler; `TmsPrincipalBootstrapListener`.                                       |
 | 2     | Internal expand + spark-submit pipelines | `PolicyExpandPipeline` + `MaintenanceSparkSubmitPipeline`; unit tests.                                                         |
-| 3     | db-scheduler three tasks + dual pools    | ①+②+③; `expand.threads=4` / `table.threads=8`; migration; heartbeats (§5.5, §8.4).                                              |
+| 3     | db-scheduler three tasks + three pools   | ①+②+③; expand=4 / table=8 / commit=4; migration; heartbeats (§5.5, §8.4).                                                      |
 | 4     | In-process IRC hook (upsert ③)           | Upsert `tms-table-commit` (§5.4); policy create inserts ①; expand writes ② (§6.1).                                              |
 | 5     | Hardening                                | Service metrics, graceful shutdown, H2 path tests, user docs.                                                                  |
 | 6     | Optimizer CLI replacement APIs           | Ops resources in §7. Same commands as `gravitino-optimizer`.                                                                   |
@@ -1296,7 +1307,7 @@ SecretManager, and policy `jobOptions`.
 
 #### Phase 3 checklist
 
-- [ ] Add `TableMaintenanceScheduler` with expand pool (4) + table pool (8) for ②+③ (§8.4).
+- [ ] Add `TableMaintenanceScheduler` with expand (4) + table (8) + commit (4) pools (§8.4).
 - [ ] Add entity-store migration for `scheduled_tasks` (MySQL / PostgreSQL).
 - [ ] Wire `DataSource` from the relational entity store; honor §8.4 heartbeat keys.
 - [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (§5.5.3).
@@ -1310,7 +1321,7 @@ SecretManager, and policy `jobOptions`.
 - [ ] Add EntityStore migration for **`table_maintenance_job`** (§6.2).
 - [ ] On policy create/enable: INSERT **`tms-policy-expand`** ① (`policy_id`) (§5.5.2).
 - [ ] IRC post-commit **upserts** `tms-table-commit` `{table_id}`; rejects orphan-cleanup `onCommit`;
-      does **not** `runJob` on the IRC thread (execute on `table.threads`).
+      does **not** `runJob` on the IRC thread (decide/execute on `commit.threads`).
 - [ ] Tests: attached subset runs in fixed order; missing types skipped; terminal re-upserts ③;
       concurrent commits coalesce on one row.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
@@ -1355,7 +1366,7 @@ SecretManager, and policy `jobOptions`.
 | Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7).                           |
 | Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                                                                     |
 | Triggers     | Commit: ordered attached types (§5.7.1); crontab: per-policy ①; orphan-cleanup crontab-only.                                               |
-| Scheduling   | **db-scheduler**: ① long-lived; ②/③ short submit then DELETE; occupancy on `table_maintenance_job` (§5.5, §8.4).                         |
+| Scheduling   | **db-scheduler**: three pools expand/table/commit; ②/③ short submit then DELETE; occupancy on job table (§5.5, §8.4).                    |
 | Job records  | `table_maintenance_job` one row per `job_run_id` (Validation JSON + submit gates).                                                         |
 | Import       | Lazy `table_meta` import via `TableDispatcher.loadTable` (§5.5.4); not Iceberg `registerTable`.                                            |
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
