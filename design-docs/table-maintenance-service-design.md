@@ -347,23 +347,6 @@ Deployment:
 5. Attach Govern maintenance policies (e.g. `system_iceberg_compaction`) to catalogs/schemas/tables
    via existing Policy APIs on the main server (**8090**).
 
-### 5.2 Internal structure
-
-| Part                             | Responsibility                                                                                                                         |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`; starts/stops db-scheduler; registers in-process callback and ops (§7); bootstraps `tms` user (§5.6).               |
-| `TableMaintenanceScheduler`      | Three schedulers: expand (①,4) + table (②,8) + commit (③,4) (§8.4). |
-| `IcebergCommitEventHandler`      | IRC-thread upsert of `tms-table-commit` `{table_id}` only; execute later on `commit.threads` (§5.4).                                   |
-| `PolicyExpandPipeline`           | ① pick: page → gates → INSERT `tms-table-scheduler`; `task_data` cursor only while paging (§5.5).                                     |
-| `MaintenanceSparkSubmitPipeline` | ②/③ short pick: resolve → gates → sample before → `runJob` → INSERT job row → **DELETE** (§5.5).                                     |
-| `GravitinoTableImportService`    | Lazy import into `table_meta` via `TableDispatcher.loadTable` (§5.5.4); backend-aware owner resolution.                                |
-| `TmsPrincipalBootstrapListener`  | `EventListenerPlugin` on `CreateMetalakeEvent`; ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).      |
-| `TmsAuthConfigResolver`          | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.9).                                             |
-| `TableMaintenanceJobStore`       | Read/write `table_maintenance_job` per-run rows; submit gates + Validation JSON (§6.2–§6.3).                                           |
-| `IcebergTableLifecycleHook`      | In-process IRC **drop** hook: delete related ②+③ rows + `table_maintenance_job`; ① unchanged unless policy removed (§6.3).             |
-| Existing optimizer classes       | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for ②/③ submit path.                                          |
-| db-scheduler `scheduled_tasks`   | ① expand + ② table-scheduler + ③ table-commit. Not a substitute for `table_maintenance_job` / `job_run_meta`.                          |
-
 ### 5.3 User process
 
 1. Operator enables the TMS REST plugin (`extensionPackages`), `iceberg-rest` **in the same JVM**,

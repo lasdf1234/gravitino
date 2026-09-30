@@ -265,23 +265,6 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
 | 调度 | expand（①）+ table（②）+ commit（③）（§8.4） |
 
 
-### 5.2 内部结构
-
-| 组件                               | 职责                                                                                                                           |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`；启停 db-scheduler；注册进程内回调与 ops（§7）；bootstrap `tms` 用户（§5.6）。                                                |
-| `TableMaintenanceScheduler`      | 三个调度器：expand（①，4）+ table（②，8）+ commit（③，4）（§8.4）。 |
-| `IcebergCommitEventHandler`      | **IRC 线程** upsert `tms-table-commit` `{table_id}`；执行稍后在 `commit.threads`（§5.4）。                                                   |
-| `PolicyExpandPipeline`           | 在 ① pick 内运行：分页解析 → expand 门控 → INSERT ≤ `expand.enqueueBatchSize` 条 **`tms-table-scheduler`**；未完则游标 + 立刻再到期（§5.5）。                    |
-| `MaintenanceSparkSubmitPipeline` | 在 table 池 ②/③ 短 pick：resolve → 门控 → 采样 before → `runJob` → INSERT → **DELETE**（§5.5）。                                 |
-| `GravitinoTableImportService`    | 经 `TableDispatcher.loadTable` 懒 import 进 `table_meta`（§5.5.4）；按 backend 解析 owner。                                            |
-| `TmsPrincipalBootstrapListener`  | 监听 `CreateMetalakeEvent` 的 `EventListenerPlugin`；启用授权时确保 metalake 用户 `tms` + 内置角色（§5.6）。                                     |
-| `TmsAuthConfigResolver`          | 解析 IRC 认证 + credential-vending Spark conf；经 SecretManager 加载 secret（§5.9）。                                                   |
-| `TableMaintenanceJobStore`       | 读写 `table_maintenance_job` 按运行行；submit 门控 + Validation JSON（§6.2–§6.3）。                                                      |
-| `IcebergTableLifecycleHook`      | 进程内 IRC **drop** 钩子：删除相关 ②+③ + `table_maintenance_job`；① 除非策略移除否则不动（§6.3）。                                                   |
-| 现有 optimizer 类                   | `Updater`、`Recommender`、providers、`JobSubmitter` — ②/③ submit 路径契约不变。                                                         |
-| db-scheduler `scheduled_tasks`   | ① expand + ② table-scheduler + ③ table-commit。不能替代 `table_maintenance_job`。                                                      |
-
 ### 5.3 用户流程
 
 1. 运维启用 TMS REST 插件（`extensionPackages`）、**同 JVM** 的 `iceberg-rest`、进程内 commit 事件（§5.1.1 / §8.2）
