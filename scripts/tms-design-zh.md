@@ -158,7 +158,7 @@ TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，�
 | 集群 CAS / 单飞             | 是（`scheduled_tasks` 乐观锁 / `SKIP LOCKED`）                        | 是                                  | 仅锁                                                   | 是（`QRTZ_*` 行锁）                                      |
 | 短租约 heartbeat           | 是（`last_heartbeat`）                                             | 是                                  | 不适用                                                  | 是                                                   |
 | 适合按 (table,policy) 到期任务 | 是                                                               | 是                                  | 否（仅锁）                                                | 是（更重）                                               |
-| H2 单元测试路径               | 降级：禁用调度器；测试中直接跑管线（§5.4.3）                                       | H2 支持更好                            | 是                                                    | 仅测试用 RAMJobStore                                    |
+| H2 单元测试路径               | 降级：禁用调度器；测试中直接跑管线（§8.4）                                       | H2 支持更好                            | 是                                                    | 仅测试用 RAMJobStore                                    |
 | 额外运维组件                  | 无                                                               | 可选 dashboard 服务                    | 无                                                    | 无                                                   |
 | 决策                      | **选定**                                                          | 否决 — 许可证 + 与 Gravitino Jobs 重叠     | 否决 — 非调度器                                            | 否决 — 约 11 张表，过重                                     |
 
@@ -337,7 +337,7 @@ Commit Scheduler（commit.threads=4）— 仅注册 tms-table-commit
 **防双提交：** 同一 `(table, policy)` 的在途 `table_maintenance_job`（`finished_at IS NULL`）占坑。
 
 **为何 ②/③ submit 后 DELETE、① 保留：** ① 是按 `policy_id` 的长期 expand 租约。②/③ 是一次性 submit；
-Spark 生命周期与防双提交在 `table_maintenance_job` + Job 监听 / 对账（§5.4.3）。
+Spark 生命周期与防双提交在 `table_maintenance_job` + Job 监听 / 对账（§5.4.2）。
 
 **线程：** commit **入队** = IRC 线程（只 upsert）。commit **判断 + 执行** = `commit.threads`（仅 ③）。
 crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 ①）。
@@ -367,22 +367,15 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 **Expand 分页：** 每次 ① pick 最多 INSERT `expand.enqueueBatchSize`（默认 **100**）条 ②；仅分页中在 ①
 `task_data` 写 cursor，扫完清空。
 
-#### 5.4.3 H2 与测试后端
-
-| Entity-store 后端        | 调度器行为                                                               |
-| ---------------------- | ------------------------------------------------------------------- |
-| MySQL / PostgreSQL（生产） | db-scheduler **启用**；`scheduled_tasks` 与 entity store 一起迁移           |
-| H2（单元 / 本地测试）          | `gravitino.maintenance.scheduler.enabled = false`；测试在假入队后**直接**调用管线 |
-
 **Expand 门控**（在 **① `tms-policy-expand`** 内，按候选工作单元，**INSERT ② 之前**）：
 
-1. `ensureTableImported`（§5.4.4）—— import 失败则跳过该单元。
+1. `ensureTableImported`（§5.4.3）—— import 失败则跳过该单元。
 2. 若该 `(metalake_id, table_id, policy_id)` 存在在途行（`finished_at IS NULL`）：**跳过**（不 INSERT ②）。
 3. 否则若该键的 `MAX(finished_at)` 仍在解析的 `minIntervalMs` 内（表属性 → 全局 conf → 代码默认；§8.3）：**跳过**（不 INSERT ②）。
 
 **Submit 路径**（② 在 table 池 pick，或 ③ 在 commit 池 pick）：
 
-1. `ensureTableImported`（§5.4.4）——启用 import 时须成功。
+1. `ensureTableImported`（§5.4.3）——启用 import 时须成功。
 2. 复检在途（`finished_at IS NULL`）：若存在 → **不要** `runJob`，**DELETE** 本调度行并返回（坑已被占）。
 3. **现在采样 `before_metrics`**（必须在任何改表之前）。事后无法重建。
 4. 策略触发（`Recommender`）。
@@ -413,7 +406,7 @@ TMS 只把 Job **终态**镜像到 `finished_at`。
 
 **`minIntervalMs` 在 ① 上判断**（crontab）；commit 在 ③ pick 时决议门控。
 
-#### 5.4.4 懒加载 Gravitino 元数据 import（`table_meta`）
+#### 5.4.3 懒加载 Gravitino 元数据 import（`table_meta`）
 
 TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tasks` 的键。该 id 在 Gravitino
 **`table_meta`** 中，而非仅在 Iceberg catalog backend。
@@ -743,10 +736,10 @@ pick 给定实例（CAS + heartbeat）。
 
 **Table 互斥：** 每条 ② 上的 pick（`table.threads`）；短 submit 后 **DELETE**。
 **Commit 互斥：** 每条 ③ 上的 pick（`commit.threads`）；判断/submit 后 **DELETE**。
-防双提交：在途 `table_maintenance_job` + `minIntervalMs`（5.4.3、§6.2）。
+防双提交：在途 `table_maintenance_job` + `minIntervalMs`（5.4.2、§6.2）。
 
 **死 worker / 卡住的 Spark：** missed heartbeat 只释放**卡住的短回调**（回调本应很短）。
-长 Spark / 丢失的终态更新由对账修理 `finished_at IS NULL`（§5.4.3）—— **只**写 `finished_at`，从不补采 Validation 指标。
+长 Spark / 丢失的终态更新由对账修理 `finished_at IS NULL`（§5.4.2）—— **只**写 `finished_at`，从不补采 Validation 指标。
 
 | 表                                      | 角色                                                    |
 | -------------------------------------- | ----------------------------------------------------- |
@@ -797,7 +790,7 @@ Node A / B / C
 | ---------------- | -------------------------- | ------------------------------------------------- |
 | `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`；主键                      |
 | `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                       |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（5.4.4 import 后）               |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（5.4.3 import 后）               |
 | `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                           |
 | `before_metrics` | `MEDIUMTEXT NULL`          | 改表**前**采样的 JSON；可延迟到终态才落库                         |
 | `after_metrics`  | `MEDIUMTEXT NULL`          | Job 终态后的 JSON；待处理时为 null                          |
@@ -989,7 +982,7 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 | `maintenance.orphan-cleanup.minIntervalMs`   | 该表 orphan cleanup 最小间隔   |
 
 每次 **① expand** 对候选工作单元，用解析的 `minIntervalMs` 检查该 `(table_id, policy_id)` 的
-`MAX(finished_at)`（§5.4.3）。在途行（`finished_at IS NULL`）也跳过 INSERT ②（② 在 `runJob` 前再复检）。
+`MAX(finished_at)`（§5.4.2）。在途行（`finished_at IS NULL`）也跳过 INSERT ②（② 在 `runJob` 前再复检）。
 策略内容仍拥有**触发阈值**（如 MSE）；间隔仅限制 ① 跑起来后多久可再入队（调度器 pick 或 ops API）。
 
 表示例覆盖：
@@ -1060,11 +1053,11 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 
 #### 阶段 2 检查清单
 
-- [ ] 实现 `GravitinoTableImportService`（`TableDispatcher.loadTable` → `table_meta`；5.4.4）。
+- [ ] 实现 `GravitinoTableImportService`（`TableDispatcher.loadTable` → `table_meta`；5.4.3）。
 - [ ] import 后按 backend 解析 owner；永不将 owner 默认设为 `tms`。
 - [ ] 实现 `PolicyExpandPipeline`（挂载 → INSERT `tms-table-scheduler` ②；保留 ①）。
 - [ ] 实现 `MaintenanceSparkSubmitPipeline` 调用 `Recommender.submitForStrategyName`。
-- [ ] 门控：① 上在途 / 最小间隔；②/③ 短 submit 后 DELETE；Job 监听 + 对账（§5.4.3）。
+- [ ] 门控：① 上在途 / 最小间隔；②/③ 短 submit 后 DELETE；Job 监听 + 对账（§5.4.2）。
 - [ ] 经现有 Policy / `StrategyProvider` 解析 Active 挂载策略（无新策略库）。
 - [ ] 为 skip / noop / submit 结果添加单元测试。
 
@@ -1073,7 +1066,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 添加 `TableMaintenanceScheduler`：expand（4）+ table（8）+ commit（4）三池（§8.4）。
 - [ ] 为 `scheduled_tasks` 添加 entity-store 迁移（MySQL / PostgreSQL）。
 - [ ] 从关系 entity store 接线 `DataSource`；遵守 §8.4 heartbeat 键。
-- [ ] H2 后端：调度器禁用；测试中直接调用管线（§5.4.3）。
+- [ ] H2 后端：调度器禁用；测试中直接调用管线（§8.4）。
 - [ ] 集成测试：两节点；仅一个 pick 胜出；死 JVM 经错过 heartbeat 释放租约。
 
 #### 阶段 4 检查清单
@@ -1085,7 +1078,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
-- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账仅跟 Job 终态/缺失（§5.4.3）。
+- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账仅跟 Job 终态/缺失（§5.4.2）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
@@ -1122,9 +1115,9 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 | 触发         | Commit：upsert ③ + pick 时 5.6.1 有序；crontab：按策略 ①；orphan-cleanup 仅 crontab。                                      |
 | 调度         | **db-scheduler** 三池 expand/table/commit；②/③ 短 submit 后 DELETE；占坑在 job 表（5.4、§8.4）。                    |
 | 作业记录       | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                     |
-| Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.4.4）；非 Iceberg `registerTable`。                      |
+| Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.4.3）；非 Iceberg `registerTable`。                      |
 | Ops API    | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                      |
-| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账只补 `finished_at`（§5.4.3）。                                    |
+| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账只补 `finished_at`（§5.4.2）。                                    |
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
 | Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期实例 N 抢 1；②/③ pick+heartbeat 防双提交；死节点靠 `table_maintenance_job` 备份门控。                                    |

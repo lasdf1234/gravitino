@@ -190,7 +190,7 @@ threads (§8.4).
 | Cluster CAS / single-flight      | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`)           | Yes                                          | Lock only                                            | Yes (`QRTZ_*` row locks)                                 |
 | Heartbeat for short lease        | Yes (`last_heartbeat`)                                               | Yes                                          | N/A                                                  | Yes                                                      |
 | Fits per-policy + one-shot Spark | Yes                                                                  | Yes                                          | No (lock only)                                       | Yes (heavier)                                            |
-| H2 unit-test path                | Degraded: disable scheduler; run pipeline directly in tests (§5.4.3) | Better H2 story                              | Yes                                                  | RAMJobStore only in tests                                |
+| H2 unit-test path                | Degraded: disable scheduler; run pipeline directly in tests (§8.4) | Better H2 story                              | Yes                                                  | RAMJobStore only in tests                                |
 | Extra ops component              | No                                                                   | Optional dashboard server                    | No                                                   | No                                                       |
 | Decision                         | **Chosen**                                                           | Rejected — license + overlaps Gravitino Jobs | Rejected — not a scheduler                           | Rejected — ~11 tables, heavy                             |
 
@@ -432,7 +432,7 @@ execute the same instance.
 
 **Why DELETE ②/③ after submit; keep ①:** ① is the durable per-`policy_id` expand lease. ②/③ are
 one-shot submit units; Spark lifetime and anti-double-submit live on `table_maintenance_job` + Job
-listener / reconcile (§5.4.3).
+listener / reconcile (§5.4.2).
 
 **Threads:** Commit **enqueue** = IRC thread (upsert only). Commit **decide + execute** =
 `commit.threads` (③ only). Crontab submit = `table.threads` (② only). Expand = `expand.threads`
@@ -467,16 +467,9 @@ listener / reconcile (§5.4.3).
 **Policy lifecycle → ①:** create/enable → INSERT ①; alter schedule → update ①; disable/drop → DELETE ①
 and outstanding ② for that `policy_id`.
 
-#### 5.4.3 H2 and test backends
-
-| Entity-store backend            | Scheduler behavior                                                                                           |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| MySQL / PostgreSQL (production) | db-scheduler **enabled**; `scheduled_tasks` migrated with entity store                                       |
-| H2 (unit / local tests)         | `gravitino.maintenance.scheduler.enabled = false`; tests call the pipeline **directly** after a fake enqueue |
-
 **Expand gates** (inside **① `tms-policy-expand`**, per candidate, **before** INSERT `tms-table-scheduler`):
 
-1. `ensureTableImported` (§5.4.4) — skip unit on import failure.
+1. `ensureTableImported` (§5.4.3) — skip unit on import failure.
 2. If an in-flight row exists for this `(metalake_id, table_id, policy_id)` (`finished_at IS NULL`):
    **skip** (do not INSERT ②).
 3. Else if `MAX(finished_at)` for that key is still within the resolved `minIntervalMs` (table prop →
@@ -484,7 +477,7 @@ and outstanding ② for that `policy_id`.
 
 **Submit path** (② on the table pool, or ③ on the commit pool):
 
-1. `ensureTableImported` (§5.4.4) — must succeed when import is enabled.
+1. `ensureTableImported` (§5.4.3) — must succeed when import is enabled.
 2. Re-check in-flight (`finished_at IS NULL`): if found, **do not** `runJob` — **DELETE** this
    scheduled row and return (occupancy already claimed).
 3. **Sample `before_metrics` now** (must be before any table mutation). Cannot be reconstructed later.
@@ -523,7 +516,7 @@ terminal.
 **`minIntervalMs` for crontab is judged on ①** before INSERT of `tms-table-scheduler`. Commit resolves
 gates on ③ pick.
 
-#### 5.4.4 Lazy Gravitino metadata import (`table_meta`)
+#### 5.4.3 Lazy Gravitino metadata import (`table_meta`)
 
 TMS needs a stable `table_id` for `table_maintenance_job` and `scheduled_tasks` keys. That id lives
 in Gravitino **`table_meta`**, not in the Iceberg catalog backend alone.
@@ -890,10 +883,10 @@ db-scheduler. Writing `scheduled_tasks` does **not** cause all nodes to execute;
 
 **Table mutex:** pick on each ② (`table.threads`); after short submit, **DELETE**.
 **Commit mutex:** pick on each ③ (`commit.threads`); after decide/submit, **DELETE**.
-Anti-double-submit: in-flight `table_maintenance_job` + `minIntervalMs` (5.4.3, §6.2).
+Anti-double-submit: in-flight `table_maintenance_job` + `minIntervalMs` (5.4.2, §6.2).
 
 **Dead worker / stuck Spark:** missed heartbeats only free a **hung callback** (callbacks are short).
-Long Spark / lost terminal updates are repaired by **reconcile** on `finished_at IS NULL` (§5.4.3) —
+Long Spark / lost terminal updates are repaired by **reconcile** on `finished_at IS NULL` (§5.4.2) —
 set `finished_at` only; never late-sample Validation metrics.
 
 | Table                                  | Role                                                                    |
@@ -951,7 +944,7 @@ on this row as the task end time, not `job_run_meta.job_finished_at`.
 | ---------------- | -------------------------- | ---------------------------------------------------------------------------- |
 | `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`; primary key                                       |
 | `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                                  |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after 5.4.4 import)                              |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after 5.4.3 import)                              |
 | `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                      |
 | `before_metrics` | `MEDIUMTEXT NULL`          | JSON sampled **before** table mutation; may stay null until terminal persist |
 | `after_metrics`  | `MEDIUMTEXT NULL`          | JSON after job terminal status; null while pending                           |
@@ -1156,7 +1149,7 @@ and only in that order among attached types (§5.6.1). **`orphan-cleanup` is cro
 
 On each **① expand**, for every candidate work unit the pipeline checks `MAX(finished_at)` on
 `table_maintenance_job` for that `(table_id, policy_id)` against the resolved `minIntervalMs` for
-that task type (§5.4.3). An in-flight row (`finished_at IS NULL`) also skips INSERT ② (and ②
+that task type (§5.4.2). An in-flight row (`finished_at IS NULL`) also skips INSERT ② (and ②
 re-checks before `runJob`). Policy content still owns **trigger thresholds** (e.g. MSE); the
 interval only limits how often expand may enqueue another unit once ① runs (scheduler pick or ops
 API).
@@ -1243,11 +1236,11 @@ SecretManager, and policy `jobOptions`.
 
 #### Phase 2 checklist
 
-- [ ] Implement `GravitinoTableImportService` (`TableDispatcher.loadTable` → `table_meta`; 5.4.4).
+- [ ] Implement `GravitinoTableImportService` (`TableDispatcher.loadTable` → `table_meta`; 5.4.3).
 - [ ] Backend-aware owner resolution after import; never default owner to `tms`.
 - [ ] Implement `PolicyExpandPipeline` (attachments → expand gates → INSERT ungated `tms-table-scheduler` ②; retain ①).
 - [ ] Implement `MaintenanceSparkSubmitPipeline` calling `Recommender.submitForStrategyName`.
-- [ ] Enforce gates: in-flight / min-interval on ①; ②/③ short submit then DELETE; Job listener + reconcile (§5.4.3).
+- [ ] Enforce gates: in-flight / min-interval on ①; ②/③ short submit then DELETE; Job listener + reconcile (§5.4.2).
 - [ ] Resolve Active attached policies via existing Policy / `StrategyProvider` (no new policy store).
 - [ ] Add unit tests for skip / noop / submit outcomes.
 
@@ -1256,7 +1249,7 @@ SecretManager, and policy `jobOptions`.
 - [ ] Add `TableMaintenanceScheduler` with expand (4) + table (8) + commit (4) pools (§8.4).
 - [ ] Add entity-store migration for `scheduled_tasks` (MySQL / PostgreSQL).
 - [ ] Wire `DataSource` from the relational entity store; honor §8.4 heartbeat keys.
-- [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (§5.4.3).
+- [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (§8.4).
 - [ ] Integration test: two nodes; one pick wins; in-flight blocks second submit; reconcile closes
       stale `finished_at IS NULL` without inventing metrics.
 
@@ -1273,7 +1266,7 @@ SecretManager, and policy `jobOptions`.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **drop** hook to delete outstanding ②+③ + `table_maintenance_job` rows (§6.3).
 - [ ] Sample `before_metrics` before `runJob`; INSERT job row; DELETE ②/③ immediately; Job listener
-      writes `after_metrics` + `finished_at`; reconcile on Job terminal / missing only (§5.4.3).
+      writes `after_metrics` + `finished_at`; reconcile on Job terminal / missing only (§5.4.2).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on
       `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve; drop cleans rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
@@ -1314,9 +1307,9 @@ SecretManager, and policy `jobOptions`.
 | Triggers     | Commit: ordered attached types (§5.6.1); crontab: per-policy ①; orphan-cleanup crontab-only.                                               |
 | Scheduling   | **db-scheduler**: three pools expand/table/commit; ②/③ short submit then DELETE; occupancy on job table (5.4, §8.4).                    |
 | Job records  | `table_maintenance_job` one row per `job_run_id` (Validation JSON + submit gates).                                                         |
-| Import       | Lazy `table_meta` import via `TableDispatcher.loadTable` (§5.4.4); not Iceberg `registerTable`.                                            |
+| Import       | Lazy `table_meta` import via `TableDispatcher.loadTable` (§5.4.3); not Iceberg `registerTable`.                                            |
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
-| Pipeline     | ①→INSERT ②; ②/③ short submit; listener writes after; reconcile only sets `finished_at` (§5.4.3).                                          |
+| Pipeline     | ①→INSERT ②; ②/③ short submit; listener writes after; reconcile only sets `finished_at` (§5.4.2).                                          |
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Drop         | Drop hook deletes outstanding ②+③ + `table_maintenance_job` rows (§6.3). Rename out of scope.                                              |
 | Multi-node   | N compete, one pick; ②/③ pick+heartbeat anti-double-submit; dead-worker gated by `table_maintenance_job`.                               |
