@@ -344,7 +344,7 @@ picks ③ (§5.4).
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka.                                                  |
 | Payload     | `table_id` / table identifier and optional committed `snapshot_id`.                                                                         |
 | Enqueue     | Upsert `(tms-table-commit, {table_id})` on the IRC thread (must stay short).                                                                |
-| Execute     | Table pool picks ③; resolve onCommit policy at pick; re-upsert same `{table_id}` after terminal for the next type if needed (§5.7.1).     |
+| Execute     | **`table.threads`** picks ③ (never IRC / `expand.threads`); resolve at pick; short submit; re-upsert after Job terminal if needed (§5.4). |
 | Scheduling  | Expand pool (① only) + table pool (② + ③); same JDBC DataSource as MySQL / PostgreSQL entity store (§8.4).                                  |
 
 
@@ -364,7 +364,7 @@ Deployment:
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`; starts/stops db-scheduler; registers in-process callback and ops (§7); bootstraps `tms` user (§5.6).               |
 | `TableMaintenanceScheduler`      | Two schedulers: expand (①, `expand.threads=4`) + table (②+③, `table.threads=8`) (§8.4). |
-| `IcebergCommitEventHandler`      | IRC upsert of `tms-table-commit` `{table_id}` only (§5.4).                                                                             |
+| `IcebergCommitEventHandler`      | IRC-thread upsert of `tms-table-commit` `{table_id}` only; execute later on `table.threads` (§5.4).                                    |
 | `PolicyExpandPipeline`           | ① pick: page → gates → INSERT `tms-table-scheduler`; `task_data` cursor only while paging (§5.5).                                     |
 | `MaintenanceSparkSubmitPipeline` | ②/③ short pick: resolve → gates → sample before → `runJob` → INSERT job row → **DELETE** (§5.5).                                     |
 | `GravitinoTableImportService`    | Lazy import into `table_meta` via `TableDispatcher.loadTable` (§5.5.4); backend-aware owner resolution.                                |
@@ -439,6 +439,19 @@ primary key `(tms-table-commit, {table_id})` is the coalesce point.
 drop orphan-cleanup / gated types, take the §5.7.1 head, short-submit (before_metrics → runJob →
 INSERT job row → **DELETE**). On Job terminal, if another type is still needed, upsert the same
 `(tms-table-commit, {table_id})` again. If every type is gated at pick time, DELETE without submit.
+
+**Commit / pool threads** (do not conflate with Spark executor threads):
+
+| Step | Runs on | Does |
+| ---- | ------- | ---- |
+| Enqueue ③ after Iceberg commit | **IRC callback thread** | Upsert `(tms-table-commit, {table_id})` only — must stay short |
+| Execute ③ | **`table.threads`** (table Scheduler; shared with ②) | Pick → resolve policy → short submit → **DELETE** |
+| Execute ② | **`table.threads`** | Short crontab/batch submit → **DELETE** |
+| Execute ① | **`expand.threads`** (expand Scheduler) | Page / gate / INSERT ② — never runs Spark submit for commit |
+| Forbidden | IRC thread or `expand.threads` | `runJob` / long work for the commit path |
+
+Why split pools: a burst of commits must not starve crontab expand on `expand.threads`. Commit
+**enqueue** is never on either db-scheduler pool; commit **execute** shares `table.threads` with ②.
 
 ### 5.5 Execute path — expand + table-scheduler + table-commit
 
@@ -1223,8 +1236,9 @@ db-scheduler has **one** thread pool per `Scheduler`. TMS runs **two** scheduler
 | Expand | `tms-policy-expand` only | `4` | `…scheduler.expand.threads` |
 | Table | `tms-table-scheduler` + `tms-table-commit` | `8` | `…scheduler.table.threads` |
 
-**Commit threading:** IRC callback only **upserts** ③ (not on either pool). **Executing** ③ shares
-`table.threads` with ② for a **short** submit callback. Commit must **not** use `expand.threads`.
+**Commit threading:** see §5.4 table. IRC callback only **upserts** ③ (not on either db-scheduler
+pool). **Executing** ③ shares `table.threads` with ② for a **short** submit callback. Commit must
+**not** use `expand.threads` (would steal crontab expand under commit bursts).
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
