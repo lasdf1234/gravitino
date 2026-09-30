@@ -270,12 +270,13 @@ onCommit / crontab due
   → bump ① execution_time = now (commit) or leave crontab due time
 
 ① picked (one node)
-  → read policy_meta + attachments; list / filter tables (§5.5.4)
-  → apply expand gates (in-flight / minIntervalMs) per candidate
-  → crontab: INSERT ② per ungated unit (`{table_id}:{policy_id}`)
-  → commit: INSERT one ② `{table_id}:{policy_id}:…` for ungated policies in §5.7.1 order
-       (gated-out policies omitted — fewer policy_ids in the key)
-  → set ① next execution_time from crontab (or leave until next commit bump)
+  → read policy_meta + attachments; resume table cursor from ① task_data if any (§5.5.2)
+  → take next page of candidates (default **100**; `expand.enqueueBatchSize`)
+  → apply expand gates (in-flight / minIntervalMs) per candidate in the page
+  → crontab: INSERT ≤ page ② rows (`{table_id}:{policy_id}`)
+  → commit: INSERT one ② `{table_id}:{policy_id}:…` (single table; no paging)
+  → if more tables remain: save cursor; set ① execution_time = now (continue next pick)
+  → else: clear cursor; set ① next crontab due (or wait for commit bump)
   → do NOT delete ① (unless policy disabled / dropped / replaced)
 
 ② picked (one node per row; crontab ② may run in parallel across units)
@@ -302,8 +303,8 @@ Gravitino IRC (:9001)
 Node A / Node B / Node C  — each polls db-scheduler (§5.5); N compete, one pick wins
         │
         ├─ pick due ① tms-policy-expand
-        │     ├─ expand policy → INSERT N × ② tms-spark (execution_time = now)
-        │     └─ retain ①; set next crontab due (if any); release pick
+        │     ├─ expand one page (≤100) → INSERT ≤ page × ② tms-spark
+        │     └─ retain ①; more pages → due now; else next crontab; release pick
         │
         ├─ pick due ② tms-spark
         │     ├─ ensureTableImported (§5.5.4)
@@ -369,7 +370,7 @@ Deployment:
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`; starts/stops db-scheduler; registers in-process callback and ops (§7); bootstraps `tms` user (§5.6).               |
 | `TableMaintenanceScheduler`      | Wraps db-scheduler; registers **`tms-policy-expand`** and **`tms-spark`** handlers; reconciles ① on policy create/alter (§5.5).        |
 | `IcebergCommitEventHandler`      | IRC commit callback; ordered commit chain for attached `onCommit` types (§5.4, §5.7.1).                                                |
-| `PolicyExpandPipeline`           | Runs inside ① pick: resolve → list tables → expand gates (`minIntervalMs` / in-flight) → INSERT ungated **`tms-spark`**; retain ① (§5.5). |
+| `PolicyExpandPipeline`           | Runs inside ① pick: paged resolve → expand gates → INSERT ≤ `expand.enqueueBatchSize` **`tms-spark`** rows; cursor + re-due if more (§5.5). |
 | `MaintenanceSparkSubmitPipeline` | Runs inside ② pick: `ensureTableImported` → in-flight re-check → `Recommender` → `runJob` as `tms` → `table_maintenance_job` → **DELETE** ② (§5.5). |
 | `GravitinoTableImportService`    | Lazy import into `table_meta` via `TableDispatcher.loadTable` (§5.5.4); backend-aware owner resolution.                                |
 | `TmsPrincipalBootstrapListener`  | `EventListenerPlugin` on `CreateMetalakeEvent`; ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).      |
@@ -462,18 +463,21 @@ db-scheduler (every TMS node polls; only one pick wins per due instance)
         ├─ pick ① (heartbeat while running)
         ├─ PolicyExpandPipeline:
         │     ├─ load policy_meta / content.schedule / attachments
-        │     ├─ resolve target tables (commit hint → one table; crontab → list under attach)
-        │     ├─ ensureTableImported for candidates (§5.5.4)
-        │     ├─ for each candidate: apply expand gates (in-flight / minIntervalMs; §5.5.3)
+        │     ├─ resolve target tables (commit hint → one table; crontab → under attach)
+        │     ├─ crontab: load expand cursor from ① task_data (if any); take next **page**
+        │     │     page size = expand.enqueueBatchSize (default **100**)
+        │     ├─ ensureTableImported for candidates in this page (§5.5.4)
+        │     ├─ for each candidate in page: expand gates (in-flight / minIntervalMs; §5.5.3)
         │     │     → gated candidates omitted from enqueue
-        │     ├─ crontab path: INSERT one ② per ungated unit (execution_time = now)
-        │     │     task_instance = {table_id}:{policy_id}
-        │     │     task_data.path = crontab
-        │     ├─ commit path: INSERT **one** ② for the table (execution_time = now)
+        │     ├─ crontab path: INSERT ungated ② for this page only (execution_time = now)
+        │     │     task_instance = {table_id}:{policy_id}; task_data.path = crontab
+        │     │     (JDBC batch insert OK within the page)
+        │     ├─ commit path: INSERT **one** ② for the committed table (no paging)
         │     │     task_instance = {table_id}:{policy_id1}:{policy_id2}:…
-        │     │       (ungated policy_ids only, §5.7.1 order; fewer ids if some gated)
-        │     │     task_data.path = commit
-        │     ├─ set ① next execution_time from crontab (if any); else wait for next commit bump
+        │     │       (ungated policy_ids only, §5.7.1 order); task_data.path = commit
+        │     ├─ if crontab and more tables remain after this page:
+        │     │     persist cursor in ① task_data; set ① execution_time = now
+        │     ├─ else: clear cursor; set ① next crontab due (if any); else wait commit bump
         │     └─ return (① NOT deleted)
         └─ dead JVM → missed heartbeats → ① runnable again
 
@@ -535,6 +539,14 @@ snapshot-expiry) still expands to **one ② per table**, all sharing the same `p
 separate batch instance key. Commit enqueues one row listing every **ungated** policy in §5.7.1
 order (`{table_id}:{p1}:{p2}:…`); gated-out policies are omitted, so the key may be shorter. Use
 `task_data.path = commit|crontab` to tell a one-policy commit key from a crontab key.
+
+**Expand paging (crontab):** one ① pick must stay short (heartbeat lease). Do **not** list / gate /
+INSERT every table under a large catalog attachment in a single pick. Each pick enqueues at most
+`gravitino.maintenance.expand.enqueueBatchSize` **② rows** (default **100**): advance a cursor in
+① `task_data`, INSERT that page, then either set ① `execution_time = now` to continue or clear the
+cursor and schedule the next crontab due when the attachment is exhausted. Commit expand targets
+one table and does not page. **100** balances callback duration (import + gates + JDBC) against
+throughput; tune up for fast metadata stores or down if picks approach the heartbeat interval.
 
 **Policy lifecycle → ①:** create/enable → INSERT ①; alter schedule → update ① `execution_time` /
 `task_data`; disable/drop → DELETE ① and DELETE outstanding ② for that `policy_id`.
@@ -1163,9 +1175,9 @@ TMS recognizes four maintenance **task types** (aligned with product Compact pol
 and only in that order among attached types (§5.7.1). **`orphan-cleanup` is crontab-only.**
 
 **Catalog / schema attachments:** When a policy (including snapshot-expiry) is attached at
-**catalog** or **schema** scope, expand lists every table under that attachment and enqueues one
-crontab ② per table — all with the **same** `policy_id` (`{table_id}:{policy_id}`). **One table per
-Spark job**; no `batch` `task_instance` form.
+**catalog** or **schema** scope, expand walks tables under that attachment and enqueues one crontab
+② per table — all with the **same** `policy_id` (`{table_id}:{policy_id}`), **paged** across ① picks
+(§5.5.2, default 100 ② per pick). **One table per Spark job**; no multi-table `task_instance`.
 
 **Resolution order** (first hit wins), same idea as Amoro table props + AMS defaults:
 
@@ -1183,6 +1195,7 @@ Spark job**; no `batch` `task_instance` form.
 | `task.snapshot-expiry.minIntervalMs`  | Default min interval for snapshot expiry                                                     |
 | `task.manifest-rewrite.minIntervalMs` | Default min interval for manifest rewrite                                                    |
 | `task.orphan-cleanup.minIntervalMs`   | Default min interval for orphan cleanup                                                      |
+| `expand.enqueueBatchSize`             | Max ② rows one ① expand pick may INSERT (default `100`; crontab paging cursor in ① `task_data`) |
 
 **Table-level overrides** (Iceberg / Gravitino table properties):
 

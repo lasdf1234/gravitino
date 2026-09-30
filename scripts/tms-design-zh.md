@@ -230,12 +230,13 @@ onCommit / crontab 到期
   → bump ① execution_time = now（commit）或保留 crontab 到期时间
 
 ① 被 pick（一个节点）
-  → 读 policy_meta + 挂载；列出 / 过滤表（§5.5.4）
-  → 对候选应用 expand 门控（在途 / minIntervalMs）
-  → crontab：每个未门控单元 INSERT ②（`{table_id}:{policy_id}`）
-  → commit：为该表 INSERT **一条** ② `{table_id}:{policy_id}:…`
-       （仅未门控的 policy_id，按 §5.7.1；被门控的不写入，键里 policy 更少）
-  → 按 crontab 设 ① 下次 execution_time（或等待下次 commit bump）
+  → 读 policy_meta + 挂载；若有则从 ① task_data 恢复表游标（§5.5.2）
+  → 取下一页候选（默认 **100**；`expand.enqueueBatchSize`）
+  → 对本页应用 expand 门控（在途 / minIntervalMs）
+  → crontab：本页 INSERT ≤ 页大小条 ②（`{table_id}:{policy_id}`）
+  → commit：INSERT 一条 ② `{table_id}:{policy_id}:…`（单表；不分页）
+  → 若仍有表：保存游标；① execution_time = now（下一 pick 继续）
+  → 否则：清游标；设 ① 下次 crontab（或等 commit bump）
   → **不**删除 ①（除非策略禁用 / 删除 / 替换）
 
 ② 被 pick（每行一个节点；crontab 多条 ② 可跨节点并行）
@@ -262,8 +263,8 @@ Gravitino IRC (:9001)
 Node A / Node B / Node C  — 各轮询 db-scheduler（§5.5）；N 抢 1 中
         │
         ├─ pick 到期的 ① tms-policy-expand
-        │     ├─ expand policy → INSERT N × ② tms-spark（execution_time = now）
-        │     └─ 保留 ①；设下次 crontab 到期（若有）；释放 pick
+        │     ├─ expand 一页（≤100）→ INSERT ≤ 页内条数 × ② tms-spark
+        │     └─ 保留 ①；还有页 → 立刻到期；否则下次 crontab；释放 pick
         │
         ├─ pick 到期的 ② tms-spark
         │     ├─ ensureTableImported（§5.5.4）
@@ -316,7 +317,7 @@ TMS **不**为每次 commit 持久化单独行；已提交的 `snapshot_id` 仍�
 | `TableMaintenanceRESTFeature`    | Jersey 2 `Feature`；启停 db-scheduler；注册进程内回调与 ops（§7）；bootstrap `tms` 用户（§5.6）。                                                |
 | `TableMaintenanceScheduler`      | 封装 db-scheduler；注册 **`tms-policy-expand`** 与 **`tms-spark`** 处理程序；策略创建/变更时 reconcile ①（§5.5）。                                |
 | `IcebergCommitEventHandler`      | IRC commit 回调；对已挂载 `onCommit` 类型驱动有序 commit 链（§5.4、§5.7.1）。                                                                  |
-| `PolicyExpandPipeline`           | 在 ① pick 内运行：解析挂载 → 列表 → expand 门控（`minIntervalMs` / 在途）→ INSERT 未门控 **`tms-spark`**；保留 ①（§5.5）。                              |
+| `PolicyExpandPipeline`           | 在 ① pick 内运行：分页解析 → expand 门控 → INSERT ≤ `expand.enqueueBatchSize` 条 **`tms-spark`**；未完则游标 + 立刻再到期（§5.5）。                    |
 | `MaintenanceSparkSubmitPipeline` | 在 ② pick 内运行：`ensureTableImported` → 在途复检 → `Recommender` → 以 `tms` 的 `runJob` → `table_maintenance_job` → **DELETE** ②（§5.5）。 |
 | `GravitinoTableImportService`    | 经 `TableDispatcher.loadTable` 懒 import 进 `table_meta`（§5.5.4）；按 backend 解析 owner。                                            |
 | `TmsPrincipalBootstrapListener`  | 监听 `CreateMetalakeEvent` 的 `EventListenerPlugin`；启用授权时确保 metalake 用户 `tms` + 内置角色（§5.6）。                                     |
@@ -402,18 +403,21 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
         ├─ pick ①（执行期间 heartbeat）
         ├─ PolicyExpandPipeline：
         │     ├─ 加载 policy_meta / content.schedule / 挂载
-        │     ├─ 解析目标表（commit 提示 → 单表；crontab → 挂载范围内列表）
-        │     ├─ 对候选 ensureTableImported（§5.5.4）
-        │     ├─ 对每个候选：应用 expand 门控（在途 / minIntervalMs；§5.5.3）
+        │     ├─ 解析目标表（commit 提示 → 单表；crontab → 挂载范围）
+        │     ├─ crontab：从 ① task_data 读 expand 游标（若有）；取下一**页**
+        │     │     页大小 = expand.enqueueBatchSize（默认 **100**）
+        │     ├─ 对本页候选 ensureTableImported（§5.5.4）
+        │     ├─ 对本页每个候选：expand 门控（在途 / minIntervalMs；§5.5.3）
         │     │     → 被门控者不入队
-        │     ├─ crontab 路径：每个未门控单元 INSERT 一条 ②（execution_time = now）
-        │     │     task_instance = {table_id}:{policy_id}
-        │     │     task_data.path = crontab
-        │     ├─ commit 路径：为该表 INSERT **一条** ②（execution_time = now）
+        │     ├─ crontab 路径：仅为本页未门控单元 INSERT ②（execution_time = now）
+        │     │     task_instance = {table_id}:{policy_id}；task_data.path = crontab
+        │     │     （页内可用 JDBC batch insert）
+        │     ├─ commit 路径：为已提交表 INSERT **一条** ②（不分页）
         │     │     task_instance = {table_id}:{policy_id1}:{policy_id2}:…
-        │     │       （仅未门控 policy_id，§5.7.1 顺序；有门控则段数更少）
-        │     │     task_data.path = commit
-        │     ├─ 按 crontab 设 ① 下次 execution_time（若有）；否则等下次 commit bump
+        │     │       （仅未门控 policy_id，§5.7.1）；task_data.path = commit
+        │     ├─ 若 crontab 且本页后仍有表：
+        │     │     游标写入 ① task_data；① execution_time = now
+        │     ├─ 否则：清游标；设 ① 下次 crontab（若有）；否则等 commit bump
         │     └─ 返回（① **不**删除）
         └─ 死 JVM → 错过 heartbeat → ① 可再次运行
 
@@ -466,9 +470,16 @@ db-scheduler（每个 TMS 节点轮询；每个到期实例仅一个 pick 胜出
 
 **表单元命名（crontab + commit）：** 一律先 `{table_id}`，再跟 `policy_id`。crontab **一表一行**
 （`{table_id}:{policy_id}`）。挂在 schema / catalog 上的策略（如 snapshot-expiry）expand 时仍按表各写一条 ②，
-**共用同一个 `policy_id`** —— **没有**单独的 batch 实例键。commit 一行列出全部**未门控** policy（§5.7.1
+**共用同一个 `policy_id`** —— **没有**多表合并的实例键。commit 一行列出全部**未门控** policy（§5.7.1
 顺序 `{table_id}:{p1}:{p2}:…`）；被门控的不追加，键可能更短。用 `task_data.path = commit|crontab`
 区分「单 policy 的 commit 键」与 crontab 键。
+
+**Expand 分页（crontab）：** 单次 ① pick 须保持短暂（heartbeat 租约）。**不要**在一次 pick 里对大型
+catalog 挂载做完列表 / 门控 / INSERT。每次 pick 最多入队
+`gravitino.maintenance.expand.enqueueBatchSize` 条 **②**（默认 **100**）：在 ① `task_data` 推进游标，
+INSERT 本页后，若未扫完则设 ① `execution_time = now` 继续，扫完则清游标并排下次 crontab。commit
+expand 只针对一张表，不分页。默认 **100** 是在回调耗时（import + 门控 + JDBC）与吞吐之间的折中；
+元数据很快可调大，接近 heartbeat 间隔则调小。
 
 **策略生命周期 → ①：** 创建/启用 → INSERT ①；变更 schedule → 更新 ① `execution_time` / `task_data`；禁用/删除 → DELETE ① 并 DELETE 该 `policy_id` 下未完成的 ②。
 
@@ -1037,8 +1048,9 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 **Commit 路径：** 仅 `compaction`、`manifest-rewrite`、`snapshot-expiry` 可使用 `onCommit`，且仅对已挂载类型按该顺序（§5.7.1）。**`orphan-cleanup` 仅为 crontab。**
 
 **Catalog / schema 挂载：** 策略（含 snapshot-expiry）挂在 **catalog** 或 **schema** 上时，expand
-列出挂载范围内每张表，并**一表一条** crontab ② —— 共用**同一个** `policy_id`（`{table_id}:{policy_id}`）。
-**一表一 Spark job**；没有 `batch` 形式的 `task_instance`。
+遍历挂载范围内的表并**一表一条** crontab ② —— 共用**同一个** `policy_id`（`{table_id}:{policy_id}`），
+并在多次 ① pick 间**分页**（§5.5.2，默认每 pick 100 条 ②）。**一表一 Spark job**；无多表合并的
+`task_instance`。
 
 **解析顺序**（先命中者生效），同 Amoro 表属性 + AMS 默认思路：
 
@@ -1056,6 +1068,7 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 | `task.snapshot-expiry.minIntervalMs`  | snapshot expiry 默认最小间隔                                 |
 | `task.manifest-rewrite.minIntervalMs` | manifest rewrite 默认最小间隔                                |
 | `task.orphan-cleanup.minIntervalMs`   | orphan cleanup 默认最小间隔                                  |
+| `expand.enqueueBatchSize`             | 一次 ① expand pick 最多 INSERT 的 ② 条数（默认 `100`；crontab 游标在 ① `task_data`） |
 
 **表级覆盖**（Iceberg / Gravitino 表属性）：
 
