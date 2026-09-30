@@ -47,14 +47,14 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
    的运维调用见 **§7** ops API。
 2. **IRC 进程内 commit 事件**：经 IRC 成功提交 Iceberg 后，TMS 通过**主服务注册的进程内回调 / SPI**
    收到 commit 事件（见 **§5.1.1**）。处理程序 **upsert** **`tms-table-commit`**（`task_instance = {table_id}`），
-   多节点靠唯一键合并。不在 IRC 线程 `runJob`，也不占用 expand 线程（§5.4）。
+   多节点靠唯一键合并。不在 IRC 线程 `runJob`，也不占用 expand 线程（§5.1.1）。
 3. **`scheduled_tasks` 上三类 db-scheduler 任务**：
-   - **`tms-policy-expand`（①）**：`task_instance = {policy_id}`；`task_data` 默认空。写出 **`tms-table-scheduler`**；① **保留**（§5.5）。
+   - **`tms-policy-expand`（①）**：`task_instance = {policy_id}`；`task_data` 默认空。写出 **`tms-table-scheduler`**；① **保留**（§5.4）。
    - **`tms-table-scheduler`（②）**：crontab expand 写出。实例
      `table:{table_id}:{policy_id}` 或 `batch:{batch_id}:{policy_id}`；
      `task_data = { tableIds, policyIds }`。短回调：`runJob` → INSERT job 行 → **DELETE** → return。
    - **`tms-table-commit`（③）**：commit 唤醒；`task_instance = {table_id}`；
-     `task_data = { tableIds, policyIds }`。**policy 在 pick 时决议**（§5.4）；同样短 submit（终态后可再 upsert）。
+     `task_data = { tableIds, policyIds }`。**policy 在 pick 时决议**（§5.1.1）；同样短 submit（终态后可再 upsert）。
 4. **复用现有 optimizer 执行核心**：调度器任务处理程序以**进程内方法**调用 `maintenance/optimizer` 中已有的
    `Updater` / `Recommender` / 作业提交路径，而非第二套逻辑。
 5. **作业框架兼容**：Spark 维护工作继续使用 Gravitino 作业框架。TMS 在 `table_maintenance_job` 中记录每次运行，
@@ -63,22 +63,22 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
    （create / alter / enable / disable / associate）。TMS **不**另建策略库或
    `/api/maintenance/table/policies` CRUD。
 7. **多节点安全执行**：db-scheduler pick + heartbeat 是每个 `scheduled_tasks` 实例的互斥锁（① 与 ② 皆然）
-   （§5.5、§6）。同一 `(table, policy)` 的并发 Spark 提交还由在途 `table_maintenance_job` 行门控（§6.2）。
+   （5.4、§6）。同一 `(table, policy)` 的并发 Spark 提交还由在途 `table_maintenance_job` 行门控（§6.2）。
 8. **按运行维护作业表**：Gravitino 为每个 Spark `job_run_id` 持久化一行 `table_maintenance_job`
    （Validation JSON + `finished_at`）。调度任务的入队 / 回收在 `scheduled_tasks`（上述三类）。
-9. **Crontab expand 与 commit 唤醒分离**：crontab 让 **① 到期**并写出 **`tms-table-scheduler`**（§5.5）。
+9. **Crontab expand 与 commit 唤醒分离**：crontab 让 **① 到期**并写出 **`tms-table-scheduler`**（§5.4）。
    commit **不走** expand 池：IRC upsert **`tms-table-commit`** `{table_id}`，由 **table** 池 pick 并在
-   pick 时解析 policy（§5.4、§6.2）。
+   pick 时解析 policy（5.1.1、§6.2）。
 10. **专用 TMS 执行主体**：所有自动化维护（commit 后事件入队与定时策略到期）均以内置 metalake 用户 **`tms`**
-    提交 Jobs，而非创建策略的运维人员（§5.6）。
+    提交 Jobs，而非创建策略的运维人员（§5.5）。
 11. **策略 evaluate 触发方式**：自动化维护在 `policy_version_info.content.schedule` 中配置
-    `onCommit` 和/或 `crontab`（§5.7）。同一策略一行即可同时启用两种触发；拆成两条 policy 仅因维护**类型**不同。
+    `onCommit` 和/或 `crontab`（§5.6）。同一策略一行即可同时启用两种触发；拆成两条 policy 仅因维护**类型**不同。
 12. **策略上的作业模板参数**：非认证的 Spark / job-template 参数存放在维护策略内容
     （`jobOptions` / 现有 `rewriteOptions`）。在 catalog / schema / table 挂载同类型策略；
-    **最近挂载优先**（table > schema > catalog）（§5.8）。
+    **最近挂载优先**（table > schema > catalog）（§5.7）。
 13. **通过 SecretManager 管理认证凭据**：运行 Spark Jobs 所需的密码、令牌、访问密钥**不**存放在
     `policy_meta` 或 TMS 自有凭据表。敏感值通过 Gravitino **SecretManager**（URN / provider）引用，
-    与服务器配置的可插拔 secret 方案一致。可选启用：未启用 secret 方案时，明文 / 缺失 secret 仍可用（§5.9）。
+    与服务器配置的可插拔 secret 方案一致。可选启用：未启用 secret 方案时，明文 / 缺失 secret 仍可用（§5.8）。
 
 ---
 
@@ -158,7 +158,7 @@ TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，�
 | 集群 CAS / 单飞             | 是（`scheduled_tasks` 乐观锁 / `SKIP LOCKED`）                        | 是                                  | 仅锁                                                   | 是（`QRTZ_*` 行锁）                                      |
 | 短租约 heartbeat           | 是（`last_heartbeat`）                                             | 是                                  | 不适用                                                  | 是                                                   |
 | 适合按 (table,policy) 到期任务 | 是                                                               | 是                                  | 否（仅锁）                                                | 是（更重）                                               |
-| H2 单元测试路径               | 降级：禁用调度器；测试中直接跑管线（§5.5.3）                                       | H2 支持更好                            | 是                                                    | 仅测试用 RAMJobStore                                    |
+| H2 单元测试路径               | 降级：禁用调度器；测试中直接跑管线（§5.4.3）                                       | H2 支持更好                            | 是                                                    | 仅测试用 RAMJobStore                                    |
 | 额外运维组件                  | 无                                                               | 可选 dashboard 服务                    | 无                                                    | 无                                                   |
 | 决策                      | **选定**                                                          | 否决 — 许可证 + 与 Gravitino Jobs 重叠     | 否决 — 非调度器                                            | 否决 — 约 11 张表，过重                                     |
 
@@ -185,7 +185,7 @@ TMS 需要在 `scheduled_tasks` 上对**三类**工作做集群安全调度，�
 | --- | ------------------------------- | ------------------------------------------------- |
 | 优点  | 显式                              | 复用 `policy_meta` / `policy_relation_meta`；最近挂载已定义 |
 | 缺点  | 与策略并行的挂载 + 优先级 + UI；易漂移         | 认证材料见 §4.6.2，不放在此处                                |
-| 决策  | 否决                              | **选定**（§5.8）                                      |
+| 决策  | 否决                              | **选定**（§5.7）                                      |
 
 #### 4.6.2 认证信息
 
@@ -195,7 +195,7 @@ TMS Jobs 的 IRC 客户端认证与 credential-vending 所需 secret（密码、
 | --- | --------------------- | ----------------------------------- | ------------------------------------------------ |
 | 优点  | 与 Spark 选项同一张 map     | 显式 TMS 覆盖层                          | 可插拔 provider（file / Vault / KMS）；可选；与服务器 conf 共享 |
 | 缺点  | 策略广泛可读；secret 泄漏      | SecretManager 旁第二 keystore；无 KMS 路径 | 需为 TMS 主体 bootstrap secret                       |
-| 决策  | 否决                    | 否决                                  | **选定**（§5.9）                                     |
+| 决策  | 否决                    | 否决                                  | **选定**（§5.8）                                     |
 
 ---
 
@@ -268,9 +268,9 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
 ### 5.3 用户流程
 
 1. 运维启用 TMS REST 插件（`extensionPackages`）、**同 JVM** 的 `iceberg-rest`、进程内 commit 事件（§5.1.1 / §8.2）
-   与嵌入式调度器（§8.4）。若启用授权，TMS bootstrap metalake 用户 `tms` 并授予权限（§5.6）。
+   与嵌入式调度器（§8.4）。若启用授权，TMS bootstrap metalake 用户 `tms` 并授予权限（§5.5）。
 2. 运维创建 / 启用维护策略（含非认证 `jobOptions`），并通过 metalake Policy API 挂载到 catalog / schema / table。创建/启用时 TMS **INSERT**
-   **`tms-policy-expand`** ①（该 `policy_id`）（§5.5、§6.1）。例如：
+   **`tms-policy-expand`** ①（该 `policy_id`）（5.4、§6.1）。例如：
 
    ```bash
    curl -X POST -H "Accept: application/vnd.gravitino.v1+json" \
@@ -298,47 +298,13 @@ Commit 事件**仅进程内**投递。Iceberg commit 成功后，**IRC post-comm
      http://localhost:8090/api/metalakes/test/objects/table/rest_catalog.db.t1/policies
    ```
 
-3. 引擎经 Gravitino Iceberg REST 写入。commit 成功后，**IRC 钩子** upsert **`tms-table-commit`** `{table_id}`（§5.4）。
-4. **table** 池 pick ③，resolve 后短 submit 并 **DELETE**；Job 终态可再 upsert 同一 `{table_id}`（§5.7.1）。
+3. 引擎经 Gravitino Iceberg REST 写入。commit 成功后，**IRC 钩子** upsert **`tms-table-commit`** `{table_id}`（§5.1.1）。
+4. **table** 池 pick ③，resolve 后短 submit 并 **DELETE**；Job 终态可再 upsert 同一 `{table_id}`（§5.6.1）。
    同一 `(table, policy)` 的双 submit 由 `table_maintenance_job` 在途占坑阻止。
 5. 运维在 Gravitino **Jobs** UI / API 观察运行（含来自 `table_maintenance_job` 的 Validation）。自动化 Job 的 `audit.creator` 为 **`tms`**。
    §7 ops API 可 bump ① 或在测试钩子下入队 ②。
 
-### 5.4 Commit 路径 — `tms-table-commit` 唤醒
-
-```text
-IRC commit 成功（同 JVM）— 跑在 IRC 回调线程（须短）
-  └─ IcebergCommitEventHandler
-        └─ upsert scheduled_tasks
-              task_name      = tms-table-commit
-              task_instance  = {table_id}
-              task_data      = { "tableIds":[<id>], "policyIds":[...] }
-              execution_time = now
-```
-
-**不要**使用 `expand.threads` 或 `table.threads`。**不要**把 `policy_id` 写进 `task_instance`（门控跨秒会变）。
-同表多节点 / 突发 commit 都 upsert **同一行**；主键 `(tms-table-commit, {table_id})` 即合并点。
-
-**Pick（commit 池，`commit.threads`）：** 按**当前时刻**解析 Active `onCommit` 策略，排除 orphan-cleanup /
-被门控类型，取 §5.7.1 队首，短 submit（before → runJob → INSERT → **DELETE**）。
-**`commit.threads`（默认 4）** 专用于 IRC commit 后 **是否提交 Spark** 的判断 + 短 submit，不得抢
-crontab 的 `table.threads` / `expand.threads`。Job 终态后若仍需下一类型，再 upsert 同一
-`(tms-table-commit, {table_id})`。若 pick 时全部被门控，则 DELETE 且不 submit。
-
-**Commit / 线程池**（不要和 Spark executor 线程混为一谈）：
-
-| 步骤 | 跑在哪 | 做什么 |
-| ---- | ------ | ------ |
-| Iceberg commit 后入队 ③ | **IRC 回调线程** | 只 upsert `(tms-table-commit, {table_id})` —— 必须短 |
-| 执行 ③（判断 + submit） | **`commit.threads`**（commit Scheduler；仅 ③；默认 **4**） | pick → resolve/门控 → **是否提交 Spark** → 短 submit → **DELETE** |
-| 执行 ② | **`table.threads`**（table Scheduler；仅 ②） | crontab/batch 短 submit → **DELETE** |
-| 执行 ① | **`expand.threads`**（expand Scheduler；仅 ①） | 分页 / 门控 / INSERT ② |
-| 禁止 | IRC / `expand.threads` / `table.threads` 跑 ③ | 阻塞 IRC；让 commit 抢 crontab 池 |
-
-为何三池：IRC 必须短（只入队）。commit 后 **判断 + 短 submit** 用 **`commit.threads=4`**，
-既不堵 IRC，也不饿死 crontab 的 **`table.threads`** / **`expand.threads`**。
-
-### 5.5 执行路径 — expand + table-scheduler + table-commit
+### 5.4 执行路径 — expand + table-scheduler + table-commit
 
 ```text
 Expand Scheduler（expand.threads=4）— 仅注册 tms-policy-expand
@@ -363,7 +329,7 @@ Commit Scheduler（commit.threads=4）— 仅注册 tms-table-commit
         └─（Spark 异步；终态监听写 after + finished_at）
 
 ③ tms-table-commit 到期（commit 池，`commit.threads`）：
-        ├─ pick 时 resolve/门控（§5.7.1）→ **是否提交 Spark**
+        ├─ pick 时 resolve/门控（§5.6.1）→ **是否提交 Spark**
         ├─ 同上短 submit → DELETE ③
         └─ Job 终态若还需下一类型 → 再 upsert 同一 {table_id}
 ```
@@ -371,12 +337,12 @@ Commit Scheduler（commit.threads=4）— 仅注册 tms-table-commit
 **防双提交：** 同一 `(table, policy)` 的在途 `table_maintenance_job`（`finished_at IS NULL`）占坑。
 
 **为何 ②/③ submit 后 DELETE、① 保留：** ① 是按 `policy_id` 的长期 expand 租约。②/③ 是一次性 submit；
-Spark 生命周期与防双提交在 `table_maintenance_job` + Job 监听 / 对账（§5.5.3）。
+Spark 生命周期与防双提交在 `table_maintenance_job` + Job 监听 / 对账（§5.4.3）。
 
 **线程：** commit **入队** = IRC 线程（只 upsert）。commit **判断 + 执行** = `commit.threads`（仅 ③）。
 crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 ①）。
 
-#### 5.5.1 调度状态存放位置
+#### 5.4.1 调度状态存放位置
 
 | 内容 | 存放 | 说明 |
 | ---- | ---- | ---- |
@@ -386,7 +352,7 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 | jobOptions / 密钥 | `policy_meta` / SecretManager | submit 时加载，**不**进 `task_data` |
 | 按运行 Validation | `table_maintenance_job` | 在途 + 前后 JSON |
 
-#### 5.5.2 db-scheduler 任务
+#### 5.4.2 db-scheduler 任务
 
 | 任务名 | `task_instance` | `task_data` | 线程池 |
 | ------ | --------------- | ----------- | ------ |
@@ -401,7 +367,7 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 **Expand 分页：** 每次 ① pick 最多 INSERT `expand.enqueueBatchSize`（默认 **100**）条 ②；仅分页中在 ①
 `task_data` 写 cursor，扫完清空。
 
-#### 5.5.3 H2 与测试后端
+#### 5.4.3 H2 与测试后端
 
 | Entity-store 后端        | 调度器行为                                                               |
 | ---------------------- | ------------------------------------------------------------------- |
@@ -410,17 +376,17 @@ crontab submit = `table.threads`（仅 ②）。expand = `expand.threads`（仅 
 
 **Expand 门控**（在 **① `tms-policy-expand`** 内，按候选工作单元，**INSERT ② 之前**）：
 
-1. `ensureTableImported`（§5.5.4）—— import 失败则跳过该单元。
+1. `ensureTableImported`（§5.4.4）—— import 失败则跳过该单元。
 2. 若该 `(metalake_id, table_id, policy_id)` 存在在途行（`finished_at IS NULL`）：**跳过**（不 INSERT ②）。
 3. 否则若该键的 `MAX(finished_at)` 仍在解析的 `minIntervalMs` 内（表属性 → 全局 conf → 代码默认；§8.3）：**跳过**（不 INSERT ②）。
 
 **Submit 路径**（② 在 table 池 pick，或 ③ 在 commit 池 pick）：
 
-1. `ensureTableImported`（§5.5.4）——启用 import 时须成功。
+1. `ensureTableImported`（§5.4.4）——启用 import 时须成功。
 2. 复检在途（`finished_at IS NULL`）：若存在 → **不要** `runJob`，**DELETE** 本调度行并返回（坑已被占）。
 3. **现在采样 `before_metrics`**（必须在任何改表之前）。事后无法重建。
 4. 策略触发（`Recommender`）。
-5. 叠加最近策略 `jobOptions`（§5.8）与 SecretManager 认证 / credential-vending conf（§5.9）；以主体 `tms` 的 `runJob` → `job_run_id`。
+5. 叠加最近策略 `jobOptions`（§5.7）与 SecretManager 认证 / credential-vending conf（§5.8）；以主体 `tms` 的 `runJob` → `job_run_id`。
 6. **立刻** `INSERT` `table_maintenance_job`（含 `job_run_id`、三键、`before_metrics`、`finished_at = NULL`）（§6.2）。
    此行是防双提交的**占坑声明**，不是对 Spark 的探活。
 7. **DELETE** 本 ②/③ `scheduled_tasks` 行并 **return** —— **不要**用 db-scheduler 线程陪跑 Spark。
@@ -447,7 +413,7 @@ TMS 只把 Job **终态**镜像到 `finished_at`。
 
 **`minIntervalMs` 在 ① 上判断**（crontab）；commit 在 ③ pick 时决议门控。
 
-#### 5.5.4 懒加载 Gravitino 元数据 import（`table_meta`）
+#### 5.4.4 懒加载 Gravitino 元数据 import（`table_meta`）
 
 TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tasks` 的键。该 id 在 Gravitino
 **`table_meta`** 中，而非仅在 Iceberg catalog backend。
@@ -475,7 +441,7 @@ TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tas
 **为何 `table_maintenance_job` 不存 `schema_id`：** 行粒度是 **表 + 策略**。`table_id` 经 `table_meta`
 命名空间（`metalake.catalog.schema`）已隐含 schema。仅 schema 粒度的 TMS 状态本设计不存在，故不需要 `schema_id`。
 
-### 5.6 TMS 执行主体（`tms`）
+### 5.5 TMS 执行主体（`tms`）
 
 自动化**事件**（commit 入队）与**定时**（策略到期）维护均以内置 metalake 用户 **`tms`** 提交 Spark Jobs。
 策略作者不是 Job 创建者。这使审计、权限与凭据落在服务身份上。
@@ -501,7 +467,7 @@ TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tas
 | 插件 `start()`  | 列出所有在用 metalake，逐个 reconcile `tms` 用户 + `tms_maintenance` 角色 + 授权（覆盖已有 metalake，以及集群后来才开授权的情况）。                            |
 | `onPostEvent` | 收到 `CreateMetalakeEvent` 时，仅 reconcile **新建** metalake。                                                                    |
 | `mode()`      | `ASYNC_ISOLATED` — 不阻塞 metalake 创建（与内置 job-template listener 相同）。                                                          |
-| Reconcile     | 幂等 create-or-skip：在 `user_meta` 创建用户 `tms`、角色 `tms_maintenance`、以及下文 §5.6 的 metalake 级授权。                                  |
+| Reconcile     | 幂等 create-or-skip：在 `user_meta` 创建用户 `tms`、角色 `tms_maintenance`、以及下文 5.5 的 metalake 级授权。                                  |
 
 **Bootstrap 不在此范围：** IRC commit/drop hook（§5.1.1、§6.3）、`MetalakeHookDispatcher`（创建者成员关系已由 core 处理）、扩展 `POST /api/metalakes`。
 
@@ -530,7 +496,7 @@ TMS 创建内置角色（示例名 `tms_maintenance`），在 **metalake** 上�
 
 若集群已运行 TMS 后 later 启用授权，下次插件启动会 bootstrap 缺失的 `tms` 用户与授权。
 
-### 5.7 策略 evaluate 触发（`onCommit` + `crontab`）
+### 5.6 策略 evaluate 触发（`onCommit` + `crontab`）
 
 自动化 TMS **以 policy 为门控**：表上（直接或经 schema / catalog 继承）若无 Active、已启用的维护策略，
 commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除定义阈值与作业参数外，还定义**何时 evaluate**。
@@ -540,7 +506,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 | 触发方式       | 含义                          | 典型场景                                |
 | ---------- | --------------------------- | ----------------------------------- |
-| `onCommit` | IRC upsert `tms-table-commit`；pick 时按 §5.7.1 有序驱动类型 | 写多表；允许 `onCommit` 的类型               |
+| `onCommit` | IRC upsert `tms-table-commit`；pick 时按 §5.6.1 有序驱动类型 | 写多表；允许 `onCommit` 的类型               |
 | `crontab`  | 按 crontab 周期性 expand        | 定时维护；orphan-cleanup **必须**用 crontab |
 
 仅当维护**类型**不同（如 compaction + snapshot-expiry）时才用**两条** policy，不是因为两种触发方式。
@@ -551,7 +517,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 **`orphan-cleanup` 不得使用 `onCommit`。** 策略 create/alter 对 orphan-cleanup 拒绝
 `schedule.onCommit = true`（或忽略之）。孤儿文件清理**仅为 crontab**（或 ops API）。
 
-#### 5.7.1 Commit 驱动的类型顺序
+#### 5.6.1 Commit 驱动的类型顺序
 
 对给定表的 **commit 路径**，TMS **不会**并行跑所有已挂载的 `onCommit` 类型。它先收集该表 Active、已挂载、
 允许 commit 的类型，再**仅对实际挂载的类型**按以下**固定**顺序执行：
@@ -564,7 +530,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 **未**挂载（或未开 `onCommit`）的类型**跳过** —— 链继续到列表中下一个已挂载类型。不要重排已挂载类型。不要插入未挂载类型。
 
-**串行：** `tms-table-commit` 每表一行 `{table_id}`。pick 时取 §5.7.1 队首并短 submit；该 Job **终态**后
+**串行：** `tms-table-commit` 每表一行 `{table_id}`。pick 时取 5.6.1 队首并短 submit；该 Job **终态**后
 若仍需下一类型再 upsert 同一 `{table_id}`。前一 policy 仍 `finished_at IS NULL` 时不要 submit 下一个。
 
 **Crontab 路径**仍按策略各自 expand（每个 `policy_id` 一条 ①），**不**要求这种跨类型顺序，除非产品后续统一定时跑法。
@@ -588,7 +554,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 | 字段                  | 前端             | TMS 运行时                                           |
 | ------------------- | -------------- | ------------------------------------------------- |
-| `schedule.onCommit` | 「commit 后运行」开关 | IRC upsert ③；table 池按 §5.7.1 有序驱动（§5.4）              |
+| `schedule.onCommit` | 「commit 后运行」开关 | IRC upsert ③；table 池按 §5.6.1 有序驱动（§5.1.1）              |
 | `schedule.crontab`  | Crontab 选择器    | expand 后刷新 ① 的下次 `scheduled_tasks.execution_time` |
 | `schedule.timezone` | crontab 时区     | 解析 crontab 计算下次到期时间                               |
 
@@ -597,7 +563,7 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 - 自动化维护应至少设置 `onCommit` 或 `crontab` 之一；可同时设置（同一 ① `task_instance = {policy_id}`），
   但 **orphan-cleanup** 仅允许 **`crontab`**。
 - 仅 `crontab` — 常见于 orphan-cleanup 与低写入表。
-- `onCommit` — commit 路径对已挂载的 compaction / manifest-rewrite / snapshot-expiry 应用 §5.7.1 顺序；
+- `onCommit` — commit 路径对已挂载的 compaction / manifest-rewrite / snapshot-expiry 应用 5.6.1 顺序；
   各步仍可因门控或 `Recommender` 跳过 submit。
 - 运维 API（§7）为人工触发，不使用 `schedule`。
 
@@ -626,7 +592,7 @@ table_maintenance_job + minIntervalMs →  在途 + expand 冷却（INSERT ② �
 `execution_time = 02:00` 在 ① 上是 **expand 到期时间**。Spark 单元 ② 在 expand 写出后到期（通常立刻）。
 ② **不是**再盖一个墙钟 02:00:00；与 ① 不同，每条 ② 在短 submit 路径后即 **DELETE**，Spark 异步继续。
 
-### 5.8 策略上的作业模板参数（`policy_meta`）
+### 5.7 策略上的作业模板参数（`policy_meta`）
 
 `job_run_meta.runtime_job_template` 是**运行快照**（该 Job 实际所用）。自动化维护的默认参数**不**存那里。
 
@@ -651,14 +617,14 @@ Submit 时：
 ```text
 job 模板基线 configs
   叠加最近挂载策略 jobOptions（仅非认证）
-  叠加 SecretManager 解析的认证 + credential-vending 键（§5.9）
+  叠加 SecretManager 解析的认证 + credential-vending 键（§5.8）
   → 以 tms 的 JobSubmitter.runJob(..., jobConfig)
 ```
 
 策略 create / alter **拒绝** `jobOptions` / `rewriteOptions` 中形似凭据的键（与属性掩码同名规则：`password`、`secret`、`token`、`access-key` 等）。
-这些键属于 SecretManager（§5.9），需要时以 URN 引用。
+这些键属于 SecretManager（§5.8），需要时以 URN 引用。
 
-### 5.9 Credential vending 与 IRC 认证（SecretManager）
+### 5.8 Credential vending 与 IRC 认证（SecretManager）
 
 自动化 TMS Jobs 以 Spark catalog 形式访问 Gravitino **Iceberg REST**。两个正交关注点：
 
@@ -704,7 +670,7 @@ job 模板 / submitter 根据 `jobConfig` 中的 catalog 名应用。
 | 属性                                                  | 必填          | SecretManager? | 说明                                                               |
 | --------------------------------------------------- | ----------- | -------------- | ---------------------------------------------------------------- |
 | *（省略 `rest.auth.type`）* 或 `rest.auth.type` = `none` | 否           | 否              | 无用户名 / 密码 / 令牌。                                                  |
-| §5.9 Credential vending 中的属性                        | 若使用 vending | 否（仅 header）    | 存储代发时仍设 `header.X-Iceberg-Access-Delegation=vended-credentials`。 |
+| 5.8 Credential vending 中的属性                        | 若使用 vending | 否（仅 header）    | 存储代发时仍设 `header.X-Iceberg-Access-Delegation=vended-credentials`。 |
 
 IRC 认证本身无需 SecretManager 条目。
 
@@ -717,7 +683,7 @@ IRC 认证本身无需 SecretManager 条目。
 | `rest.auth.type`             | 是           | 否              | `basic`。                                                   |
 | `rest.auth.basic.username`   | 是           | 否              | 自动化 TMS 运行：`tms`（或配置的 TMS 用户名）。                            |
 | `rest.auth.basic.password`   | 是           | **是**          | 该用户密码。存为 SecretManager secret；Job 配置仅在 submit 时持 URN 或解析值。 |
-| §5.9 Credential vending 中的属性 | 若使用 vending | —              | 同父节。                                                       |
+| 5.8 Credential vending 中的属性 | 若使用 vending | —              | 同父节。                                                       |
 
 #### 认证：oauth
 
@@ -730,7 +696,7 @@ IRC 认证本身无需 SecretManager 条目。
 | `oauth2-server-uri`          | client-credential 路径              | 否              | 令牌端点 URI。                                              |
 | `credential`                 | client-credential 路径              | **是**          | OAuth client id 与 secret，通常 `client_id:client_secret`。 |
 | `scope`                      | 推荐                                | 否              | OAuth scope（Iceberg 可默认 `catalog`）。                    |
-| §5.9 Credential vending 中的属性 | 若使用 vending                       | —              | 同父节。                                                   |
+| 5.8 Credential vending 中的属性 | 若使用 vending                       | —              | 同父节。                                                   |
 
 `credential` 优先 client-credential + SecretManager，避免 TMS 在策略或模板中嵌入长期 bearer token。
 
@@ -744,7 +710,7 @@ Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job �
 | Kerberos principal                                                           | 是                                                | 否                           | TMS Jobs 使用的服务主体（如 `tms/_HOST@REALM`）。                     |
 | Keytab 路径或 keytab 材料                                                         | 是                                                | keytab 字节/路径 secret 时 **是** | Keytab 不得放在 `policy_meta`。经 SecretManager 或策略内容外预置的主机路径引用。 |
 | `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | 按集群需要                                            | 否                           | Spark driver/executor 的集群 Kerberos 接线。                     |
-| §5.9 Credential vending 中的属性                                                 | 若使用 vending                                      | —                           | 同父节。Kerberos 认证 IRC；启用时存储访问仍用代发凭据。                         |
+| 5.8 Credential vending 中的属性                                                 | 若使用 vending                                      | —                           | 同父节。Kerberos 认证 IRC；启用时存储访问仍用代发凭据。                         |
 
 #### Submit 时解析
 
@@ -767,28 +733,28 @@ Gravitino authenticators 含 `kerberos` 时的 Kerberos / SPNEGO。Spark / Job �
 写入 `scheduled_tasks` **不会**让所有节点都执行；当 `execution_time` 到期时，节点**竞争**，**只有一个**
 pick 给定实例（CAS + heartbeat）。
 
-**入队 ①：** 策略创建/启用 INSERT；crontab 设下次 `execution_time`（§5.5、§5.7）。
+**入队 ①：** 策略创建/启用 INSERT；crontab 设下次 `execution_time`（5.4、5.6）。
 
-**入队 ②：** 仅由成功的 ① expand pick 写入（§5.5）。
+**入队 ②：** 仅由成功的 ① expand pick 写入（§5.4）。
 
-**入队 ③：** IRC upsert `(tms-table-commit, {table_id})`（§5.4）。
+**入队 ③：** IRC upsert `(tms-table-commit, {table_id})`（§5.1.1）。
 
 **Expand 互斥：** ① 上的 pick（`expand.threads`）（§6.1）。
 
 **Table 互斥：** 每条 ② 上的 pick（`table.threads`）；短 submit 后 **DELETE**。
 **Commit 互斥：** 每条 ③ 上的 pick（`commit.threads`）；判断/submit 后 **DELETE**。
-防双提交：在途 `table_maintenance_job` + `minIntervalMs`（§5.5.3、§6.2）。
+防双提交：在途 `table_maintenance_job` + `minIntervalMs`（5.4.3、§6.2）。
 
 **死 worker / 卡住的 Spark：** missed heartbeat 只释放**卡住的短回调**（回调本应很短）。
-长 Spark / 丢失的终态更新由对账修理 `finished_at IS NULL`（§5.5.3）—— **只**写 `finished_at`，从不补采 Validation 指标。
+长 Spark / 丢失的终态更新由对账修理 `finished_at IS NULL`（§5.4.3）—— **只**写 `finished_at`，从不补采 Validation 指标。
 
 | 表                                      | 角色                                                    |
 | -------------------------------------- | ----------------------------------------------------- |
-| `policy_meta` / `policy_relation_meta` | **expand 什么**、`schedule`（§5.7）与非认证 `jobOptions`（§5.8） |
+| `policy_meta` / `policy_relation_meta` | **expand 什么**、`schedule`（§5.6）与非认证 `jobOptions`（§5.7） |
 | `scheduled_tasks`                      | ① 长期 expand + ②/③ 一次性（短 submit 后 DELETE）            |
 | `table_maintenance_job`                | 按运行 Validation JSON + submit 门控（§6.2）                 |
-| SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.9）；无 `tms_credential` 表      |
-| `user_meta`                            | 启用授权时的内置 `tms` 用户（§5.6）                               |
+| SecretManager / SecretProvider         | `tms` 的 IRC 认证 secret（§5.8）；无 `tms_credential` 表      |
+| `user_meta`                            | 启用授权时的内置 `tms` 用户（§5.5）                               |
 
 认证材料用 SecretManager。Job-template **参数**留在策略挂载上。
 
@@ -831,7 +797,7 @@ Node A / B / C
 | ---------------- | -------------------------- | ------------------------------------------------- |
 | `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`；主键                      |
 | `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                       |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（§5.5.4 import 后）               |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` 代理 id（5.4.4 import 后）               |
 | `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                           |
 | `before_metrics` | `MEDIUMTEXT NULL`          | 改表**前**采样的 JSON；可延迟到终态才落库                         |
 | `after_metrics`  | `MEDIUMTEXT NULL`          | Job 终态后的 JSON；待处理时为 null                          |
@@ -988,11 +954,11 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 | `manifest-rewrite` | rewrite manifest                           | `86400000`（1 天）      |
 | `orphan-cleanup`   | 孤儿文件清理                                     | `604800000`（7 天）     |
 
-**Commit 路径：** 仅 `compaction`、`manifest-rewrite`、`snapshot-expiry` 可使用 `onCommit`，且仅对已挂载类型按该顺序（§5.7.1）。**`orphan-cleanup` 仅为 crontab。**
+**Commit 路径：** 仅 `compaction`、`manifest-rewrite`、`snapshot-expiry` 可使用 `onCommit`，且仅对已挂载类型按该顺序（§5.6.1）。**`orphan-cleanup` 仅为 crontab。**
 
 **Catalog / schema 挂载：** 策略（含 snapshot-expiry）挂在 **catalog** 或 **schema** 上时，expand
 遍历挂载范围内的表并**一表一条** crontab ② —— 共用**同一个** `policy_id`（`{table_id}:{policy_id}`），
-并在多次 ① pick 间**分页**（§5.5.2，默认每 pick 100 条 ②）。**一表一 Spark job**；无多表合并的
+并在多次 ① pick 间**分页**（5.4.2，默认每 pick 100 条 ②）。**一表一 Spark job**；无多表合并的
 `task_instance`。
 
 **解析顺序**（先命中者生效），同 Amoro 表属性 + AMS 默认思路：
@@ -1023,7 +989,7 @@ TMS 识别四种维护**任务类型**（与产品 Compact 策略面对齐）：
 | `maintenance.orphan-cleanup.minIntervalMs`   | 该表 orphan cleanup 最小间隔   |
 
 每次 **① expand** 对候选工作单元，用解析的 `minIntervalMs` 检查该 `(table_id, policy_id)` 的
-`MAX(finished_at)`（§5.5.3）。在途行（`finished_at IS NULL`）也跳过 INSERT ②（② 在 `runJob` 前再复检）。
+`MAX(finished_at)`（§5.4.3）。在途行（`finished_at IS NULL`）也跳过 INSERT ②（② 在 `runJob` 前再复检）。
 策略内容仍拥有**触发阈值**（如 MSE）；间隔仅限制 ① 跑起来后多久可再入队（调度器 pick 或 ops API）。
 
 表示例覆盖：
@@ -1044,7 +1010,7 @@ db-scheduler **每个** `Scheduler` 一个线程池。TMS 在同一张 `schedule
 | Table | 仅 `tms-table-scheduler` | `8` | `…scheduler.table.threads` |
 | Commit | 仅 `tms-table-commit` | `4` | `…scheduler.commit.threads` |
 
-**Commit 线程：** 见 §5.4。IRC 只 **upsert** ③（必须短，不进任一 db-scheduler 池）。
+**Commit 线程：** 见 5.1.1。IRC 只 **upsert** ③（必须短，不进任一 db-scheduler 池）。
 ③ 的 **是否提交 Spark + 短 submit** 只在 **`commit.threads=4`** —— 不得用 IRC、`expand.threads`
 或 `table.threads`。
 
@@ -1075,11 +1041,11 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 | --- | --------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | 1   | 加载进程内插件                     | `TableMaintenanceRESTFeature`；启停 db-scheduler；`TmsPrincipalBootstrapListener`。                                  |
 | 2   | 内部 expand + spark-submit 管线 | `PolicyExpandPipeline` + `MaintenanceSparkSubmitPipeline`；单元测试。                                                 |
-| 3   | db-scheduler 三类任务 + 三池     | ①+②+③；expand=4 / table=8 / commit=4；迁移；heartbeat（§5.5、§8.4）。                                                          |
-| 4   | 进程内 IRC 钩子（入队路径）            | upsert ③（§5.4）；`table_maintenance_job` 按运行行（§6.2）。                                                                |
+| 3   | db-scheduler 三类任务 + 三池     | ①+②+③；expand=4 / table=8 / commit=4；迁移；heartbeat（5.4、§8.4）。                                                          |
+| 4   | 进程内 IRC 钩子（入队路径）            | upsert ③（§5.1.1）；`table_maintenance_job` 按运行行（§6.2）。                                                                |
 | 5   | 加固                          | 服务指标、优雅关闭、H2 路径测试、用户文档。                                                                                         |
 | 6   | Optimizer CLI 替代 API        | §7 ops 资源。与 `gravitino-optimizer` 相同命令。                                                                         |
-| 7   | TMS 主体 + SecretManager 认证   | `tms` 用户/角色（§5.6）；credential vending + none/basic/oauth/kerberos（§5.9）；策略 `schedule`（§5.7）+ `jobOptions`（§5.8）。 |
+| 7   | TMS 主体 + SecretManager 认证   | `tms` 用户/角色（§5.5）；credential vending + none/basic/oauth/kerberos（§5.8）；策略 `schedule`（§5.6）+ `jobOptions`（§5.7）。 |
 
 #### 阶段 1 检查清单
 
@@ -1090,15 +1056,15 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 单元测试：Feature 注册回调且不暴露 commit 或 health 资源。
 - [ ] `TmsPrincipalBootstrapListener`（`EventListenerPlugin`）：禁用授权时跳过 `user_meta`；启用时注册到
       `eventListenerManager`，插件 `start()` reconcile 所有 metalake，并在 `CreateMetalakeEvent` 时 reconcile
-      （`ASYNC_ISOLATED`）（§5.6）。
+      （`ASYNC_ISOLATED`）（§5.5）。
 
 #### 阶段 2 检查清单
 
-- [ ] 实现 `GravitinoTableImportService`（`TableDispatcher.loadTable` → `table_meta`；§5.5.4）。
+- [ ] 实现 `GravitinoTableImportService`（`TableDispatcher.loadTable` → `table_meta`；5.4.4）。
 - [ ] import 后按 backend 解析 owner；永不将 owner 默认设为 `tms`。
 - [ ] 实现 `PolicyExpandPipeline`（挂载 → INSERT `tms-table-scheduler` ②；保留 ①）。
 - [ ] 实现 `MaintenanceSparkSubmitPipeline` 调用 `Recommender.submitForStrategyName`。
-- [ ] 门控：① 上在途 / 最小间隔；②/③ 短 submit 后 DELETE；Job 监听 + 对账（§5.5.3）。
+- [ ] 门控：① 上在途 / 最小间隔；②/③ 短 submit 后 DELETE；Job 监听 + 对账（§5.4.3）。
 - [ ] 经现有 Policy / `StrategyProvider` 解析 Active 挂载策略（无新策略库）。
 - [ ] 为 skip / noop / submit 结果添加单元测试。
 
@@ -1107,19 +1073,19 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 添加 `TableMaintenanceScheduler`：expand（4）+ table（8）+ commit（4）三池（§8.4）。
 - [ ] 为 `scheduled_tasks` 添加 entity-store 迁移（MySQL / PostgreSQL）。
 - [ ] 从关系 entity store 接线 `DataSource`；遵守 §8.4 heartbeat 键。
-- [ ] H2 后端：调度器禁用；测试中直接调用管线（§5.5.3）。
+- [ ] H2 后端：调度器禁用；测试中直接调用管线（§5.4.3）。
 - [ ] 集成测试：两节点；仅一个 pick 胜出；死 JVM 经错过 heartbeat 释放租约。
 
 #### 阶段 4 检查清单
 
 - [ ] 添加 `IcebergCommitEventHandler` 与主服务注册进程内回调 / SPI（§5.1.1 / §8.2）。
 - [ ] 为 **`table_maintenance_job`** 添加 EntityStore 迁移（§6.2）。
-- [ ] 策略创建/启用时 INSERT **`tms-policy-expand`** ①（`policy_id`）（§5.5.2）。
+- [ ] 策略创建/启用时 INSERT **`tms-policy-expand`** ①（`policy_id`）（§5.4.2）。
 - [ ] IRC post-commit **upsert** `tms-table-commit` `{table_id}`；拒绝 orphan-cleanup 的 `onCommit`；**不**在 IRC 线程 `runJob`（判断/执行走 `commit.threads`）。
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
 - [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
-- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账仅跟 Job 终态/缺失（§5.5.3）。
+- [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账仅跟 Job 终态/缺失（§5.4.3）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
@@ -1142,7 +1108,7 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] 为 TMS IRC 认证 secret 接线 **SecretManager**（无 `tms_credential` 表）。可选：未启用 SecretManager 时明文 / 缺失 secret 仍可用。
 - [ ] 策略 create/alter 拒绝 `jobOptions` / `rewriteOptions` 中形似凭据的键。
 - [ ] Submit 路径：最近策略 `jobOptions`（table > schema > catalog）叠加模板基线；启用时加 credential-vending header；
-      解析 **none / basic / oauth / kerberos** 认证（§5.9）；以 `tms` 的 `runJob`。
+      解析 **none / basic / oauth / kerberos** 认证（§5.8）；以 `tms` 的 `runJob`。
 - [ ] 测试：关闭授权跳过用户插入；开启授权授予 `USE_CATALOG`、`USE_SCHEMA`、`PROBE_TABLE_LIKE`、`MODIFY_TABLE`、
       `VIEW_POLICY`、`USE_JOB_TEMPLATE`、`RUN_JOB`。
 - [ ] 测试：表挂载覆盖 catalog `jobOptions`；认证 secret 永不持久化到 `policy_meta`；`runtime_job_template` 脱敏密码 / 令牌 / keytab。
@@ -1153,19 +1119,19 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 | ---------- | ----------------------------------------------------------------------------------------------------------- |
 | 部署         | 经 `gravitino.server.rest.extensionPackages` 启用；IRC 同 JVM 同机。Ops API 在 **8090**（§7）。                         |
 | Classpath  | TMS 插件在主服务器 classpath；**不是** aux 隔离监听。                                                                      |
-| 触发         | Commit：upsert ③ + pick 时 §5.7.1 有序；crontab：按策略 ①；orphan-cleanup 仅 crontab。                                      |
-| 调度         | **db-scheduler** 三池 expand/table/commit；②/③ 短 submit 后 DELETE；占坑在 job 表（§5.5、§8.4）。                    |
+| 触发         | Commit：upsert ③ + pick 时 5.6.1 有序；crontab：按策略 ①；orphan-cleanup 仅 crontab。                                      |
+| 调度         | **db-scheduler** 三池 expand/table/commit；②/③ 短 submit 后 DELETE；占坑在 job 表（5.4、§8.4）。                    |
 | 作业记录       | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                     |
-| Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.5.4）；非 Iceberg `registerTable`。                      |
+| Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.4.4）；非 Iceberg `registerTable`。                      |
 | Ops API    | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                      |
-| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账只补 `finished_at`（§5.5.3）。                                    |
+| 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账只补 `finished_at`（§5.4.3）。                                    |
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
 | Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期实例 N 抢 1；②/③ pick+heartbeat 防双提交；死节点靠 `table_maintenance_job` 备份门控。                                    |
-| 策略         | 复用 metalake Policy API + `policy_meta`；`schedule`（§5.7）+ `jobOptions`；最近挂载优先（§5.8）。                         |
+| 策略         | 复用 metalake Policy API + `policy_meta`；`schedule`（§5.6）+ `jobOptions`；最近挂载优先（§5.7）。                         |
 | Job 边界     | evaluate 到期时间 ≠ Spark 墙钟启动；Validation 指标在 `table_maintenance_job`（§6.2）。                                    |
-| 主体         | 自动化 Jobs 以 `tms` 运行；启用授权时由 `TmsPrincipalBootstrapListener` 在插件启动 + `CreateMetalakeEvent` 时 bootstrap（§5.6）。 |
-| 凭据         | 认证经 SecretManager（none/basic/oauth/kerberos）+ credential vending（§5.9）；不在策略 / 不在 `tms_credential`。          |
+| 主体         | 自动化 Jobs 以 `tms` 运行；启用授权时由 `TmsPrincipalBootstrapListener` 在插件启动 + `CreateMetalakeEvent` 时 bootstrap（§5.5）。 |
+| 凭据         | 认证经 SecretManager（none/basic/oauth/kerberos）+ credential vending（§5.8）；不在策略 / 不在 `tms_credential`。          |
 | 安全         | Ops API 须表 WRITE。TMS 角色为 list + 表写 + run job 最小权限。无 commit-event 或 health 端点。                               |
 | 许可证        | db-scheduler 为 **Apache 2.0**；无 LGPL 调度依赖。                                                                  |
 
