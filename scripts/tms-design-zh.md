@@ -408,21 +408,26 @@ TMS 把 Job **终态**镜像到 `finished_at`。若 Job **实体不存在**，�
 
 #### 5.4.3 懒加载 Gravitino 元数据 import（`table_meta`）
 
-TMS 需要稳定的 `table_id` 作为 `table_maintenance_job` 与 `scheduled_tasks` 的键。该 id 在 Gravitino
-**`table_meta`** 中，而非仅在 Iceberg catalog backend。
+TMS 需要稳定的 `schema_id` / `table_id` 作为 `table_maintenance_job` 与 `scheduled_tasks` 的键。这些 id
+在 Gravitino **`schema_meta`** / **`table_meta`** 中，而非仅在 Iceberg catalog backend。
+
+**时机：** 仅在即将触发 / 执行 maintenance 时（① expand 在 INSERT ② 之前，或 ②/③ submit 在 `runJob`
+之前）。若目标 schema 或 table 在 Gravitino 元数据里**还没有对应 id**，由 `ensureTableImported` 当场补齐
+—— 不做单独后台扫描，也不要求 IRC upsert ③ 之前必须先 import。
 
 这是 **Gravitino import**，不是 Iceberg REST 的 `registerTable`。复用 core
-`TableDispatcher.loadTable(NameIdentifier)` —— 从 catalog backend 加载，若尚未 import 则写入
-**`table_meta`**（并先 import 父 schema 到 `schema_meta`）。
+`TableDispatcher.loadTable(NameIdentifier)` —— 从 catalog backend 加载；若缺失则写入 **`table_meta`**
+（父 schema 的 **`schema_meta` id** 也缺失时一并先 import）。
 
-| 组件         | 说明                                                                                               |
-| ---------- | ------------------------------------------------------------------------------------------------ |
-| API        | 对 `metalake.catalog.schema.table` 调用 `TableDispatcher.loadTable`（与 IRC `importTableEntity` 同路径）。 |
-| **不是**     | Iceberg REST `registerTable`、新建 TMS 表、或直接 `INSERT` `table_meta`。                                 |
-| 时机（commit） | 可选：upsert ③ 前 import 已提交表，或在后续 ① expand / ③ pick 时再 import。                                      |
-| 时机（expand） | 展开 catalog / schema 挂载时：**从 catalog backend list tables**，对每张候选表 import 后再 INSERT ②。             |
-| 幂等         | `table_meta` 已有该表时，`loadTable` 不再重复 import。                                                      |
-| 失败         | 记录日志并**跳过**该表的调度 / submit；无 `table_id` 时不写 `table_maintenance_job`。                              |
+| 组件     | 说明                                                                                              |
+| ------ | ----------------------------------------------------------------------------------------------- |
+| API    | 对 `metalake.catalog.schema.table` 调用 `TableDispatcher.loadTable`（与 IRC `importTableEntity` 同路径）。 |
+| **不是** | Iceberg REST `registerTable`、新建 TMS 表、或直接 `INSERT` `table_meta`。                                |
+| 触发条件   | maintenance 路径需要 `table_id`（及父 `schema_id`），但 Gravitino 元数据里尚无对应 id。                            |
+| 调用点    | ① expand 的 `ensureTableImported`（INSERT ② 前）；②/③ submit 的 `ensureTableImported`（`runJob` 前）。     |
+| expand | catalog / schema 挂载：**从 catalog backend list tables**，对每张候选表 `ensureTableImported`。              |
+| 幂等     | `schema_meta` / `table_meta` 已有 id 时，`loadTable` 不再重复 import。                                    |
+| 失败     | 记录日志并**跳过**该单元的调度 / submit；无 `table_id` 时不写 `table_maintenance_job`。                           |
 
 **Import 后的 owner**（可选，与 `table_meta` 行写入分开）：
 
