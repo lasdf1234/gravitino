@@ -469,7 +469,7 @@ TMS 需要稳定的 `schema_id` / `table_id` 作为 `table_maintenance_job` 与 
 | `mode()`      | `ASYNC_ISOLATED` — 不阻塞 metalake 创建（与内置 job-template listener 相同）。                                                          |
 | Reconcile     | 幂等 create-or-skip：在 `user_meta` 创建用户 `tms`、角色 `tms_maintenance`、以及下文 5.5 的 metalake 级授权。                                  |
 
-**Bootstrap 不在此范围：** IRC commit/drop hook（§5.1.1、§6.3）、`MetalakeHookDispatcher`（创建者成员关系已由 core 处理）、扩展 `POST /api/metalakes`。
+**Bootstrap 不在此范围：** IRC commit hook（§5.1.1）、`MetalakeHookDispatcher`（创建者成员关系已由 core 处理）、扩展 `POST /api/metalakes`。
 
 #### 内置角色与权限（启用授权时）
 
@@ -849,17 +849,6 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
 **指标 JSON：** `before_metrics` / `after_metrics` 为 Jobs Validation 用的不透明 UTF-8 JSON。
 具体键与自动通过/失败规则 **产品未定**，本设计不锁定。
 
-### 6.3 表删除生命周期
-
-Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`：
-
-1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
-2. `DELETE` 该表相关未完成 **`tms-table-scheduler`** ②（`table:{table_id}:…`）以及 **`tms-table-commit`** ③ `{table_id}`。
-3. 按 `table_id` `DELETE` `table_maintenance_job`。
-4. **不**删除 **`tms-policy-expand`** ①（策略级）；该 policy 下其余表仍可在下次到期 expand。在途 Spark job **不**由此钩子取消。
-
-**表重命名不在范围。**
-
 ---
 
 ## 7. Optimizer CLI 替代 API
@@ -1060,9 +1049,8 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 - [ ] IRC post-commit **upsert** `tms-table-commit` `{table_id}`；拒绝 orphan-cleanup 的 `onCommit`；**不**在 IRC 线程 `runJob`（判断/执行走 `commit.threads`）。
 - [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
-- [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
 - [ ] `runJob` 前采 `before_metrics`；INSERT 后立刻 DELETE ②/③；监听写 `after`+`finished_at`；对账：终态补 `finished_at`；Job 缺失则 DELETE 占坑（§5.4.2）。
-- [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
+- [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
 #### 阶段 5 检查清单
@@ -1102,7 +1090,6 @@ JDBC 连接池 ≥ `expand.threads + table.threads + commit.threads`（再给 RE
 | Ops API    | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                      |
 | 管线         | ①→INSERT ②；②/③ 短 submit；监听写 after；对账：终态补 `finished_at`；Job 缺失则 DELETE 占坑（§5.4.2）。              |
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
-| Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期实例 N 抢 1；②/③ pick+heartbeat 防双提交；死节点靠 `table_maintenance_job` 备份门控。                                    |
 | 策略         | 复用 metalake Policy API；`schedule` + `jobOptions` 在 `policy_version_info.content`（§5.6、§5.7）；最近挂载优先。              |
 | Job 边界     | evaluate 到期时间 ≠ Spark 墙钟启动；Validation 指标在 `table_maintenance_job`（§6.2）。                                    |

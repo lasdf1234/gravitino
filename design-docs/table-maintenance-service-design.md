@@ -583,7 +583,7 @@ Use an **`EventListenerPlugin`**, not an IRC hook and **not** a change to the me
 | `mode()`         | `ASYNC_ISOLATED` — do not block metalake creation (same as built-in job-template listener).                                                                                                          |
 | Reconcile        | Idempotent create-or-skip: user `tms` in `user_meta`, role `tms_maintenance`, metalake-level grants in 5.5 below.                                                                                   |
 
-**Out of scope for bootstrap:** IRC commit/drop hooks (§5.1.1, §6.3), `MetalakeHookDispatcher`
+**Out of scope for bootstrap:** IRC commit hooks (§5.1.1), `MetalakeHookDispatcher`
 (creator membership is already handled in core), and extending `POST /api/metalakes`.
 
 #### Built-in role and privileges (authorization enabled)
@@ -1008,19 +1008,6 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
 **Metrics JSON:** `before_metrics` / `after_metrics` are opaque UTF-8 JSON blobs for Jobs
 Validation. Exact keys and auto pass/fail rules are **product TBD** — not fixed in this design.
 
-### 6.3 Table drop lifecycle
-
-After a successful Iceberg **table drop**, IRC invokes an in-process `IcebergTableLifecycleHook`:
-
-1. Resolve dropped `catalog.schema.table` → `table_id` when present in `table_meta`.
-2. `DELETE` outstanding **`tms-table-scheduler`** rows for that table (`table:{table_id}:…`) and
-   **`tms-table-commit`** `{table_id}`.
-3. `DELETE` from `table_maintenance_job` for `table_id`.
-4. Do **not** delete **`tms-policy-expand`** ① (policy-scoped); remaining tables under the policy
-   still expand on the next due. In-flight Spark jobs are **not** cancelled by this hook.
-
-**Table rename is out of scope.**
-
 ---
 
 ## 7. Optimizer CLI replacement APIs
@@ -1246,11 +1233,10 @@ SecretManager, and policy `jobOptions`.
 - [ ] Tests: attached subset runs in fixed order; missing types skipped; terminal re-upserts ③;
       concurrent commits coalesce on one row.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
-- [ ] Wire IRC **drop** hook to delete outstanding ②+③ + `table_maintenance_job` rows (§6.3).
 - [ ] Sample `before_metrics` before `runJob`; INSERT job row; DELETE ②/③ immediately; Job listener
       writes `after_metrics` + `finished_at`; reconcile: terminal → `finished_at` only; missing Job → **DELETE** occupancy (§5.4.2).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on
-      `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve; drop cleans rows.
+      `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 5 checklist
@@ -1293,7 +1279,6 @@ SecretManager, and policy `jobOptions`.
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
 | Pipeline     | ①→INSERT ②; ②/③ short submit; listener writes after; reconcile: terminal → `finished_at`; missing Job → DELETE occupancy (§5.4.2).       |
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
-| Drop         | Drop hook deletes outstanding ②+③ + `table_maintenance_job` rows (§6.3). Rename out of scope.                                              |
 | Multi-node   | N compete, one pick; ②/③ pick+heartbeat anti-double-submit; dead-worker gated by `table_maintenance_job`.                               |
 | Policy       | Reuses metalake Policy APIs; create inserts ①; `schedule` + `jobOptions` in `policy_version_info.content` (§5.6, §5.7).                   |
 | Job boundary | Expand due ≠ Spark wall-clock; Spark in Jobs; Validation on `table_maintenance_job` (§6.2).                                                |
