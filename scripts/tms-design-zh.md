@@ -376,7 +376,7 @@ IRC commit 成功（同 JVM）
               ├─ 解析该表 Active onCommit 策略
               └─ 对每个 policy_id P：
                     bump tms-policy-expand ①
-                    task_instance = {metalake_id}:{P}
+                    task_instance = {policy_id}
                     execution_time = now
                     task_data 可选：已提交 catalog.schema.table / table_id
 ```
@@ -592,7 +592,7 @@ submit 后多久可再次 submit（查该 `(table_id, policy_id)` 的 `MAX(finis
 
 **规则：**
 
-- 自动化维护应至少设置 `onCommit` 或 `crontab` 之一；可同时设置（同一 `task_instance = {metalake_id}:{table_id}:{policy_id}`）。
+- 自动化维护应至少设置 `onCommit` 或 `crontab` 之一；可同时设置（同一 ① `task_instance = {policy_id}`）。
 - 仅 `crontab` — 常见于少 commit 的 snapshot-expiry / orphan-cleanup。
 - 仅 `onCommit` — 常见于流式 compaction；未达 `Recommender` 阈值仍 skip submit。
 - 运维 API（§7）为人工触发，不使用 `schedule`。

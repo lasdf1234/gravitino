@@ -435,7 +435,7 @@ IRC commit succeeded (same JVM)
               ├─ resolve Active onCommit policies for this table
               └─ for each policy_id P:
                     bump tms-policy-expand ①
-                    task_instance = {metalake_id}:{P}
+                    task_instance = {policy_id}
                     execution_time = now
                     task_data optional: committed catalog.schema.table / table_id
 ```
