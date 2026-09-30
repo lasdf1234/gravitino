@@ -375,7 +375,7 @@ Deployment:
 | `TmsPrincipalBootstrapListener`  | `EventListenerPlugin` on `CreateMetalakeEvent`; ensures metalake user `tms` + built-in role when authorization is enabled (§5.6).      |
 | `TmsAuthConfigResolver`          | Resolves IRC auth + credential-vending Spark conf; loads secrets via SecretManager (§5.9).                                             |
 | `TableMaintenanceJobStore`       | Read/write `table_maintenance_job` per-run rows; submit gates + Validation JSON (§6.2–§6.3).                                           |
-| `IcebergTableLifecycleHook`      | In-process IRC **drop** hook: delete related ② rows + `table_maintenance_job`; ① unchanged unless policy removed (§6.3).               |
+| `IcebergTableLifecycleHook`      | In-process IRC **drop** hook: delete related ②+③ rows + `table_maintenance_job`; ① unchanged unless policy removed (§6.3).             |
 | Existing optimizer classes       | `Updater`, `Recommender`, providers, `JobSubmitter` — unchanged contracts for spark-submit path.                                       |
 | db-scheduler `scheduled_tasks`   | ① expand + ② table-scheduler + ③ table-commit. Not a substitute for `table_maintenance_job` / `job_run_meta`.                          |
 
@@ -658,9 +658,10 @@ triggers are enabled):
 Use **two policies** only when maintenance **types** differ, not because `onCommit` and `crontab`
 are both set on one policy.
 
-These are **not** the same as `minIntervalMs` (§8.3): `onCommit` / `crontab` decide **when
-① expand runs**; `minIntervalMs` caps how soon expand may enqueue another ② after the last
-finished job (`MAX(finished_at)` on `table_maintenance_job` for that `(table, policy)`).
+These are **not** the same as `minIntervalMs` (§8.3): `crontab` decides **when ① expand runs**;
+`onCommit` goes through **③** (not ①). `minIntervalMs` caps how soon another enqueue / submit
+may proceed after the last finished job (`MAX(finished_at)` on `table_maintenance_job` for that
+`(table, policy)`).
 
 **`orphan-cleanup` must not use `onCommit`.** Policy create/alter rejects `schedule.onCommit = true`
 for orphan-cleanup (or ignores it). Orphan cleanup is **crontab-only** (or ops API).
@@ -708,7 +709,7 @@ Illustrative `content.schedule` (exact field names may be finalized with the Pol
 
 | Field               | UI                           | TMS runtime                                                           |
 | ------------------- | ---------------------------- | --------------------------------------------------------------------- |
-| `schedule.onCommit` | Toggle “run on commit”       | IRC drives ordered commit chain for attached types (§5.4, §5.7.1)     |
+| `schedule.onCommit` | Toggle “run on commit”       | IRC upserts ③; table pool drives §5.7.1 order (§5.4)                 |
 | `schedule.crontab`  | Crontab picker               | Sets / refreshes ① next `scheduled_tasks.execution_time` after expand |
 | `schedule.timezone` | Timezone for crontab display | Parse crontab when computing next due time for ①                      |
 
@@ -1286,14 +1287,14 @@ spark-submit pipeline.
       §8.2).
 - [ ] Add EntityStore migration for **`table_maintenance_job`** (§6.2).
 - [ ] On policy create/enable: INSERT **`tms-policy-expand`** ① (`policy_id`) (§5.5.2).
-- [ ] IRC post-commit builds ordered commit chain (§5.7.1); rejects orphan-cleanup `onCommit`; does
-      **not** `runJob` on the commit thread.
-- [ ] Tests: attached subset runs in fixed order; missing types skipped; chain waits for prior
-      terminal; concurrent commits coalesce.
+- [ ] IRC post-commit **upserts** `tms-table-commit` `{table_id}`; rejects orphan-cleanup `onCommit`;
+      does **not** `runJob` on the IRC thread (execute on `table.threads`).
+- [ ] Tests: attached subset runs in fixed order; missing types skipped; terminal re-upserts ③;
+      concurrent commits coalesce on one row.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
-- [ ] Wire IRC **drop** hook to delete outstanding ② + `table_maintenance_job` rows (§6.3).
-- [ ] On `runJob` success: `INSERT` `table_maintenance_job`; **DELETE** ②; on terminal: `UPDATE`
-      metrics + `finished_at` (§6.2).
+- [ ] Wire IRC **drop** hook to delete outstanding ②+③ + `table_maintenance_job` rows (§6.3).
+- [ ] On `runJob` success: `INSERT` `table_maintenance_job`; **DELETE** ②/③; on terminal: `UPDATE`
+      metrics + `finished_at`; ③ may re-upsert (§6.2, §5.7.1).
 - [ ] Integration tests: crontab `table:{table_id}:{policy_id}`; commit coalesce on
       `(tms-table-commit,{table_id})`; multi-node upsert; pick-time policy resolve; drop cleans rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
@@ -1338,7 +1339,7 @@ spark-submit pipeline.
 | Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
 | Pipeline     | ① expand → INSERT ②; ② pick → gates → `Recommender` → Jobs → DELETE ②.                                                                     |
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
-| Drop         | Drop hook deletes outstanding ② + `table_maintenance_job` rows (§6.3). Rename out of scope.                                                |
+| Drop         | Drop hook deletes outstanding ②+③ + `table_maintenance_job` rows (§6.3). Rename out of scope.                                              |
 | Multi-node   | Due rows: N poll, one pick; ② deleted after pick; Spark double-submit blocked by in-flight row.                                            |
 | Policy       | Reuses metalake Policy APIs + `policy_meta`; create inserts ①; `schedule` (§5.7) + `jobOptions` (§5.8).                                    |
 | Job boundary | Expand due ≠ Spark wall-clock; Spark in Jobs; Validation on `table_maintenance_job` (§6.2).                                                |

@@ -521,13 +521,13 @@ commit 事件不会触发维护，也不会调度 crontab evaluate。Policy 除�
 
 | 触发方式       | 含义                          | 典型场景                                |
 | ---------- | --------------------------- | ----------------------------------- |
-| `onCommit` | IRC commit 后按 §5.7.1 有序驱动类型 | 写多表；允许 `onCommit` 的类型               |
+| `onCommit` | IRC upsert `tms-table-commit`；pick 时按 §5.7.1 有序驱动类型 | 写多表；允许 `onCommit` 的类型               |
 | `crontab`  | 按 crontab 周期性 expand        | 定时维护；orphan-cleanup **必须**用 crontab |
 
 仅当维护**类型**不同（如 compaction + snapshot-expiry）时才用**两条** policy，不是因为两种触发方式。
 
-这与 `minIntervalMs`（§8.3）**不同**：`onCommit` / `crontab` 决定**何时跑 ① expand**；`minIntervalMs` 限制上次成功
-job 结束后多久 expand 可再入队 ②（查该 `(table, policy)` 的 `MAX(finished_at)`）。
+这与 `minIntervalMs`（§8.3）**不同**：`crontab` 决定**何时跑 ① expand**；`onCommit` 走 **③**（不经 ①）。
+`minIntervalMs` 限制上次成功 job 结束后多久可再入队 / submit（查该 `(table, policy)` 的 `MAX(finished_at)`）。
 
 **`orphan-cleanup` 不得使用 `onCommit`。** 策略 create/alter 对 orphan-cleanup 拒绝
 `schedule.onCommit = true`（或忽略之）。孤儿文件清理**仅为 crontab**（或 ops API）。
@@ -545,8 +545,8 @@ job 结束后多久 expand 可再入队 ②（查该 `(table, policy)` 的 `MAX(
 
 **未**挂载（或未开 `onCommit`）的类型**跳过** —— 链继续到列表中下一个已挂载类型。不要重排已挂载类型。不要插入未挂载类型。
 
-**串行：** commit ② 键列出全部剩余 `policy_id`。先 submit **第一个**；该 job 终态后再用更短键入队剩余
-（或结束）。前一 policy 在途时不要 submit 下一个。
+**串行：** `tms-table-commit` 每表一行 `{table_id}`。pick 时取 §5.7.1 队首并 submit；终态后若仍需下一类型，
+再 upsert 同一 `{table_id}`。前一 policy 在途时不要 submit 下一个。
 
 **Crontab 路径**仍按策略各自 expand（每个 `policy_id` 一条 ①），**不**要求这种跨类型顺序，除非产品后续统一定时跑法。
 
@@ -569,7 +569,7 @@ job 结束后多久 expand 可再入队 ②（查该 `(table, policy)` 的 `MAX(
 
 | 字段                  | 前端             | TMS 运行时                                           |
 | ------------------- | -------------- | ------------------------------------------------- |
-| `schedule.onCommit` | 「commit 后运行」开关 | IRC 对已挂载类型驱动有序 commit 链（§5.4、§5.7.1）              |
+| `schedule.onCommit` | 「commit 后运行」开关 | IRC upsert ③；table 池按 §5.7.1 有序驱动（§5.4）              |
 | `schedule.crontab`  | Crontab 选择器    | expand 后刷新 ① 的下次 `scheduled_tasks.execution_time` |
 | `schedule.timezone` | crontab 时区     | 解析 crontab 计算下次到期时间                               |
 
@@ -887,7 +887,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
 Iceberg **表 drop** 成功后，IRC 调用进程内 `IcebergTableLifecycleHook`：
 
 1. 将已 drop 的 `catalog.schema.table` 解析为 `table_id`（若 `table_meta` 中仍存在）。
-2. `DELETE` 该表相关未完成 **`tms-table-scheduler`** ②（以 `{table_id}:` 开头的 crontab / commit 表单元键）。
+2. `DELETE` 该表相关未完成 **`tms-table-scheduler`** ②（`table:{table_id}:…`）以及 **`tms-table-commit`** ③ `{table_id}`。
 3. 对 `(metalake_id, table_id)` `DELETE` `table_maintenance_job`。
 4. **不**删除 **`tms-policy-expand`** ①（策略级）；该 policy 下其余表仍可在下次到期 expand。在途 Spark job **不**由此钩子取消。
 
@@ -1042,15 +1042,15 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 
 ### 9.1 建议工作计划
 
-本设计交付进程内插件、IRC commit **bump** policy-expand ①、两层 `scheduled_tasks`（① 保留 / ② pick 后 DELETE）、
-按运行 `table_maintenance_job`、`tms` 主体 + SecretManager、策略 `jobOptions` 与 expand → spark-submit 管线。
+本设计交付进程内插件、三类 `scheduled_tasks`（① expand / ② table-scheduler / ③ table-commit）、
+双池（expand=4 / table=8）、按运行 `table_maintenance_job`、`tms` 主体 + SecretManager、策略 `jobOptions`。
 
 | 阶段  | 工作项                         | 说明                                                                                                              |
 | --- | --------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | 1   | 加载进程内插件                     | `TableMaintenanceRESTFeature`；启停 db-scheduler；`TmsPrincipalBootstrapListener`。                                  |
 | 2   | 内部 expand + spark-submit 管线 | `PolicyExpandPipeline` + `MaintenanceSparkSubmitPipeline`；单元测试。                                                 |
-| 3   | db-scheduler 两类任务           | `tms-policy-expand` + `tms-table-scheduler`；`scheduled_tasks` 迁移；heartbeat（§5.5）。                                         |
-| 4   | 进程内 IRC 钩子（入队路径）            | 调度实例（§5.4）；`table_maintenance_job` 按运行行（§6.2）。                                                                  |
+| 3   | db-scheduler 三类任务 + 双池     | ①+②+③；`expand.threads=4` / `table.threads=8`；迁移；heartbeat（§5.5、§8.4）。                                                  |
+| 4   | 进程内 IRC 钩子（入队路径）            | upsert ③（§5.4）；`table_maintenance_job` 按运行行（§6.2）。                                                                |
 | 5   | 加固                          | 服务指标、优雅关闭、H2 路径测试、用户文档。                                                                                         |
 | 6   | Optimizer CLI 替代 API        | §7 ops 资源。与 `gravitino-optimizer` 相同命令。                                                                         |
 | 7   | TMS 主体 + SecretManager 认证   | `tms` 用户/角色（§5.6）；credential vending + none/basic/oauth/kerberos（§5.9）；策略 `schedule`（§5.7）+ `jobOptions`（§5.8）。 |
@@ -1089,11 +1089,11 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 - [ ] 添加 `IcebergCommitEventHandler` 与主服务注册进程内回调 / SPI（§5.1.1 / §8.2）。
 - [ ] 为 **`table_maintenance_job`** 添加 EntityStore 迁移（§6.2）。
 - [ ] 策略创建/启用时 INSERT **`tms-policy-expand`** ①（`policy_id`）（§5.5.2）。
-- [ ] IRC post-commit 构建有序 commit 链（§5.7.1）；拒绝 orphan-cleanup 的 `onCommit`；**不**在 commit 线程 `runJob`。
-- [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；链等待前一终态；并发 commit 合并。
+- [ ] IRC post-commit **upsert** `tms-table-commit` `{table_id}`；拒绝 orphan-cleanup 的 `onCommit`；**不**在 IRC 线程 `runJob`（执行走 `table.threads`）。
+- [ ] 测试：已挂载子集按固定顺序跑；缺失类型跳过；终态再 upsert ③；并发 commit 合并到同一行。
 - [ ] IRC post-commit 钩子接到进程内回调（`tableMaintenance.inProcess`）。
-- [ ] IRC **drop** 钩子删除未完成 ② + `table_maintenance_job` 行（§6.3）。
-- [ ] `runJob` 成功后：`INSERT` `table_maintenance_job`；**DELETE** ②；终态：`UPDATE` 指标 + `finished_at`（§6.2）。
+- [ ] IRC **drop** 钩子删除未完成 ②+③ + `table_maintenance_job` 行（§6.3）。
+- [ ] `runJob` 成功后：`INSERT` `table_maintenance_job`；**DELETE** ②/③；终态：`UPDATE` 指标 + `finished_at`；③ 可再 upsert（§6.2、§5.7.1）。
 - [ ] 集成测试：crontab `table:{table_id}:{policy_id}`；commit 合并到 `(tms-table-commit,{table_id})`；多节点 upsert；pick 时 resolve；drop 清理。
 - [ ] **不要**交付 HTTP `…/events/iceberg-commit` 或 Kafka 入口。
 
@@ -1127,12 +1127,12 @@ JDBC 连接池 ≥ `expand.threads + table.threads`（再给 REST/IRC 留余量�
 | ---------- | ----------------------------------------------------------------------------------------------------------- |
 | 部署         | 经 `gravitino.server.rest.extensionPackages` 启用；IRC 同 JVM 同机。Ops API 在 **8090**（§7）。                         |
 | Classpath  | TMS 插件在主服务器 classpath；**不是** aux 隔离监听。                                                                      |
-| 触发         | Commit：已挂载类型有序（§5.7.1）；crontab：按策略 ①；orphan-cleanup 仅 crontab。                                              |
-| 调度         | **db-scheduler**：① 按 `policy_id` 长期保留；② 一次性 pick 后 DELETE（§5.5、§6.1、§8.4）。                                  |
+| 触发         | Commit：upsert ③ + pick 时 §5.7.1 有序；crontab：按策略 ①；orphan-cleanup 仅 crontab。                                      |
+| 调度         | **db-scheduler** 双池：① 长期保留；②/③ pick 后 DELETE；commit 执行用 `table.threads`（§5.5、§8.4）。                        |
 | 作业记录       | `table_maintenance_job` 每 `job_run_id` 一行（Validation JSON + submit 门控）。                                     |
 | Import     | 经 `TableDispatcher.loadTable` 懒 import `table_meta`（§5.5.4）；非 Iceberg `registerTable`。                      |
 | Ops API    | 七条路由替代 `gravitino-optimizer`（§7）。commit 路径不用。须表 WRITE。                                                      |
-| 管线         | ① expand（含 minInterval）→ INSERT ②；② pick → 在途复检 → `Recommender` → Jobs → DELETE ②。                        |
+| 管线         | ①→INSERT ②；②/③ pick → resolve → `Recommender` → Jobs → DELETE；③ 终态可再 upsert。                              |
 | Validation | `table_maintenance_job`（`before_metrics` / `after_metrics` JSON + `finished_at`）（§6.2）。                     |
 | Drop       | Drop 钩子删除调度器实例 + `table_maintenance_job` 行（§6.3）。重命名不在范围。                                                   |
 | 多节点        | 到期 `scheduled_tasks`：N 轮询、一个 pick；在途行阻止 Spark 双 submit。                                                     |
