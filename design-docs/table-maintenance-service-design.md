@@ -47,8 +47,7 @@ commits.
 
 1. **In-process plugin on the main server**: Load Table Maintenance through
    `gravitino.server.rest.extensionPackages` (Jersey 2 `Feature`, same pattern as IdP) so the IRC
-   callback is registered in the main JVM. The commit path does **not** use HTTP. Operator calls that
-   replace the optimizer CLI are the ops APIs in **§7**.
+   callback is registered in the main JVM. The commit path does **not** use HTTP.
 2. **IRC in-process commit event**: After successful Iceberg commits via IRC, TMS receives a commit
    event through a **main-server-registered in-process callback / SPI** (IRC and main server share one
    JVM; see **§5.1.1**). The handler **upserts** **`tms-table-commit`** with `task_instance = {table_id}`
@@ -76,14 +75,14 @@ commits.
    `scheduled_tasks` instance — ① / ② / ③ alike (5.4, §6). Concurrent Spark submits for the same
    `(table, policy)` are also gated by an in-flight `table_maintenance_job` row
    (`finished_at IS NULL`) (§6.2).
-8. **Per-run maintenance job table**: Gravitino persists one `table_maintenance_job` row per Spark
+7. **Per-run maintenance job table**: Gravitino persists one `table_maintenance_job` row per Spark
    `job_run_id` (Validation JSON + `finished_at`). Enqueue / reclaim for **scheduler tasks** live in
    `scheduled_tasks` (three task names above).
-9. **Crontab expand vs commit wake-up**: Crontab dues **`tms-policy-expand`**; expand pages and
+8. **Crontab expand vs commit wake-up**: Crontab dues **`tms-policy-expand`**; expand pages and
    writes **`tms-table-scheduler`** after gates (§5.4). Commit does **not** use the expand pool: IRC
    upserts **`tms-table-commit`** `{table_id}`; the **table** pool picks it and resolves policy at
    pick time (5.1.1, §6.2).
-10. **Dedicated TMS execution principal**: All automated maintenance (event enqueue after commit
+9. **Dedicated TMS execution principal**: All automated maintenance (event enqueue after commit
     and timed policy due) submits Jobs as a built-in metalake user **`tms`**, not as the operator
     who created the policy (§5.5).
 11. **Policy evaluate triggers on policy**: Automated maintenance uses `onCommit` and/or `crontab`
@@ -97,7 +96,7 @@ commits.
     Jobs are **not** stored in `policy_meta` or a TMS-owned credential table. Sensitive values are
     referenced through Gravitino **SecretManager** (URN / provider), aligned with the pluggable
     secret approach for server config. Opt-in: plaintext / missing secrets still work when the
-    secret solution is not enabled (§5.8).
+    secret solution is not enabled (§5.7).
 
 ---
 
@@ -114,8 +113,7 @@ commits.
 4. **Engine-side commit report path**: Engines that bypass Gravitino Iceberg REST are out of scope
    for event-driven path.
 5. **Commit-path HTTP or Kafka**: No `POST …/events/iceberg-commit`, no health resource, and no Kafka
-   produce/consume path. Commit handling is **in-process only** (§5.1.1). APIs that replace the
-   optimizer CLI are **§7**, and they are not a commit ingress. Remote IRC / cross-JVM delivery is
+   produce/consume path. Commit handling is **in-process only** (§5.1.1). Remote IRC / cross-JVM delivery is
    out of scope (follow-up if needed).
 
 ## 4. Solution Investigations
@@ -178,7 +176,7 @@ TMS needs cluster-safe scheduling for **three** kinds of work on `scheduled_task
 
 Plus durable **`table_maintenance_job`** for Validation, `minIntervalMs`, and in-flight occupancy.
 Three pools: expand (①) / table (②) / commit (③) so commit decide/submit does not steal crontab
-threads (§8.4).
+threads (7.4).
 
 #### Industry and in-project alternatives
 
@@ -190,7 +188,7 @@ threads (§8.4).
 | Cluster CAS / single-flight      | Yes (optimistic lock / `SKIP LOCKED` on `scheduled_tasks`)           | Yes                                          | Lock only                                            | Yes (`QRTZ_*` row locks)                                 |
 | Heartbeat for short lease        | Yes (`last_heartbeat`)                                               | Yes                                          | N/A                                                  | Yes                                                      |
 | Fits per-policy + one-shot Spark | Yes                                                                  | Yes                                          | No (lock only)                                       | Yes (heavier)                                            |
-| H2 unit-test path                | Degraded: disable scheduler; run pipeline directly in tests (§8.4) | Better H2 story                              | Yes                                                  | RAMJobStore only in tests                                |
+| H2 unit-test path                | Degraded: disable scheduler; run pipeline directly in tests (7.4) | Better H2 story                              | Yes                                                  | RAMJobStore only in tests                                |
 | Extra ops component              | No                                                                   | Optional dashboard server                    | No                                                   | No                                                       |
 | Decision                         | **Chosen**                                                           | Rejected — license + overlaps Gravitino Jobs | Rejected — not a scheduler                           | Rejected — ~11 tables, heavy                             |
 
@@ -229,7 +227,7 @@ keytabs, and similar).
 | -------- | ------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------- |
 | Pros     | One map with Spark options                 | Explicit TMS overlay                              | Pluggable providers (file / Vault / KMS); opt-in; shared with server conf |
 | Cons     | Policies are widely readable; secrets leak | Second keystore beside SecretManager; no KMS path | Needs bootstrap for TMS principal secrets                                 |
-| Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.8)                                                         |
+| Decision | Rejected                                   | Rejected                                          | **Chosen** (§5.7)                                                         |
 
 ---
 
@@ -291,7 +289,7 @@ Node A / Node B / Node C  — expand + table + commit pools poll (§5.4); N comp
         ├─ pick ① tms-policy-expand                 (expand.threads=4)
         │     └─ page → INSERT tms-table-scheduler (table:… / batch:…)
         │
-        ├─ pick ② tms-table-scheduler               (table.threads=8)
+        ├─ pick ② tms-table-scheduler               (table.threads=7)
         │     └─ runJob → INSERT job row → DELETE → return
         │
         ├─ pick ③ tms-table-commit                  (commit.threads=4)
@@ -313,7 +311,7 @@ Node A / Node B / Node C  — expand + table + commit pools poll (§5.4); N comp
 | `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7) |
 | `scheduled_tasks`                      | ① expand + ② table-scheduler + ③ table-commit (5.4, §6.1)                              |
 | `table_maintenance_job`                | Per-run Validation JSON + `finished_at`; submit gates (§6.2)                            |
-| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.8); not a TMS-owned table             |
+| SecretManager / SecretProvider         | TMS Spark / Iceberg **auth** material via URN (§5.7); not a TMS-owned table             |
 | `user_meta`                            | Built-in metalake user `tms` when authorization is enabled (§5.5)                       |
 | `job_run_meta`                         | Spark job run **record** (status + `runtime_job_template` snapshot); not default config |
 
@@ -334,23 +332,23 @@ picks ③ (§5.4).
 | Payload     | `table_id` / table identifier (for upsert `task_instance` / `task_data.tableIds`).                                                          |
 | Enqueue     | Upsert `(tms-table-commit, {table_id})` on the IRC thread (must stay short).                                                                |
 | Execute     | **`commit.threads`** picks ③ (never IRC / expand / table); resolve + gate + short submit; re-upsert after Job terminal if needed (§5.4). |
-| Scheduling  | Expand (①) + table (②) + commit (③) pools; same JDBC DataSource as MySQL / PostgreSQL entity store (§8.4).                                  |
+| Scheduling  | Expand (①) + table (②) + commit (③) pools; same JDBC DataSource as MySQL / PostgreSQL entity store (7.4).                                  |
 
 
 Deployment:
 
 1. Package the TMS plugin jars with the main Gravitino server and set
-   `gravitino.server.rest.extensionPackages` to include the TMS Feature package (see §8.1).
+   `gravitino.server.rest.extensionPackages` to include the TMS Feature package (see 7.1).
 2. Enable `iceberg-rest` in `gravitino.auxService.names` (same process as the main server).
-3. Enable in-process commit events (`tableMaintenance.inProcess` — §8.2).
-4. Enable the embedded scheduler (`gravitino.maintenance.scheduler.enabled` — §8.4).
+3. Enable in-process commit events (`tableMaintenance.inProcess` — 7.2).
+4. Enable the embedded scheduler (`gravitino.maintenance.scheduler.enabled` — 7.4).
 5. Attach Govern maintenance policies (e.g. `system_iceberg_compaction`) to catalogs/schemas/tables
    via existing Policy APIs on the main server (**8090**).
 
 ### 5.3 User process
 
 1. Operator enables the TMS REST plugin (`extensionPackages`), `iceberg-rest` **in the same JVM**,
-   in-process commit events (§5.1.1 / §8.2), and the embedded scheduler (§8.4). If authorization is
+   in-process commit events (§5.1.1 / 7.2), and the embedded scheduler (7.4). If authorization is
    enabled, TMS bootstraps the metalake user `tms` and grants (§5.5).
 2. Operator creates / enables a maintenance policy (including non-auth `jobOptions`) and associates
    it to catalogs / schemas / tables via metalake Policy APIs. On create/enable, TMS **INSERT**s
@@ -369,7 +367,7 @@ Deployment:
            "target-file-size-bytes": "536870912"
          },
          "jobOptions": {
-           "spark.executor.memory": "8g",
+           "spark.executor.memory": "7g",
            "spark.sql.shuffle.partitions": "200"
          }
        }
@@ -388,14 +386,13 @@ Deployment:
    may upsert the same `{table_id}` again for the next type (§5.6.1). In-flight occupancy on
    `table_maintenance_job` prevents a second Spark submit for the same `(table, policy)`.
 5. Operators observe runs in the Gravitino **Jobs** UI / APIs (including Validation from
-   `table_maintenance_job`). Automated Job `audit.creator` is **`tms`**. Manual ops APIs in §7 may
-   bump ① or enqueue ② under test hooks.
+   `table_maintenance_job`). Automated Job `audit.creator` is **`tms`**.
 
 ### 5.4 Execute path — expand + table-scheduler + table-commit
 
 ```text
 Expand Scheduler (expand.threads=4) — registers tms-policy-expand only
-Table Scheduler  (table.threads=8)  — registers tms-table-scheduler only
+Table Scheduler  (table.threads=7)  — registers tms-table-scheduler only
 Commit Scheduler (commit.threads=4) — registers tms-table-commit only
 
 ① tms-policy-expand due:
@@ -453,7 +450,7 @@ listener / reconcile (§5.4.2).
 | Task name | `task_instance` | `task_data` | Pool |
 | --------- | --------------- | ----------- | ---- |
 | `tms-policy-expand` | `{policy_id}` | empty; optional expand `cursor` while paging | expand (4) |
-| `tms-table-scheduler` | `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table (8) |
+| `tms-table-scheduler` | `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}` | `{ "tableIds":[…], "policyIds":[…] }` | table (7) |
 | `tms-table-commit` | `{table_id}` | `{ "tableIds":[…], "policyIds":[…] }` | commit (4) |
 
 **Uniqueness:** primary key `(task_name, task_instance)`. Same-table commit bursts coalesce on
@@ -473,7 +470,7 @@ and outstanding ② for that `policy_id`.
 2. If an in-flight row exists for this `(table_id, policy_id)` (`finished_at IS NULL`):
    **skip** (do not INSERT ②).
 3. Else if `MAX(finished_at)` for that key is still within the resolved `minIntervalMs` (table prop →
-   global conf → code default; §8.3): **skip** (do not INSERT ②).
+   global conf → code default; 7.3): **skip** (do not INSERT ②).
 
 **Submit path** (② on the table pool, or ③ on the commit pool):
 
@@ -483,7 +480,7 @@ and outstanding ② for that `policy_id`.
 3. **Sample `before_metrics` now** (must be before any table mutation). Cannot be reconstructed later.
 4. Policy trigger (`Recommender`).
 5. Overlay nearest-policy `jobOptions` (§5.7) and SecretManager auth / credential-vending conf
-   (§5.8); `runJob` as principal `tms` → `job_run_id`.
+   (§5.7); `runJob` as principal `tms` → `job_run_id`.
 6. **Immediately** `INSERT` `table_maintenance_job` with `job_run_id`, keys, `before_metrics`, and
    `finished_at = NULL` (§6.2). This row is the anti-double-submit **occupancy claim**, not a live
    probe of Spark.
@@ -631,13 +628,13 @@ triggers are enabled):
 Use **two policies** only when maintenance **types** differ, not because `onCommit` and `crontab`
 are both set on one policy.
 
-These are **not** the same as `minIntervalMs` (§8.3): `crontab` decides **when ① expand runs**;
+These are **not** the same as `minIntervalMs` (7.3): `crontab` decides **when ① expand runs**;
 `onCommit` goes through **③** (not ①). `minIntervalMs` caps how soon another enqueue / submit
 may proceed after the last finished job (`MAX(finished_at)` on `table_maintenance_job` for that
 `(table, policy)`).
 
 **`orphan-cleanup` must not use `onCommit`.** Policy create/alter rejects `schedule.onCommit = true`
-for orphan-cleanup (or ignores it). Orphan cleanup is **crontab-only** (or ops API).
+for orphan-cleanup (or ignores it). Orphan cleanup is **crontab-only**.
 
 #### 5.6.1 Commit-driven type order
 
@@ -692,7 +689,6 @@ Illustrative `content.schedule` (exact field names may be finalized with the Pol
 - `crontab` only — common for orphan-cleanup and low-write tables.
 - `onCommit` — commit path applies §5.6.1 order across attached compaction / manifest-rewrite /
   snapshot-expiry policies; each step may still skip submit when gates or `Recommender` fail.
-- Manual ops APIs (§7) are a separate, operator-initiated path and do not use `schedule`.
 
 **Where state lives:**
 
@@ -752,15 +748,15 @@ At submit:
 ```text
 job template base configs
   overlay nearest attached policy jobOptions  (non-auth only)
-  overlay SecretManager-resolved auth + credential-vending keys (§5.8)
+  overlay SecretManager-resolved auth + credential-vending keys (§5.7)
   → JobSubmitter.runJob(..., jobConfig) as tms
 ```
 
 Policy create / alter **rejects** credential-shaped keys in `jobOptions` / `rewriteOptions`
 (same name rules as property masking: `password`, `secret`, `token`, `access-key`, and similar).
-Those keys belong in SecretManager (§5.8), referenced by URN where needed.
+Those keys belong in SecretManager (§5.7), referenced by URN where needed.
 
-### 5.8 Credential vending and IRC authentication (SecretManager)
+### 5.7 Credential vending and IRC authentication (SecretManager)
 
 Automated TMS Jobs talk to Gravitino **Iceberg REST** as Spark catalogs. Two orthogonal concerns:
 
@@ -813,7 +809,7 @@ No IRC client authentication (typical `simple` / open IRC in lab).
 | Property | Required | Description |
 | --- | --- | --- |
 | *(omit `rest.auth.type`)* or `rest.auth.type` = `none` | no | No username / password / token. |
-| Credential-vending properties in 5.8 Credential vending | if using vending | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
+| Credential-vending properties in 5.7 Credential vending | if using vending | Still set `header.X-Iceberg-Access-Delegation=vended-credentials` when storage is vended. |
 
 No SecretManager entries are required for IRC auth itself.
 
@@ -827,7 +823,7 @@ the maintenance principal (usually user `tms` when authorization is on).
 | `rest.auth.type` | yes | `basic`. |
 | `rest.auth.basic.username` | yes | For automated TMS runs: `tms` (or the configured TMS username). |
 | `rest.auth.basic.password` | yes | Password for that user. Store as a SecretManager secret; Job config holds a URN or resolved value at submit time only. |
-| Credential-vending properties in 5.8 Credential vending | if using vending | Same as parent section. |
+| Credential-vending properties in 5.7 Credential vending | if using vending | Same as parent section. |
 
 #### Auth: oauth
 
@@ -840,7 +836,7 @@ OAuth2 client credentials or bearer token against Gravitino IRC.
 | `oauth2-server-uri` | for client-credential path | Token endpoint URI. |
 | `credential` | for client-credential path | OAuth client id and secret, typically `client_id:client_secret`. |
 | `scope` | recommended | OAuth scope (Iceberg may default to `catalog` if omitted). |
-| Credential-vending properties in 5.8 Credential vending | if using vending | Same as parent section. |
+| Credential-vending properties in 5.7 Credential vending | if using vending | Same as parent section. |
 
 Prefer client-credential + SecretManager for `credential` so TMS does not embed long-lived bearer
 tokens in policy or templates.
@@ -856,7 +852,7 @@ runtime must be able to obtain a TGT for the TMS service principal.
 | Kerberos principal | yes | Service principal used by TMS Jobs (for example `tms/_HOST@REALM`). |
 | Keytab path or keytab material | yes | Keytab must not live in `policy_meta`. Reference via SecretManager or a host path provisioned outside policy content. |
 | `java.security.krb5.conf` / Hadoop `hadoop.security.authentication=kerberos` | as required by the cluster | Cluster Kerberos wiring for the Spark driver/executors. |
-| Credential-vending properties in 5.8 Credential vending | if using vending | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled. |
+| Credential-vending properties in 5.7 Credential vending | if using vending | Same as parent section. Kerberos authenticates to IRC; storage access still uses vended credentials when enabled. |
 
 #### Resolution at submit
 
@@ -901,7 +897,7 @@ set `finished_at` only; never late-sample Validation metrics.
 | `policy_meta` / `policy_relation_meta` / `policy_version_info` | **What** to expand; `schedule` + non-auth `jobOptions` in **content** (§5.6, §5.7) |
 | `scheduled_tasks`                      | ① long-lived expand + ②/③ one-shot (DELETE after short submit)          |
 | `table_maintenance_job`                | Per-run Validation JSON + submit gates (§6.2)                           |
-| SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.8); no `tms_credential` table            |
+| SecretManager / SecretProvider         | IRC auth secrets for `tms` (§5.7); no `tms_credential` table            |
 | `user_meta`                            | Built-in `tms` user when authorization is enabled (§5.5)                |
 
 Auth material uses SecretManager. Job-template **parameters** stay on policy attachments.
@@ -972,7 +968,7 @@ No `evaluate_pending`, no `IDLE`/`RUNNING`, no application lease heartbeat — t
 
 **Expand / submit gates** (for a given `(table_id, policy_id)`):
 
-1. **Min interval (on ①):** `SELECT MAX(finished_at) …` vs resolved `minIntervalMs` (§8.3) — if
+1. **Min interval (on ①):** `SELECT MAX(finished_at) …` vs resolved `minIntervalMs` (7.3) — if
    within cooldown, **do not INSERT** ②.
 2. **In-flight (on ① and re-checked on ②):** `SELECT 1 … WHERE finished_at IS NULL LIMIT 1` — if
    found, skip enqueue / skip submit.
@@ -1001,52 +997,25 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
     `finished_at` BIGINT(20) UNSIGNED NULL COMMENT 'maintenance task end time (epoch millis); null = in-flight',
     PRIMARY KEY (`job_run_id`),
     KEY `idx_tmj_table_policy_finished` (`table_id`, `policy_id`, `finished_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+) ENGINE=InnoDB DEFAULT CHARSET=utf7mb4 COLLATE=utf7mb4_bin
   COMMENT 'per-run TMS job record: Validation JSON + submit gates';
 ```
 
-**Metrics JSON:** `before_metrics` / `after_metrics` are opaque UTF-8 JSON blobs for Jobs
+**Metrics JSON:** `before_metrics` / `after_metrics` are opaque UTF-7 JSON blobs for Jobs
 Validation. Exact keys and auto pass/fail rules are **product TBD** — not fixed in this design.
 
 ---
 
-## 7. Optimizer CLI replacement APIs
+## 7. Configuration
 
-The commit path stays in-process and does **not** call these APIs. They replace the
-`gravitino-optimizer` CLI (`--type ...`) for operators and scripts. The same plugin serves them on
-the main webserver (**8090**).
-
-- Prefix: `/api/maintenance/table/ops/...`. Not shown in the Compact-policy UI.
-- Caller must have **WRITE** on each target table. Missing privilege → **403**.
-- `--conf-path` stays server configuration. `update-statistics` and `append-metrics` send JSON Lines
-  in the body. The API does not accept a server `--file-path`.
-- `dryRun=true` returns the recommendation or job config and does not submit.
-
-| CLI `--type`              | Method | Path                                           | Body or query                                                                                      |
-| ------------------------- | ------ | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `submit-strategy-jobs`    | `POST` | `/api/maintenance/table/ops/strategy-jobs`     | `identifiers`, `strategyName`, `dryRun`, `limit`                                                   |
-| `submit-update-stats-job` | `POST` | `/api/maintenance/table/ops/update-stats-jobs` | `identifiers`, `dryRun`, `updateMode` (`stats` / `metrics` / `all`), `updaterOptions`, `sparkConf` |
-| `update-statistics`       | `POST` | `/api/maintenance/table/ops/statistics`        | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines)                                  |
-| `append-metrics`          | `POST` | `/api/maintenance/table/ops/metrics`           | `calculatorName`, `identifiers`, `statisticsPayload` (JSON Lines)                                  |
-| `monitor-metrics`         | `POST` | `/api/maintenance/table/ops/metrics/monitor`   | `identifiers`, `actionTime`, `rangeSeconds`, `partitionPath`                                       |
-| `list-table-metrics`      | `GET`  | `/api/maintenance/table/ops/metrics/tables`    | `identifiers`, `partitionPath`                                                                     |
-| `list-job-metrics`        | `GET`  | `/api/maintenance/table/ops/metrics/jobs`      | `identifiers`                                                                                      |
-
-Each route calls the existing optimizer command implementation. The IRC hook and scheduler
-pipelines (`PolicyExpandPipeline` / `MaintenanceSparkSubmitPipeline`) do not call this group.
-
----
-
-## 8. Configuration
-
-### 8.1 Enablement keys (`gravitino.conf`)
+### 7.1 Enablement keys (`gravitino.conf`)
 
 | Key                                       | Default | Description                                                                                               |
 | ----------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------- |
 | `gravitino.server.rest.extensionPackages` | none    | Must include the TMS Feature package (illustrative: `org.apache.gravitino.maintenance.web.rest.feature`). |
 | `gravitino.auxService.names`              | none    | Must include `iceberg-rest` when using IRC. TMS itself is **not** started this way.                       |
 
-### 8.2 Iceberg REST → TMS in-process event keys
+### 7.2 Iceberg REST → TMS in-process event keys
 
 Illustrative keys (exact names may be finalized in implementation).
 
@@ -1064,13 +1033,13 @@ gravitino.auxService.names = iceberg-rest
 gravitino.iceberg-rest.tableMaintenance.inProcess = true
 gravitino.maintenance.scheduler.enabled = true
 gravitino.maintenance.scheduler.expand.threads = 4
-gravitino.maintenance.scheduler.table.threads = 8
+gravitino.maintenance.scheduler.table.threads = 7
 gravitino.maintenance.scheduler.commit.threads = 4
 ```
 
 HTTP `tableMaintenance.uri` / Kafka produce-consume keys are **not** in scope (Non-Goal #5).
 
-### 8.3 Task types and minimum interval (global default + table override)
+### 7.3 Task types and minimum interval (global default + table override)
 
 TMS recognizes four maintenance **task types** (aligned with product Compact policy surface):
 
@@ -1131,7 +1100,7 @@ ALTER TABLE rest_catalog.db.orders SET TBLPROPERTIES (
 );
 ```
 
-### 8.4 db-scheduler keys (`gravitino.conf`)
+### 7.4 db-scheduler keys (`gravitino.conf`)
 
 db-scheduler has **one** thread pool per `Scheduler`. TMS runs **three** schedulers on one
 `scheduled_tasks` table:
@@ -1139,7 +1108,7 @@ db-scheduler has **one** thread pool per `Scheduler`. TMS runs **three** schedul
 | Scheduler | Registers | Default threads | conf key |
 | --------- | --------- | --------------- | -------- |
 | Expand | `tms-policy-expand` only | `4` | `…scheduler.expand.threads` |
-| Table | `tms-table-scheduler` only | `8` | `…scheduler.table.threads` |
+| Table | `tms-table-scheduler` only | `7` | `…scheduler.table.threads` |
 | Commit | `tms-table-commit` only | `4` | `…scheduler.commit.threads` |
 
 **Commit threading:** see §5.4. IRC only **upserts** ③ (short; not on any db-scheduler pool).
@@ -1150,7 +1119,7 @@ not IRC, not `expand.threads`, not `table.threads`.
 | --- | ------- | ----------- |
 | `gravitino.maintenance.scheduler.enabled` | `true` on MySQL/PostgreSQL; `false` on H2 | Enables all three schedulers |
 | `gravitino.maintenance.scheduler.expand.threads` | `4` | Expand pool (① only) |
-| `gravitino.maintenance.scheduler.table.threads` | `8` | Table pool (② only) |
+| `gravitino.maintenance.scheduler.table.threads` | `7` | Table pool (② only) |
 | `gravitino.maintenance.scheduler.commit.threads` | `4` | Commit pool (③ only): post-IRC decide + short submit |
 | `gravitino.maintenance.scheduler.pollingIntervalMs` | `10000` | Poll interval (all) |
 | `gravitino.maintenance.scheduler.heartbeatIntervalMs` | `60000` | Heartbeat while callback runs |
@@ -1171,23 +1140,22 @@ implementation("com.github.kagkarlsson:db-scheduler:<version>")
 
 ---
 
-## 9. Work Plan and Checklist
+## 8. Work Plan and Checklist
 
-### 9.1 Suggested Work Plan
+### 8.1 Suggested Work Plan
 
 This design delivers the in-process plugin, three `scheduled_tasks` names (①/②/③), three pools
-(`expand.threads=4` / `table.threads=8` / `commit.threads=4`), per-run `table_maintenance_job`, `tms` principal +
+(`expand.threads=4` / `table.threads=7` / `commit.threads=4`), per-run `table_maintenance_job`, `tms` principal +
 SecretManager, and policy `jobOptions`.
 
 | Phase | Work item                                | Notes                                                                                                                          |
 | ----- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | 1     | Load the in-process plugin               | `TableMaintenanceRESTFeature`; start/stop db-scheduler; `TmsPrincipalBootstrapListener`.                                       |
 | 2     | Internal expand + spark-submit pipelines | `PolicyExpandPipeline` + `MaintenanceSparkSubmitPipeline`; unit tests.                                                         |
-| 3     | db-scheduler three tasks + three pools   | ①+②+③; expand=4 / table=8 / commit=4; migration; heartbeats (5.4, §8.4).                                                      |
+| 3     | db-scheduler three tasks + three pools   | ①+②+③; expand=4 / table=7 / commit=4; migration; heartbeats (5.4, 7.4).                                                      |
 | 4     | In-process IRC hook (upsert ③)           | Upsert `tms-table-commit` (§5.1.1); policy create inserts ①; expand writes ② (§6.1).                                              |
 | 5     | Hardening                                | Service metrics, graceful shutdown, H2 path tests, user docs.                                                                  |
-| 6     | Optimizer CLI replacement APIs           | Ops resources in §7. Same commands as `gravitino-optimizer`.                                                                   |
-| 7     | TMS principal + SecretManager auth       | `tms` user/role (§5.5); credential vending + none/basic/oauth/kerberos (§5.8); policy `schedule` (§5.6) + `jobOptions` (§5.7). |
+| 7     | TMS principal + SecretManager auth       | `tms` user/role (§5.5); credential vending + none/basic/oauth/kerberos (§5.7); policy `schedule` (§5.6) + `jobOptions` (§5.7). |
 
 #### Phase 1 checklist
 
@@ -1215,17 +1183,17 @@ SecretManager, and policy `jobOptions`.
 
 #### Phase 3 checklist
 
-- [ ] Add `TableMaintenanceScheduler` with expand (4) + table (8) + commit (4) pools (§8.4).
+- [ ] Add `TableMaintenanceScheduler` with expand (4) + table (7) + commit (4) pools (7.4).
 - [ ] Add entity-store migration for `scheduled_tasks` (MySQL / PostgreSQL).
-- [ ] Wire `DataSource` from the relational entity store; honor §8.4 heartbeat keys.
-- [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (§8.4).
+- [ ] Wire `DataSource` from the relational entity store; honor 7.4 heartbeat keys.
+- [ ] On H2 backends: scheduler disabled; pipelines invoked directly in tests (7.4).
 - [ ] Integration test: two nodes; one pick wins; in-flight blocks second submit; reconcile closes
       stale `finished_at IS NULL` without inventing metrics.
 
 #### Phase 4 checklist
 
 - [ ] Add `IcebergCommitEventHandler` and main-server-registered in-process callback / SPI (§5.1.1 /
-      §8.2).
+      7.2).
 - [ ] Add EntityStore migration for **`table_maintenance_job`** (§6.2).
 - [ ] On policy create/enable: INSERT **`tms-policy-expand`** ① (`policy_id`) (§5.4.2).
 - [ ] IRC post-commit **upserts** `tms-table-commit` `{table_id}`; rejects orphan-cleanup `onCommit`;
@@ -1247,7 +1215,6 @@ SecretManager, and policy `jobOptions`.
 
 #### Phase 6 checklist
 
-- [ ] Add the seven ops resources in §7, each calling the existing optimizer command implementation.
 - [ ] Require WRITE on each target table; missing privilege returns 403.
 - [ ] `dryRun=true` returns the recommendation or job config and does not submit.
 - [ ] Accept statistics and metrics JSON Lines in the body. Do not accept a server `--file-path`.
@@ -1260,36 +1227,35 @@ SecretManager, and policy `jobOptions`.
 - [ ] Policy create/alter rejects credential-shaped keys in `jobOptions` / `rewriteOptions`.
 - [ ] Submit path: nearest policy `jobOptions` (table > schema > catalog) overlay template base;
       add credential-vending header when enabled; resolve auth for **none / basic / oauth /
-      kerberos** (§5.8); `runJob` as `tms`.
+      kerberos** (§5.7); `runJob` as `tms`.
 - [ ] Tests: authorization off skips user insert; authorization on grants `USE_CATALOG`,
       `USE_SCHEMA`, `PROBE_TABLE_LIKE`, `MODIFY_TABLE`, `VIEW_POLICY`, `USE_JOB_TEMPLATE`, `RUN_JOB`.
 - [ ] Tests: table attachment overrides catalog `jobOptions`; auth secrets never persist in
       `policy_meta`; `runtime_job_template` redacts passwords / tokens / keytabs.
 
-### 9.2 Review Checklist
+### 8.2 Review Checklist
 
 | Area         | Checklist                                                                                                                                  |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM. Ops APIs on **8090** (§7).                           |
+| Deployment   | Enabled via `gravitino.server.rest.extensionPackages`; IRC colocated in the same JVM.                           |
 | Classpath    | TMS plugin on main server classpath; **not** an aux isolated listener.                                                                     |
 | Triggers     | Commit: ordered attached types (§5.6.1); crontab: per-policy ①; orphan-cleanup crontab-only.                                               |
-| Scheduling   | **db-scheduler**: three pools expand/table/commit; ②/③ short submit then DELETE; occupancy on job table (5.4, §8.4).                    |
+| Scheduling   | **db-scheduler**: three pools expand/table/commit; ②/③ short submit then DELETE; occupancy on job table (5.4, 7.4).                    |
 | Job records  | `table_maintenance_job` one row per `job_run_id` (Validation JSON + submit gates).                                                         |
 | Import       | Lazy `table_meta` import via `TableDispatcher.loadTable` (§5.4.3); not Iceberg `registerTable`.                                            |
-| Ops API      | Seven routes replace `gravitino-optimizer` (§7). Not used by the commit path. Table WRITE required.                                        |
 | Pipeline     | ①→INSERT ②; ②/③ short submit; listener writes after; reconcile: terminal → `finished_at`; missing Job → DELETE occupancy (§5.4.2).       |
 | Validation   | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Multi-node   | N compete, one pick; ②/③ pick+heartbeat anti-double-submit; dead-worker gated by `table_maintenance_job`.                               |
 | Policy       | Reuses metalake Policy APIs; create inserts ①; `schedule` + `jobOptions` in `policy_version_info.content` (§5.6, §5.7).                   |
 | Job boundary | Expand due ≠ Spark wall-clock; Spark in Jobs; Validation on `table_maintenance_job` (§6.2).                                                |
 | Principal    | Automated Jobs run as `tms`; `TmsPrincipalBootstrapListener` on plugin start + `CreateMetalakeEvent` when authorization is enabled (§5.5). |
-| Credentials  | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.8); not policy / not `tms_credential`.                         |
-| Security     | Ops APIs require table WRITE. TMS role is least-privilege for list + table write + run job. No commit-event or health endpoint.            |
+| Credentials  | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.7); not policy / not `tms_credential`.                         |
+| Security     | TMS role is least-privilege for list + table write + run job. No commit-event or health endpoint.                                            |
 | License      | db-scheduler is **Apache 2.0**; no LGPL scheduling dependency.                                                                             |
 
 ---
 
-## 10. References
+## 9. References
 
 1. [Gravitino Iceberg REST service](../docs/iceberg-rest-service.md)
 2. [Gravitino Lance REST service](../docs/lance-rest-service.md)
@@ -1298,6 +1264,6 @@ SecretManager, and policy `jobOptions`.
 5. [Table Maintenance optimizer overview](../docs/table-maintenance-service/optimizer.md)
 6. [Design of SCIM 2.0 User and Group Provisioning in Gravitino](./gravitino-scim-provisioning.md)
 7. [Amoro AIP-3 – Event-Triggered Optimization of Iceberg Tables](https://cwiki.apache.org/confluence/display/AMORO/AIP-3%3A+Event-Triggered+Optimization+of+Iceberg+Tables+in+Amoro)
-8. [OpenHouse architecture (Jobs Scheduler / CronJob data services)](https://github.com/linkedin/openhouse/blob/main/ARCHITECTURE.md)
-9. [Apache Iceberg REST Catalog OpenAPI](https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml)
-10. [db-scheduler](https://github.com/kagkarlsson/db-scheduler) — embedded persistent scheduler (Apache 2.0)
+7. [OpenHouse architecture (Jobs Scheduler / CronJob data services)](https://github.com/linkedin/openhouse/blob/main/ARCHITECTURE.md)
+8. [Apache Iceberg REST Catalog OpenAPI](https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml)
+9. [db-scheduler](https://github.com/kagkarlsson/db-scheduler) — embedded persistent scheduler (Apache 2.0)
