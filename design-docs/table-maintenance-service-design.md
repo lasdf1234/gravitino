@@ -55,8 +55,8 @@ commits.
    (multi-node coalesce on the unique key). It does **not** call `runJob` and does **not** use
    expand threads (§5.4).
 3. **Three db-scheduler task names on `scheduled_tasks`**:
-   - **`tms-policy-expand`** (①): `task_instance = {policy_id}`; `task_data` empty except a temporary
-     expand **cursor** while paging. Writes **`tms-table-scheduler`** rows; ① is **retained** (§5.5).
+   - **`tms-policy-expand`** (①): `task_instance = {policy_id}`; `task_data` empty by default.
+     Writes **`tms-table-scheduler`** rows; ① is **retained** (§5.5).
    - **`tms-table-scheduler`** (②): from crontab expand. Instance
      `table:{table_id}:{policy_id}` or `batch:{batch_id}:{policy_id}`;
      `task_data = { tableIds, policyIds }`. Short callback: `runJob` → INSERT job row → **DELETE** → return.

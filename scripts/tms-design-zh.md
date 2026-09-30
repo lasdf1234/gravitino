@@ -49,8 +49,7 @@ Gravitino 中的表维护服务（Table Maintenance Service，TMS）目前仍是
    收到 commit 事件（见 **§5.1.1**）。处理程序 **upsert** **`tms-table-commit`**（`task_instance = {table_id}`），
    多节点靠唯一键合并。不在 IRC 线程 `runJob`，也不占用 expand 线程（§5.4）。
 3. **`scheduled_tasks` 上三类 db-scheduler 任务**：
-   - **`tms-policy-expand`（①）**：`task_instance = {policy_id}`；`task_data` 默认空，仅分页时临时写
-     **cursor**。写出 **`tms-table-scheduler`**；① **保留**（§5.5）。
+   - **`tms-policy-expand`（①）**：`task_instance = {policy_id}`；`task_data` 默认空。写出 **`tms-table-scheduler`**；① **保留**（§5.5）。
    - **`tms-table-scheduler`（②）**：crontab expand 写出。实例
      `table:{table_id}:{policy_id}` 或 `batch:{batch_id}:{policy_id}`；
      `task_data = { tableIds, policyIds }`。短回调：`runJob` → INSERT job 行 → **DELETE** → return。
