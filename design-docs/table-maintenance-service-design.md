@@ -181,7 +181,7 @@ ties scheduler threads to long jobs and is rejected (Non-Goal #6).
 
 #### Industry and in-project alternatives
 
-|                                   |                                                                      |                                              |                                                      |                                                          |
+| --------------------------------- | -------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------- |
 | --------------------------------- | -------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------- |
 |                                   | **[db-scheduler](https://github.com/kagkarlsson/db-scheduler)**      | [JobRunr](https://www.jobrunr.io/)           | [ShedLock](https://github.com/lukas-krecan/ShedLock) | [Quartz](https://www.quartz-scheduler.org/) JDBC cluster |
 | License                           | Apache 2.0                                                           | LGPL v3 (+ commercial)                       | Apache 2.0                                           | Apache 2.0                                               |
@@ -240,9 +240,12 @@ keytabs, and similar).
 
 TMS is **commit-driven for enqueue** and **db-scheduler-driven for short execute**. IRC commit
 schedules (or reschedules) one db-scheduler task instance per Active `(table, policy)` with
-`execution_time = now`. **Every** TMS node runs db-scheduler; one node picks each due instance,
-runs `MaintenanceEvaluateSubmitPipeline`, inserts a `table_maintenance_job` row on submit, and
-**returns** (releases pick). Spark continues asynchronously under the job framework.
+`execution_time = now`. Writing a row to `scheduled_tasks` does **not** mean every node runs it:
+**every** TMS node polls, but **only one** node **picks** each due instance (N compete, one wins).
+That node runs `MaintenanceEvaluateSubmitPipeline`, and on successful `runJob` **immediately**
+`INSERT`s a `table_maintenance_job` row (`job_run_id` + keys; `finished_at = NULL`), then
+**returns** (releases pick). Spark continues asynchronously under the job framework — it does
+**not** share the evaluate `execution_time` as a wall-clock deadline (see §5.7 crontab timeline).
 
 Concurrent commits coalesce by upserting the **same** `task_instance` and setting `execution_time`
 to now.
@@ -260,25 +263,26 @@ Gravitino IRC (:9001)
                    execution_time = now
                    (coalesce: same instance, bump due time)
 
-Node A / Node B / Node C  — each runs db-scheduler (§5.5)
+Node A / Node B / Node C  — each polls db-scheduler (§5.5); N compete, one pick wins
         │
-        ├─ poll scheduled_tasks; pick due tms-evaluate instance (heartbeat while running)
+        ├─ when execution_time <= now: claim due tms-evaluate (heartbeat while running)
         ├─ MaintenanceEvaluateSubmitPipeline (short)
         │     ├─ ensureTableImported → table_meta / table_id (§5.5.4)
-        │     ├─ gates via table_maintenance_job: in-flight row / MAX(finished_at) vs minIntervalMs
+        │     ├─ gates: in-flight row? / MAX(finished_at) vs minIntervalMs → else skip
         │     ├─ Recommender → JobSubmitter when trigger passes
         │     ├─ jobConfig = template base ⊕ nearest policy jobOptions ⊕ SecretManager auth
-        │     ├─ submit as principal `tms` (§5.6)
-        │     ├─ on submit: INSERT table_maintenance_job row (before_metrics; §6.2)
+        │     ├─ runJob as principal `tms` → job_run_id (§5.6)
+        │     ├─ INSERT table_maintenance_job (job_run_id + keys; finished_at NULL) (§6.2)
         │     └─ return (release pick; do NOT wait for Spark)
         v
-                 Gravitino Job framework (rewrite / cleanup / …)
-                 job complete → UPDATE after_metrics + finished_at on that row (§6.2)
+                 Gravitino Job framework (async rewrite / cleanup / …)
+                 sample before_metrics before table mutation (may persist later)
+                 job complete → UPDATE before_metrics + after_metrics + finished_at (§6.2)
 
         ┌──────────────────────────────────────────────────────────────┐
         │  scheduled_tasks (db-scheduler)                               │
         │  • tms-evaluate per (table, policy) — short lease + heartbeat │
-        │  • all nodes poll; one pick wins                              │
+        │  • due ⇒ all nodes poll; only one pick executes that instance │
         └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -299,7 +303,7 @@ post-commit hook** invokes a **main-server-registered callback / SPI** (for exam
 instances** (one per policy). It does **not** invoke `MaintenanceEvaluateSubmitPipeline` on the
 commit path. Evaluate runs when **any** node picks the due task (§5.5).
 TMS does **not** persist a separate row per commit; the committed `snapshot_id` remains in Iceberg
-table metadata (optional to record on `table_maintenance_job.before_metrics` at submit time — §6.2).
+table metadata (optional to record on `table_maintenance_job.before_metrics` when sampled — §6.2).
 
 | Requirement | Detail                                                                                                                                        |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -307,7 +311,7 @@ table metadata (optional to record on `table_maintenance_job.before_metrics` at 
 | Transport   | In-process callback / SPI only — **no** HTTP `POST …/events/iceberg-commit`, **no** Kafka.                                                    |
 | Payload     | Normalized `table_identifier` (`catalog.schema.table`) and the committed `snapshot_id`. Policy selection uses Active policies + triggers.     |
 | Enqueue     | Upsert / reschedule `tms-evaluate` with `task_instance = {metalake_id}:{table_id}:{policy_id}`, `execution_time = now` (after §5.5.4 import). |
-| Execute     | db-scheduler pick on all nodes; short pipeline; release pick after submit/skip (§5.5).                                                        |
+| Execute     | All nodes poll; **one** pick runs the short pipeline; release pick after submit/skip (§5.5).                                                  |
 | Scheduling  | db-scheduler embedded in the TMS plugin; same JDBC DataSource as the entity store on MySQL / PostgreSQL.                                      |
 
 Deployment:
@@ -372,8 +376,9 @@ Deployment:
 
 3. Engines write through Gravitino Iceberg REST. On commit success, the **IRC hook** schedules
    db-scheduler evaluate instances for Active policies (§5.4).
-4. **Any** node's db-scheduler picks the due instance and runs the pipeline: gates (in-flight row,
-   `minIntervalMs`) → trigger → submit (§5.5, §6).
+4. **Any** node's db-scheduler may win the pick when due and run the pipeline: gates (in-flight,
+   `minIntervalMs`) → trigger → `runJob` → `INSERT` job row (§5.5, §6). Only **one** node runs that
+   instance.
 5. Operators observe runs in the Gravitino **Jobs** UI / APIs (including Validation from
    `table_maintenance_job`). Automated Job `audit.creator` is **`tms`**. Manual evaluate for tables
    without IRC commits uses the ops APIs in §7 (ops may schedule the same `tms-evaluate` instance or
@@ -405,19 +410,24 @@ coalesce on the same `task_instance`.
 ### 5.5 Execute path — db-scheduler pick + short pipeline
 
 ```text
-db-scheduler (every TMS node)
-        ├─ pick due tms-evaluate (sets picked, refreshes last_heartbeat while execute runs)
+db-scheduler (every TMS node polls; only one pick wins per due instance)
+        ├─ when due: pick tms-evaluate (sets picked, refreshes last_heartbeat while execute runs)
         ├─ MaintenanceEvaluateSubmitPipeline:
         │     ├─ ensureTableImported (§5.5.4)
         │     ├─ if in-flight row exists (finished_at IS NULL) → skip submit; return
-        │     ├─ else apply min-interval (MAX(finished_at) vs minIntervalMs)
+        │     ├─ else if MAX(finished_at) within minIntervalMs → skip submit; return
         │     ├─ Recommender.submitForStrategyName(...) → JobSubmitter when trigger passes
         │     ├─ overlay jobOptions from nearest attached policy of that type (§5.8)
-        │     ├─ overlay SecretManager auth + credential-vending conf; submit as `tms` (§5.6, §5.9)
-        │     ├─ on submit: INSERT table_maintenance_job row (before_metrics; §6.2)
-        │     └─ return quickly (release pick)
+        │     ├─ overlay SecretManager auth + credential-vending conf; runJob as `tms` (§5.6, §5.9)
+        │     ├─ on runJob success: INSERT table_maintenance_job
+        │     │     (job_run_id, metalake_id, table_id, policy_id; finished_at NULL) (§6.2)
+        │     └─ return quickly (release pick; Spark continues async)
         └─ dead JVM: missed heartbeats → dead execution handler reschedules / unlocks instance
 ```
+
+**Pick semantics:** Enqueueing into `scheduled_tasks` only sets **when** evaluate may run
+(`execution_time`). Nodes do **not** all execute the same instance; they **compete** and **one**
+claim succeeds (db-scheduler CAS / `SKIP LOCKED` + `picked` + heartbeat).
 
 **Why not wait for Spark inside the pick:** Scheduler heartbeat and worker threads must stay sized for
 **short** evaluate work. Preventing concurrent Spark submits uses an in-flight
@@ -459,12 +469,16 @@ namespace; this table is per-table, not per-schema.
 1. `ensureTableImported` (§5.5.4) — must succeed before submit gates when import is enabled.
 2. If an in-flight row exists for this `(metalake_id, table_id, policy_id)` (`finished_at IS NULL`):
    skip submit and return.
-3. Otherwise apply min-interval using `MAX(finished_at)` for that key and the resolved
-   `minIntervalMs` (table prop → global conf → code default; §8.3).
+3. Else if `MAX(finished_at)` for that key is still within the resolved `minIntervalMs` (table prop →
+   global conf → code default; §8.3): skip submit and return.
 4. Policy trigger (`Recommender`).
-5. On submit: overlay nearest-policy `jobOptions` (§5.8) and SecretManager auth / credential-vending
-   conf (§5.9); `runJob` as principal `tms`; `INSERT` a `table_maintenance_job` row with
-   `before_metrics` (§6.2).
+5. Overlay nearest-policy `jobOptions` (§5.8) and SecretManager auth / credential-vending conf
+   (§5.9); `runJob` as principal `tms` → `job_run_id`.
+6. **Immediately** `INSERT` `table_maintenance_job` with `job_run_id`, `metalake_id`, `table_id`,
+   `policy_id`, and `finished_at = NULL` (claim / in-flight marker; §6.2). Release the pick; do
+   **not** wait for Spark. `before_metrics` must be **sampled before** table mutation and **may**
+   be persisted on this INSERT or deferred to the terminal `UPDATE` with `after_metrics` +
+   `finished_at`.
 
 #### 5.5.4 Lazy Gravitino metadata import (`table_meta`)
 
@@ -618,6 +632,23 @@ policy_version_info.content.schedule  →  what the UI shows; source of truth fo
 scheduled_tasks.execution_time        →  next evaluate pick (runtime; from crontab or commit)
 table_maintenance_job + minIntervalMs →  in-flight job + submit cooldown (not crontab)
 ```
+
+**Crontab timeline (example: `0 2 * * *`):**
+
+```text
+[policy enable / attach]  →  ensure scheduled_tasks row; set execution_time to next 02:00
+02:00                     →  N nodes poll; ONE picks tms-evaluate
+                          →  gates (in-flight / minInterval) → Recommender → maybe runJob
+                          →  INSERT table_maintenance_job (job_run_id + keys); release pick
+~02:00:05 …               →  Spark runs asynchronously in the job framework
+                          →  terminal: UPDATE before_metrics + after_metrics + finished_at
+next crontab tick         →  bump scheduled_tasks.execution_time again
+```
+
+`execution_time = 02:00` is the **evaluate due time**, not a promise that every Spark rewrite starts
+at `02:00:00`. Evaluate starts when due; Spark follows after a successful submit (seconds to minutes
+later). Do **not** model “parse at 02:00, then write many Spark rows into `scheduled_tasks` that also
+fire at 02:00.”
 
 ### 5.8 Job template parameters on policy (`policy_meta`)
 
@@ -774,14 +805,16 @@ provider configuration change only.
 ## 6. Multi-node coordination
 
 On **multiple** Gravitino / TMS nodes, a commit may enqueue on the IRC node, but **every** node
-runs db-scheduler. Only one node picks a given `tms-evaluate` instance at a time (scheduler CAS +
-heartbeat).
+runs db-scheduler. Writing `scheduled_tasks` does **not** cause all nodes to execute; when
+`execution_time` is due, nodes **compete** and **only one** picks a given `tms-evaluate` instance
+(scheduler CAS + heartbeat).
 
-**Enqueue:** commit schedules / reschedules `tms-evaluate` (§5.4).
+**Enqueue:** commit or crontab sets / bumps `tms-evaluate` `execution_time` (§5.4, §5.7).
 
 **Evaluate mutex:** db-scheduler `picked` + `last_heartbeat` on that `task_instance` (§6.1).
 
-**Spark submit mutex / interval:** in-flight `table_maintenance_job` row + `MAX(finished_at)` (§6.2).
+**Spark submit mutex / interval:** gates **before** `runJob`; in-flight row after INSERT +
+`MAX(finished_at)` (§6.2).
 
 **Dead evaluate worker:** if the picking JVM dies mid-callback, heartbeats stop; db-scheduler dead
 execution handling unlocks / reschedules the instance. This does **not** cancel an already-submitted
@@ -801,12 +834,16 @@ Auth material uses SecretManager. Job-template **parameters** stay on policy att
 ### 6.1 Evaluate lease (`scheduled_tasks`)
 
 ```text
-Commit on Node A → schedule task_instance I due now
-Node A / B / C db-scheduler poll
+Commit / crontab on Node A → schedule task_instance I (execution_time set)
+Node A / B / C db-scheduler poll continuously
         │
-        ├─ pick I → run short pipeline → return → unpick
+        ├─ before due: I is visible but not executable
+        ├─ when due: N compete; ONE pick wins → short pipeline → return → unpick
         └─ if picker dies → missed heartbeats → dead handler → I runnable again
 ```
+
+**Not** “write `scheduled_tasks` ⇒ every node executes.” **Yes** “when due ⇒ every node may try;
+exactly one claim runs the evaluate callback.”
 
 Illustrative `scheduled_tasks` columns (db-scheduler owned; MySQL-shaped):
 
@@ -826,15 +863,15 @@ One row per Spark `job_run_id`. The same table serves Automate **Jobs → Valida
 JSON) and submit gates (in-flight row + `minIntervalMs`). `minIntervalMs` uses `finished_at` on
 this row as the task end time, not `job_run_meta.job_finished_at`.
 
-| Column           | Type                       | Notes                                                                      |
-| ---------------- | -------------------------- | -------------------------------------------------------------------------- |
-| `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`; primary key                                     |
-| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                                |
-| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after §5.5.4 import)                            |
-| `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                    |
-| `before_metrics` | `MEDIUMTEXT NULL`          | JSON object string captured at submit                                      |
-| `after_metrics`  | `MEDIUMTEXT NULL`          | JSON object string after job terminal status; null while pending           |
-| `finished_at`    | `BIGINT UNSIGNED NULL`     | Task end time (epoch millis); **null = in-flight**; drives `minIntervalMs` |
+| Column           | Type                       | Notes                                                                        |
+| ---------------- | -------------------------- | ---------------------------------------------------------------------------- |
+| `job_run_id`     | `BIGINT UNSIGNED NOT NULL` | `job_run_meta.job_run_id`; primary key                                       |
+| `metalake_id`    | `BIGINT UNSIGNED NOT NULL` | Metalake id                                                                  |
+| `table_id`       | `BIGINT UNSIGNED NOT NULL` | `table_meta` surrogate id (after §5.5.4 import)                              |
+| `policy_id`      | `BIGINT UNSIGNED NOT NULL` | `policy_meta.policy_id`                                                      |
+| `before_metrics` | `MEDIUMTEXT NULL`          | JSON sampled **before** table mutation; may stay null until terminal persist |
+| `after_metrics`  | `MEDIUMTEXT NULL`          | JSON after job terminal status; null while pending                           |
+| `finished_at`    | `BIGINT UNSIGNED NULL`     | Task end time (epoch millis); **null = in-flight**; drives `minIntervalMs`   |
 
 **Primary key:** (`job_run_id`). No `table_identifier` or `schema_id` column — `table_id` is
 sufficient and aligns with `policy_relation_meta.metadata_object_id` for table policies.
@@ -849,15 +886,22 @@ No `evaluate_pending`, no `IDLE`/`RUNNING`, no application lease heartbeat — t
 | `job_metrics`           | Job-scoped optimizer time series       | No — not table before/after UI |
 | `table_maintenance_job` | Frozen before/after JSON per job       | **Yes**                        |
 
-**Submit gates** (for a given `(metalake_id, table_id, policy_id)`):
+**Submit gates** (for a given `(metalake_id, table_id, policy_id)`), applied **before** `runJob`:
 
 1. **In-flight:** `SELECT 1 … WHERE finished_at IS NULL LIMIT 1` — if found, skip submit.
 2. **Min interval:** `SELECT MAX(finished_at) …` and compare to resolved `minIntervalMs` (§8.3).
 
 **Lifecycle:**
 
-1. On submit: `INSERT` row with `job_run_id`, keys, and `before_metrics`; `finished_at` stays null.
-2. On job terminal status (status poll or job listener): `UPDATE after_metrics` and `finished_at`.
+1. After gates + `Recommender` pass: `runJob` → obtain `job_run_id`.
+2. **Immediately** `INSERT` (`job_run_id`, `metalake_id`, `table_id`, `policy_id`) with
+   `finished_at = NULL` (in-flight claim). `before_metrics` / `after_metrics` may be null here.
+3. Spark runs asynchronously. **Sample** `before_metrics` before any table mutation (TMS submit
+   path or Spark job start). Persisting that JSON may wait until step 4.
+4. On job terminal status (job callback / listener): `UPDATE` `before_metrics` (if not written
+   yet), `after_metrics`, and `finished_at`.
+
+Do **not** sample “before” metrics after rewrite / expire has already mutated the table.
 
 Illustrative MySQL DDL:
 
@@ -867,7 +911,7 @@ CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
     `metalake_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'metalake id',
     `table_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'table id from table_meta',
     `policy_id` BIGINT(20) UNSIGNED NOT NULL COMMENT 'policy id from policy_meta',
-    `before_metrics` MEDIUMTEXT NULL COMMENT 'JSON object string at submit',
+    `before_metrics` MEDIUMTEXT NULL COMMENT 'JSON sampled before mutation; may persist at terminal',
     `after_metrics` MEDIUMTEXT NULL COMMENT 'JSON object string after job; null while pending',
     `finished_at` BIGINT(20) UNSIGNED NULL COMMENT 'maintenance task end time (epoch millis); null = in-flight',
     PRIMARY KEY (`job_run_id`),
@@ -1114,10 +1158,10 @@ submit pipeline.
       thread. Do **not** add separate TMS event or evaluate-state tables.
 - [ ] Wire IRC post-commit hook to the in-process callback (`tableMaintenance.inProcess`).
 - [ ] Wire IRC **drop** hook to delete scheduler instances + `table_maintenance_job` rows (§6.3).
-- [ ] On submit / job complete: `INSERT` / `UPDATE` `table_maintenance_job` (`before_metrics` /
-      `after_metrics` + `finished_at`) (§6.2).
-- [ ] Integration tests: commit only enqueues; picks execute; in-flight row prevents double-submit;
-      drop cleans scheduler + job rows.
+- [ ] On `runJob` success: `INSERT` `table_maintenance_job` (`job_run_id` + keys, `finished_at` null);
+      on terminal: `UPDATE` `before_metrics` + `after_metrics` + `finished_at` (§6.2).
+- [ ] Integration tests: due tasks are single-picked (N compete, one wins); in-flight / minInterval
+      skip submit; drop cleans scheduler + job rows.
 - [ ] Do **not** ship HTTP `…/events/iceberg-commit` or Kafka ingress.
 
 #### Phase 5 checklist
@@ -1161,9 +1205,9 @@ submit pipeline.
 | Pipeline      | Scheduler pick → gates → `Recommender` → Jobs; pick released after submit/skip.                                                            |
 | Validation    | `table_maintenance_job` (`before_metrics` / `after_metrics` JSON + `finished_at`) (§6.2).                                                  |
 | Drop          | Drop hook deletes scheduler instances + `table_maintenance_job` rows (§6.3). Rename out of scope.                                          |
-| Multi-node    | db-scheduler pick across nodes; Spark double-submit blocked by in-flight row.                                                              |
+| Multi-node    | Due `scheduled_tasks`: N poll, one pick; Spark double-submit blocked by in-flight row.                                                     |
 | Policy        | Reuses metalake Policy APIs + `policy_meta`; `schedule` (§5.7) + `jobOptions` on content; nearest attachment wins (§5.8).                  |
-| Job boundary  | Spark in job framework (`job_run_meta` is a **run snapshot**); Validation in `table_maintenance_job`.                                      |
+| Job boundary  | Evaluate due time ≠ Spark wall-clock start; Validation metrics on `table_maintenance_job` (§6.2).                                          |
 | Principal     | Automated Jobs run as `tms`; `TmsPrincipalBootstrapListener` on plugin start + `CreateMetalakeEvent` when authorization is enabled (§5.6). |
 | Credentials   | Auth via SecretManager (none/basic/oauth/kerberos) + credential vending (§5.9); not policy / not `tms_credential`.                         |
 | Security      | Ops APIs require table WRITE. TMS role is least-privilege for list + table write + run job. No commit-event or health endpoint.            |
