@@ -27,7 +27,9 @@ public final class InJobSampleOutcome {
   /** Why maintenance should not continue after the sample. */
   public enum StopReason {
     /** HEAD snapshot id differs from {@code S0}; do not re-sample in a loop. */
-    SNAPSHOT_DRIFT
+    SNAPSHOT_DRIFT,
+    /** Recommender decided not to maintain; end early without running work (§5.2.2). */
+    RECOMMENDER_SKIP
   }
 
   private final boolean continueMaintenance;

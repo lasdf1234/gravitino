@@ -31,6 +31,7 @@ dependencies {
   implementation(project(":core"))
 
   implementation(libs.guava)
+  implementation(libs.jackson.databind)
   implementation(libs.mybatis)
 
   compileOnly(libs.lombok)
