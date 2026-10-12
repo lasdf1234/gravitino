@@ -25,10 +25,10 @@ import org.apache.gravitino.Config;
 import org.apache.gravitino.policy.TableMaintenanceContent;
 
 /**
- * Cluster-static auth bags for TMS {@code runJob}, loaded from {@code gravitino.conf}.
+ * Cluster-static auth bags for TMS, loaded from {@code gravitino.conf}.
  *
- * <p>Not part of {@link TableMaintenanceContent}; overlaid when building {@link
- * TableMaintenanceRunJobBags}.
+ * <p>Not part of {@link TableMaintenanceContent}. How the server applies these entries at job
+ * submission is defined by the TMS runtime, not this loader.
  */
 public final class MaintenanceClientAuth {
 
@@ -70,19 +70,6 @@ public final class MaintenanceClientAuth {
    */
   public Map<String, String> ircAuth() {
     return ircAuth;
-  }
-
-  /**
-   * Overlays these cluster auth bags onto policy peer options.
-   *
-   * @param policyJobOptions effective policy {@code jobOptions}
-   * @param policyUpdateOptions effective policy {@code updateOptions}
-   * @return merged {@code runJob} bags
-   */
-  public TableMaintenanceRunJobBags overlayOn(
-      Map<String, String> policyJobOptions, Map<String, String> policyUpdateOptions) {
-    return TableMaintenanceRunJobBags.overlayAtRunJob(
-        policyJobOptions, policyUpdateOptions, gravitinoAuth, ircAuth);
   }
 
   @Override

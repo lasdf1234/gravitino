@@ -42,12 +42,6 @@ class TestMaintenanceClientAuth {
     Assertions.assertEquals("oauth2", auth.gravitinoAuth().get("authType"));
     Assertions.assertEquals("oauth2", auth.ircAuth().get("authType"));
     Assertions.assertEquals("id:secret", auth.ircAuth().get("oauthCredential"));
-
-    TableMaintenanceRunJobBags bags =
-        auth.overlayOn(ImmutableMap.of("uri", "http://irc"), ImmutableMap.of("metalake", "ml"));
-    Assertions.assertEquals("id:secret", bags.jobOptions().get("oauthCredential"));
-    Assertions.assertEquals("oauth2", bags.updateOptions().get("authType"));
-    Assertions.assertEquals("ml", bags.updateOptions().get("metalake"));
   }
 
   @Test
