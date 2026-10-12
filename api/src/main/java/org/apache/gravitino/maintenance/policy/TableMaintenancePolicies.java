@@ -34,8 +34,9 @@ import org.apache.gravitino.policy.TableMaintenanceContent;
  * content.
  *
  * <p>Validation of {@code schedule} / {@code minIntervalMs} / {@code jobOptions} / {@code
- * updateOptions} lives here (called from PolicyManager), not inside the four task content {@code
- * validate()} methods.
+ * updateOptions} lives here — called from PolicyManager, PolicyEntity, and maintenance
+ * PolicyContentDTO {@code validate()} — not inside the four task content {@code validate()} methods
+ * (those cover task-specific thresholds only).
  */
 public final class TableMaintenancePolicies {
 

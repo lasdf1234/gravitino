@@ -31,7 +31,10 @@ import org.apache.gravitino.MetadataObject;
  * Placeholder built-in policy content for Iceberg manifest rewrite.
  *
  * <p>Configurable thresholds will be added when the rewrite-manifests policy lands; this class
- * registers the built-in type for TMS task mapping.
+ * registers the built-in type for TMS task mapping. TMS peer fields ({@code schedule}, {@code
+ * minIntervalMs}, {@code jobOptions}, {@code updateOptions}) may be stored for schema symmetry;
+ * generated {@code trigger-expr} remains {@code false} so peers are not evaluated for enqueue until
+ * the type is fully wired.
  */
 public class IcebergRewriteManifestsContent extends TableMaintenanceContent {
   /** Property key for strategy type. */
@@ -51,8 +54,8 @@ public class IcebergRewriteManifestsContent extends TableMaintenanceContent {
       ImmutableSet.of(
           MetadataObject.Type.CATALOG, MetadataObject.Type.SCHEMA, MetadataObject.Type.TABLE);
 
-  /** Default constructor for Jackson deserialization only. */
-  public IcebergRewriteManifestsContent() {}
+  /** Default constructor for Jackson and {@link PolicyContents}; not a public API. */
+  IcebergRewriteManifestsContent() {}
 
   @Override
   public Set<MetadataObject.Type> supportedObjectTypes() {

@@ -29,6 +29,15 @@ import org.apache.gravitino.policy.Policy;
  * <p>This enum is not a second policy-type system: {@link #builtInType()} is the source of truth
  * for policy identity. Use these values for scheduler config keys ({@link #configKey()}), onCommit
  * eligibility, and default {@code minIntervalMs} only.
+ *
+ * <pre>
+ * configKey          BuiltInType / policyType string
+ * -----------------  ------------------------------------------------
+ * compaction         system_iceberg_compaction
+ * manifest-rewrite   system_iceberg_rewrite_manifests
+ * snapshot-expiry    system_iceberg_snapshot_expiration
+ * orphan-cleanup     system_iceberg_orphan_file_removal
+ * </pre>
  */
 public enum TableMaintenanceTaskType {
   /** Iceberg data file compaction. */

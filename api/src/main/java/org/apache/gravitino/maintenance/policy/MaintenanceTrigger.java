@@ -33,14 +33,22 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>{@code cronExpression} is a <strong>Quartz cron</strong> expression with either 6 fields
  * ({@code seconds minutes hours day-of-month month day-of-week}) or 7 fields (optional trailing
- * {@code year}). Supported tokens per field: digits, {@code *}, {@code ,}, {@code -}, {@code /},
- * {@code ?}, {@code L}, {@code W}, {@code #}, and month/day-of-week names. Time zone is the server
- * default; this type does not carry a zone id.
+ * {@code year}). Time zone is the server default; this type does not carry a zone id.
+ *
+ * <p>{@link #validateCronExpression(String)} is a <strong>shape check</strong> only: field count
+ * plus allowed Quartz tokens (digits, {@code *}, {@code ,}, {@code -}, {@code /}, {@code ?}, {@code
+ * L}, {@code W}, {@code #}, and month/day-of-week names). It does not enforce Quartz value ranges
+ * or cross-field rules (for example {@code seconds=99} may pass here and fail when the scheduler
+ * expands the expression).
  */
 public final class MaintenanceTrigger {
 
+  /** Allowed charset / named tokens per Quartz cron field (shape only, not full Quartz parse). */
   private static final Pattern CRON_FIELD =
-      Pattern.compile("[0-9A-Za-z*/,?#\\-LW]+", Pattern.CASE_INSENSITIVE);
+      Pattern.compile(
+          "(?i)^(?:\\*|/|-|,|\\?|#|[0-9]|L|W|"
+              + "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|"
+              + "SUN|MON|TUE|WED|THU|FRI|SAT)+$");
 
   private final boolean onCommit;
   @Nullable private final String cronExpression;
@@ -102,7 +110,7 @@ public final class MaintenanceTrigger {
   }
 
   /**
-   * Validates Quartz cron field count and token grammar.
+   * Validates Quartz cron field count and allowed tokens (shape check, not full Quartz parse).
    *
    * @param expression trimmed cron expression
    */
@@ -120,7 +128,8 @@ public final class MaintenanceTrigger {
     for (int i = 0; i < fields.length; i++) {
       Preconditions.checkArgument(
           CRON_FIELD.matcher(fields[i]).matches(),
-          "cronExpression field %s ('%s') contains illegal characters",
+          "cronExpression field %s ('%s') is not a valid Quartz cron token "
+              + "(digits, *, ,, -, /, ?, L, W, #, or month/day-of-week names)",
           i + 1,
           fields[i]);
     }

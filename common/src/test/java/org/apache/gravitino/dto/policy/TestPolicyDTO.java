@@ -214,5 +214,27 @@ public class TestPolicyDTO {
     Assertions.assertEquals(3_600_000L, content.minIntervalMs());
     Assertions.assertEquals("4g", content.jobOptions().get("spark.executor.memory"));
     Assertions.assertEquals("ml", content.updateOptions().get("metalake"));
+    Assertions.assertDoesNotThrow(content::validate);
+  }
+
+  @Test
+  public void testMaintenancePeerValidateOnDto() {
+    PolicyContentDTO.IcebergOrphanFileRemovalContentDTO orphanOnCommit =
+        PolicyContentDTO.IcebergOrphanFileRemovalContentDTO.builder()
+            .withSchedule(
+                PolicyContentDTO.MaintenanceTriggerDTO.builder().withOnCommit(true).build())
+            .build();
+    IllegalArgumentException orphanEx =
+        Assertions.assertThrows(IllegalArgumentException.class, orphanOnCommit::validate);
+    Assertions.assertTrue(orphanEx.getMessage().contains("onCommit"));
+
+    PolicyContentDTO.IcebergCompactionContentDTO badCron =
+        PolicyContentDTO.IcebergCompactionContentDTO.builder()
+            .withSchedule(
+                PolicyContentDTO.MaintenanceTriggerDTO.builder()
+                    .withCronExpression("a a a a a a")
+                    .build())
+            .build();
+    Assertions.assertThrows(IllegalArgumentException.class, badCron::validate);
   }
 }

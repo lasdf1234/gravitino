@@ -128,8 +128,16 @@ public class TestTableMaintenanceContent {
   @Test
   void testCronExpressionGrammar() {
     Assertions.assertDoesNotThrow(() -> MaintenanceTrigger.validateCronExpression("0 0 2 * * ?"));
+    Assertions.assertDoesNotThrow(
+        () -> MaintenanceTrigger.validateCronExpression("0 0 2 ? * MON-FRI"));
     Assertions.assertThrows(
         IllegalArgumentException.class, () -> MaintenanceTrigger.validateCronExpression("0 2 * *"));
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> MaintenanceTrigger.validateCronExpression("a a a a a a"));
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> MaintenanceTrigger.validateCronExpression("0 0 2 * * foo"));
   }
 
   @Test

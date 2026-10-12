@@ -30,9 +30,11 @@ import lombok.EqualsAndHashCode;
 import lombok.ToString;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.maintenance.policy.MaintenanceTrigger;
+import org.apache.gravitino.maintenance.policy.TableMaintenancePolicies;
 import org.apache.gravitino.policy.ColumnMaskContent;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
+import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyContents;
 import org.apache.gravitino.policy.RowFilterContent;
@@ -315,7 +317,9 @@ public interface PolicyContentDTO extends PolicyContent {
     @Override
     public void validate() throws IllegalArgumentException {
       PolicyContentDTO.super.validate();
-      toDomainContent().validate();
+      PolicyContent content = toDomainContent();
+      content.validate();
+      TableMaintenancePolicies.validate(Policy.BuiltInType.ICEBERG_COMPACTION, content);
     }
 
     private PolicyContent toDomainContent() {
@@ -442,7 +446,9 @@ public interface PolicyContentDTO extends PolicyContent {
     @Override
     public void validate() {
       PolicyContentDTO.super.validate();
-      toDomainContent().validate();
+      PolicyContent content = toDomainContent();
+      content.validate();
+      TableMaintenancePolicies.validate(Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL, content);
     }
 
     private PolicyContent toDomainContent() {
@@ -538,7 +544,9 @@ public interface PolicyContentDTO extends PolicyContent {
     @Override
     public void validate() {
       PolicyContentDTO.super.validate();
-      toDomainContent().validate();
+      PolicyContent content = toDomainContent();
+      content.validate();
+      TableMaintenancePolicies.validate(Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, content);
     }
 
     private PolicyContent toDomainContent() {
@@ -628,7 +636,9 @@ public interface PolicyContentDTO extends PolicyContent {
     @Override
     public void validate() {
       PolicyContentDTO.super.validate();
-      toDomainContent().validate();
+      PolicyContent content = toDomainContent();
+      content.validate();
+      TableMaintenancePolicies.validate(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION, content);
     }
 
     private PolicyContent toDomainContent() {

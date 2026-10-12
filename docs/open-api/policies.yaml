@@ -336,18 +336,28 @@ components:
 
     MaintenanceTrigger:
       type: object
-      description: Evaluate triggers for table maintenance (event and/or cron). At least one of onCommit or cronExpression should be set when present.
+      description: >
+        Evaluate triggers for table maintenance (event and/or cron). At least one of onCommit or
+        cronExpression should be set when the schedule object is present.
       properties:
         onCommit:
           type: boolean
           description: Whether IRC commit should enqueue maintenance. Not allowed for orphan-cleanup.
         cronExpression:
           type: string
-          description: Quartz cron with 6 fields (seconds minutes hours day-of-month month day-of-week) or 7 fields (optional year).
+          description: >
+            Quartz cron with 6 fields (seconds minutes hours day-of-month month day-of-week) or 7
+            fields (optional year). Server validates field count and allowed tokens only; Quartz
+            value ranges and cross-field rules are enforced when the scheduler expands the expression.
 
     TableMaintenancePeerFields:
       type: object
-      description: Optional TMS peer fields shared by built-in table-maintenance policy contents.
+      description: >
+        Optional TMS peer fields shared by built-in table-maintenance policy contents
+        (schedule, minIntervalMs, jobOptions, updateOptions). Stored on all four maintenance
+        types for schema symmetry. For placeholder types whose generated trigger-expr is false
+        (rewrite-manifests, snapshot-expiration), peers are accepted and persisted but are not
+        evaluated for enqueue until that type is fully wired.
       properties:
         schedule:
           $ref: '#/components/schemas/MaintenanceTrigger'
@@ -358,7 +368,7 @@ components:
           description: Cooldown after last finished job for this policy type.
         jobOptions:
           type: object
-          description: Spark / IRC client options merged into runJob conf.
+          description: Spark / IRC client options merged into runJob conf (separate from rewriteOptions).
           additionalProperties:
             type: string
             minLength: 1
@@ -491,7 +501,10 @@ components:
       allOf:
         - $ref: '#/components/schemas/TableMaintenancePeerFields'
         - type: object
-          description: Placeholder content for system_iceberg_rewrite_manifests. Configurable thresholds land in a follow-up.
+          description: >
+            Placeholder content for system_iceberg_rewrite_manifests. Configurable thresholds land
+            in a follow-up. Peer fields may be stored now; trigger-expr remains false so schedule
+            does not enqueue until the type is wired.
 
     IcebergRewriteManifestsPolicy:
       allOf:
@@ -521,7 +534,10 @@ components:
       allOf:
         - $ref: '#/components/schemas/TableMaintenancePeerFields'
         - type: object
-          description: Placeholder content for system_iceberg_snapshot_expiration. Configurable thresholds land in a follow-up.
+          description: >
+            Placeholder content for system_iceberg_snapshot_expiration. Configurable thresholds land
+            in a follow-up. Peer fields may be stored now; trigger-expr remains false so schedule
+            does not enqueue until the type is wired.
 
     IcebergSnapshotExpirationPolicy:
       allOf:
