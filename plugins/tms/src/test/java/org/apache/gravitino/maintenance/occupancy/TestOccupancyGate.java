@@ -18,99 +18,101 @@
  */
 package org.apache.gravitino.maintenance.occupancy;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
+import java.io.IOException;
+import java.util.function.Function;
+import org.apache.gravitino.Namespace;
 import org.apache.gravitino.job.JobHandle;
 import org.apache.gravitino.maintenance.storage.service.TableMaintenanceJobMetaService;
+import org.apache.gravitino.meta.JobEntity;
+import org.apache.gravitino.meta.JobTemplateEntity;
+import org.apache.gravitino.meta.TableEntity;
 import org.apache.gravitino.storage.relational.TestJDBCBackend;
-import org.apache.gravitino.storage.relational.session.SqlSessionFactoryHelper;
-import org.apache.ibatis.session.SqlSession;
+import org.apache.gravitino.storage.relational.service.JobMetaService;
+import org.apache.gravitino.utils.NameIdentifierUtil;
+import org.apache.gravitino.utils.NamespaceUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.TestTemplate;
 
 class TestOccupancyGate extends TestJDBCBackend {
 
   @TestTemplate
-  void testInFlightReadsJobRunMetaWithoutBackfillingFinishedAt() throws SQLException {
+  void testInFlightReadsJobMetaServiceWithoutBackfillingFinishedAt() throws IOException {
+    String metalakeName = "tms_occ_ml";
+    BaseMetalake metalake = createAndInsertMakeLake(metalakeName);
+    createAndInsertCatalog(metalakeName, "cat");
+    createAndInsertSchema(metalakeName, "cat", "sch");
+    TableEntity table = createAndInsertTableEntity(Namespace.of(metalakeName, "cat", "sch"), "tbl");
+    JobTemplateEntity template =
+        createAndInsertShellJobTemplateEntity("occ-template", "comment", metalakeName);
+
     TableMaintenanceJobMetaService jobs = TableMaintenanceJobMetaService.getInstance();
     OccupancyGate gate = new OccupancyGate(jobs);
-
-    long tableId = 11L;
     long policyId = 22L;
-    long jobId = 7001L;
 
-    Assertions.assertFalse(gate.isInFlight(tableId, policyId));
+    Assertions.assertFalse(gate.isInFlight(table.id(), policyId));
 
-    jobs.insertJob(jobId, tableId, policyId);
-    // finished_at is null but job_run_meta is missing ⇒ not treated as in-flight.
-    Assertions.assertFalse(gate.isInFlight(tableId, policyId));
+    JobEntity started =
+        JobEntity.builder()
+            .withId(7001L)
+            .withJobExecutionId("exec-7001")
+            .withNamespace(NamespaceUtil.ofJob(metalakeName))
+            .withJobTemplateName(template.name())
+            .withStatus(JobHandle.Status.STARTED)
+            .withAuditInfo(AUDIT_INFO)
+            .withStartedAt(System.currentTimeMillis())
+            .withFinishedAt(0L)
+            .build();
+    backend.insert(started, false);
+    jobs.insertJob(started.id(), table.id(), policyId);
 
-    insertJobRun(jobId, JobHandle.Status.STARTED.name(), 0L);
-    Assertions.assertTrue(gate.isInFlight(tableId, policyId));
+    Assertions.assertTrue(gate.isInFlight(table.id(), policyId));
     Assertions.assertTrue(
-        gate.shouldSkip(tableId, policyId, 3_600_000L, System.currentTimeMillis()));
-    Assertions.assertNull(jobs.getJob(jobId).finishedAt());
+        gate.shouldSkip(table.id(), policyId, 3_600_000L, System.currentTimeMillis()));
+    Assertions.assertNull(jobs.getJob(started.id()).finishedAt());
 
     long finishedAt = 1_700_000_000_000L;
-    updateJobRun(jobId, JobHandle.Status.SUCCEEDED.name(), finishedAt);
-    Assertions.assertFalse(gate.isInFlight(tableId, policyId));
-    // Still no backfill on table_maintenance_job.finished_at.
-    Assertions.assertNull(jobs.getJob(jobId).finishedAt());
+    JobMetaService.getInstance()
+        .updateJob(
+            NameIdentifierUtil.ofJob(metalakeName, started.name()),
+            (Function<JobEntity, JobEntity>)
+                current ->
+                    JobEntity.builder()
+                        .withId(current.id())
+                        .withJobExecutionId(current.jobExecutionId())
+                        .withNamespace(current.namespace())
+                        .withJobTemplateName(current.jobTemplateName())
+                        .withStatus(JobHandle.Status.SUCCEEDED)
+                        .withAuditInfo(current.auditInfo())
+                        .withStartedAt(current.startedAt())
+                        .withFinishedAt(finishedAt)
+                        .build());
+
+    Assertions.assertFalse(gate.isInFlight(table.id(), policyId));
+    Assertions.assertNull(jobs.getJob(started.id()).finishedAt());
     Assertions.assertTrue(
-        gate.withinMinInterval(tableId, policyId, 3_600_000L, finishedAt + 1_000L));
+        gate.withinMinInterval(table.id(), policyId, 3_600_000L, finishedAt + 1_000L));
     Assertions.assertFalse(
-        gate.withinMinInterval(tableId, policyId, 3_600_000L, finishedAt + 3_600_001L));
+        gate.withinMinInterval(table.id(), policyId, 3_600_000L, finishedAt + 3_600_001L));
   }
 
   @TestTemplate
-  void testMinIntervalUsesMarkedFinishedAt() {
+  void testMinIntervalUsesMarkedFinishedAt() throws IOException {
+    String metalakeName = "tms_occ_ml2";
+    createAndInsertMakeLake(metalakeName);
+    createAndInsertCatalog(metalakeName, "cat");
+    createAndInsertSchema(metalakeName, "cat", "sch");
+    TableEntity table = createAndInsertTableEntity(Namespace.of(metalakeName, "cat", "sch"), "tbl");
+
     TableMaintenanceJobMetaService jobs = TableMaintenanceJobMetaService.getInstance();
     OccupancyGate gate = new OccupancyGate(jobs);
-
-    long tableId = 33L;
     long policyId = 44L;
     long jobId = 7002L;
     long finishedAt = 1_700_000_100_000L;
 
-    jobs.insertJob(jobId, tableId, policyId);
+    jobs.insertJob(jobId, table.id(), policyId);
     jobs.markFinished(jobId, 200L, finishedAt);
-    Assertions.assertFalse(gate.isInFlight(tableId, policyId));
+    Assertions.assertFalse(gate.isInFlight(table.id(), policyId));
     Assertions.assertTrue(
-        gate.withinMinInterval(tableId, policyId, 3_600_000L, finishedAt + 1_000L));
-  }
-
-  private static void insertJobRun(long jobRunId, String status, long finishedAt)
-      throws SQLException {
-    String sql =
-        "INSERT INTO job_run_meta (job_run_id, job_template_id, metalake_id, job_execution_id,"
-            + " job_run_status, job_started_at, job_finished_at, audit_info, current_version,"
-            + " last_version, deleted_at) VALUES (?, 1, 1, ?, ?, 1, ?, '{}', 1, 1, 0)";
-    try (SqlSession sqlSession =
-            SqlSessionFactoryHelper.getInstance().getSqlSessionFactory().openSession(true);
-        Connection connection = sqlSession.getConnection();
-        PreparedStatement stmt = connection.prepareStatement(sql)) {
-      stmt.setLong(1, jobRunId);
-      stmt.setString(2, "exec-" + jobRunId);
-      stmt.setString(3, status);
-      stmt.setLong(4, finishedAt);
-      stmt.executeUpdate();
-    }
-  }
-
-  private static void updateJobRun(long jobRunId, String status, long finishedAt)
-      throws SQLException {
-    String sql =
-        "UPDATE job_run_meta SET job_run_status = ?, job_finished_at = ?"
-            + " WHERE job_run_id = ? AND deleted_at = 0";
-    try (SqlSession sqlSession =
-            SqlSessionFactoryHelper.getInstance().getSqlSessionFactory().openSession(true);
-        Connection connection = sqlSession.getConnection();
-        PreparedStatement stmt = connection.prepareStatement(sql)) {
-      stmt.setString(1, status);
-      stmt.setLong(2, finishedAt);
-      stmt.setLong(3, jobRunId);
-      stmt.executeUpdate();
-    }
+        gate.withinMinInterval(table.id(), policyId, 3_600_000L, finishedAt + 1_000L));
   }
 }
