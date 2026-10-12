@@ -29,15 +29,14 @@ gravitino.jobExecutor.local.sparkHome=/path/to/spark
 
 ### TMS cluster-static client auth
 
-For in-process Table Maintenance Service (TMS), client credentials live in `gravitino.conf`, not in policy
-content. At `runJob`, the control plane overlays cluster auth onto policy peer bags. Policy `jobOptions` and
-`updateOptions` carry non-sensitive runtime props only; cluster auth suffix keys win on duplicate entries.
+For in-process Table Maintenance Service (TMS), client credentials are **cluster-static**: set them under
+the prefixes below in `gravitino.conf`. Do not store passwords, OAuth secrets, or keytab paths in policy
+content. Values may be plaintext or secret-manager references when the deployment supports them.
 
 #### Gravitino client auth (`gravitino.maintenance.gravitinoAuth.`)
 
-Prefix for the Gravitino control-plane client (expand, submit, RBAC, and jobs that call Gravitino APIs).
-Entries are merged into policy `updateOptions` at `runJob`. Values may be plaintext or secret-manager
-references when the deployment supports them.
+Configuration for the Gravitino control-plane client (expand, submit, RBAC, and jobs that call Gravitino
+APIs).
 
 | Key suffix (after prefix) | Used when `authType` is | Meaning                                        |
 | ------------------------- | ----------------------- | ---------------------------------------------- |
@@ -83,8 +82,8 @@ gravitino.maintenance.gravitinoAuth.keytab = /etc/security/keytabs/tms-gravitino
 
 #### Iceberg REST client auth (`gravitino.maintenance.ircAuth.`)
 
-Prefix for Spark jobs that call Iceberg REST (IRC). Entries are merged into policy `jobOptions` at
-`runJob`. The suffix keys match Gravitino client auth; only the prefix and runtime bag differ.
+Configuration for Spark jobs that call Iceberg REST (IRC). The suffix keys match Gravitino client auth;
+only the prefix differs.
 
 | Key suffix (after prefix) | Used when `authType` is | Meaning                                        |
 | ------------------------- | ----------------------- | ---------------------------------------------- |
@@ -127,31 +126,6 @@ gravitino.maintenance.ircAuth.authType = kerberos
 gravitino.maintenance.ircAuth.kerberosPrincipal = tms/_HOST@EXAMPLE.COM
 gravitino.maintenance.ircAuth.keytab = /etc/security/keytabs/tms-irc.keytab
 ```
-
-Policy peers remain non-sensitive. Example compaction policy content (REST) with peers only:
-
-```json
-{
-  "schedule": { "onCommit": true, "cronExpression": "0 0 2 * * ?" },
-  "minIntervalMs": 3600000,
-  "jobOptions": {
-    "catalog_name": "rest_catalog",
-    "catalog_uri": "http://localhost:9001/iceberg",
-    "spark.executor.memory": "4g"
-  },
-  "updateOptions": {
-    "gravitino_uri": "http://localhost:8090",
-    "metalake": "test",
-    "statistics_updater": "gravitino-statistics-updater",
-    "metrics_updater": "gravitino-metrics-updater"
-  }
-}
-```
-
-Configure `gravitino.maintenance.gravitinoAuth.*` and `gravitino.maintenance.ircAuth.*` independently
-according to how each service is secured. At `runJob`, TMS merges policy `updateOptions` with
-`gravitinoAuth` and policy `jobOptions` with `ircAuth` (auth values override duplicate keys). Do not put
-passwords, OAuth secrets, or keytab paths in policy content.
 
 ## CLI Configuration
 
