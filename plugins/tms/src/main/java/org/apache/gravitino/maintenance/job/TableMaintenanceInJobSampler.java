@@ -1,0 +1,104 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.gravitino.maintenance.job;
+
+import com.google.common.base.Preconditions;
+import org.apache.gravitino.maintenance.storage.service.TableMaintenanceJobMetaService;
+import org.apache.gravitino.maintenance.storage.service.TableSnapshotMetricsMetaService;
+
+/**
+ * In-Spark sampling path for TMS cron jobs (§5.2.2): sample once at {@code S0}, persist metrics,
+ * record {@code before_snapshot_id}, then gate on snapshot drift without re-sampling.
+ */
+public class TableMaintenanceInJobSampler {
+
+  private final TableSnapshotMetricsMetaService metricsMetaService;
+  private final TableMaintenanceJobMetaService jobMetaService;
+
+  /** Creates a sampler using the default relational meta services. */
+  public TableMaintenanceInJobSampler() {
+    this(new TableSnapshotMetricsMetaService(), new TableMaintenanceJobMetaService());
+  }
+
+  /**
+   * @param metricsMetaService metrics DAO
+   * @param jobMetaService maintenance job DAO
+   */
+  public TableMaintenanceInJobSampler(
+      TableSnapshotMetricsMetaService metricsMetaService,
+      TableMaintenanceJobMetaService jobMetaService) {
+    this.metricsMetaService = Preconditions.checkNotNull(metricsMetaService);
+    this.jobMetaService = Preconditions.checkNotNull(jobMetaService);
+  }
+
+  /**
+   * Persists metrics for {@code S0}, sets {@code before_snapshot_id} on the maintenance job row,
+   * and returns whether the cron Spark Job should continue.
+   *
+   * <p>If HEAD has drifted after the sample, the caller must end the job early and must not
+   * re-sample in a loop (§4.3).
+   *
+   * @param maintenanceJobRowId {@code table_maintenance_job.id} inserted before {@code runJob}
+   * @param tableId table entity id
+   * @param policyId policy entity id
+   * @param sampledSnapshotId Iceberg snapshot id at sample time ({@code S0})
+   * @param metricsJson serialized metrics payload for {@code table_snapshot_metrics}
+   * @param head supplies current HEAD after persistence
+   * @return continue vs drift stop outcome
+   */
+  public InJobSampleOutcome sampleAtS0AndGateCronJob(
+      long maintenanceJobRowId,
+      long tableId,
+      long policyId,
+      long sampledSnapshotId,
+      String metricsJson,
+      SnapshotHead head) {
+    Preconditions.checkNotNull(metricsJson, "metricsJson");
+    Preconditions.checkNotNull(head, "head");
+
+    metricsMetaService.putMetrics(tableId, policyId, sampledSnapshotId, metricsJson);
+    jobMetaService.recordBeforeSnapshot(maintenanceJobRowId, sampledSnapshotId);
+
+    long headSnapshotId = head.currentSnapshotId();
+    if (SnapshotDrift.hasDrifted(sampledSnapshotId, headSnapshotId)) {
+      return InJobSampleOutcome.stop(
+          InJobSampleOutcome.StopReason.SNAPSHOT_DRIFT, sampledSnapshotId, headSnapshotId);
+    }
+    return InJobSampleOutcome.continueMaintenance(sampledSnapshotId);
+  }
+
+  /**
+   * Evaluates drift for a commit-chain maintenance type after that type's sample at {@code S0}
+   * (§5.2.3). When drift is detected the caller ends only the current type and continues the chain.
+   *
+   * @param sampledSnapshotId {@code S0} for the current type
+   * @param head supplies current HEAD after persistence for this type
+   * @return continue vs drift stop outcome
+   */
+  public InJobSampleOutcome gateCommitChainTypeAfterSample(
+      long sampledSnapshotId, SnapshotHead head) {
+    Preconditions.checkNotNull(head, "head");
+    long headSnapshotId = head.currentSnapshotId();
+    if (SnapshotDrift.hasDrifted(sampledSnapshotId, headSnapshotId)) {
+      return InJobSampleOutcome.stop(
+          InJobSampleOutcome.StopReason.SNAPSHOT_DRIFT, sampledSnapshotId, headSnapshotId);
+    }
+    return InJobSampleOutcome.continueMaintenance(sampledSnapshotId);
+  }
+}
