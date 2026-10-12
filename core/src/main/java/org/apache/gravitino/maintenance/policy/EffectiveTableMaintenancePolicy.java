@@ -19,9 +19,9 @@
 package org.apache.gravitino.maintenance.policy;
 
 import com.google.common.base.Preconditions;
-import java.util.Map;
 import java.util.Optional;
 import javax.annotation.Nullable;
+import org.apache.gravitino.Config;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.meta.PolicyEntity;
 
@@ -88,7 +88,7 @@ public final class EffectiveTableMaintenancePolicy {
    * @param metalake metalake name
    * @param metadataObject metadata object
    * @param taskType task type
-   * @param serverConfig server configuration map
+   * @param config gravitino server configuration
    * @return effective policy when a matching policy exists
    */
   public static Optional<EffectiveTableMaintenancePolicy> resolve(
@@ -96,7 +96,7 @@ public final class EffectiveTableMaintenancePolicy {
       String metalake,
       MetadataObject metadataObject,
       TableMaintenanceTaskType taskType,
-      Map<String, String> serverConfig) {
+      Config config) {
     return resolver
         .resolveNearest(metalake, metadataObject, taskType)
         .map(
@@ -104,7 +104,9 @@ public final class EffectiveTableMaintenancePolicy {
               TableMaintenancePolicyFields fields =
                   TableMaintenancePolicyContentSupport.maintenanceFields(policy.content());
               Long policyInterval = fields == null ? null : fields.minIntervalMs();
-              long interval = MinIntervalMsResolver.resolve(taskType, policyInterval, serverConfig);
+              long interval =
+                  TableMaintenanceTaskConfigs.resolveMinIntervalMs(
+                      config, taskType, policyInterval);
               return new EffectiveTableMaintenancePolicy(policy, taskType, fields, interval);
             });
   }

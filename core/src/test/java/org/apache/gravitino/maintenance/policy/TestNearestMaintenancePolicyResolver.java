@@ -24,8 +24,8 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import java.time.Instant;
+import org.apache.gravitino.Config;
 import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.MetadataObjects;
@@ -137,15 +137,13 @@ public class TestNearestMaintenancePolicyResolver {
     Mockito.when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
         .thenReturn(new PolicyEntity[] {policy});
 
+    Config config = new Config(false) {};
+    config.set(TableMaintenanceTaskConfigs.COMPACTION_MIN_INTERVAL_MS, 42_000L);
+
     // Content classes do not carry TMS fields yet; resolution falls through to server config.
     EffectiveTableMaintenancePolicy effective =
         EffectiveTableMaintenancePolicy.resolve(
-                resolver,
-                METALAKE,
-                TABLE,
-                TableMaintenanceTaskType.COMPACTION,
-                ImmutableMap.of(
-                    MinIntervalMsResolver.configKey(TableMaintenanceTaskType.COMPACTION), "42000"))
+                resolver, METALAKE, TABLE, TableMaintenanceTaskType.COMPACTION, config)
             .orElseThrow();
 
     Assertions.assertEquals(42_000L, effective.minIntervalMs());
