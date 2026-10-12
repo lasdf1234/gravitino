@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableSet;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.apache.gravitino.MetadataObject;
 
@@ -32,7 +33,7 @@ import org.apache.gravitino.MetadataObject;
  * <p>Configurable thresholds will be added when the rewrite-manifests policy lands; this class
  * registers the built-in type for TMS task mapping.
  */
-public class IcebergRewriteManifestsContent implements PolicyContent {
+public class IcebergRewriteManifestsContent extends TableMaintenanceContent {
   /** Property key for strategy type. */
   public static final String STRATEGY_TYPE_KEY = "strategy.type";
   /** Property key for the job template. */
@@ -75,16 +76,28 @@ public class IcebergRewriteManifestsContent implements PolicyContent {
 
   @Override
   public boolean equals(Object other) {
-    return other instanceof IcebergRewriteManifestsContent;
+    if (!(other instanceof IcebergRewriteManifestsContent)) {
+      return false;
+    }
+    return super.equals(other);
   }
 
   @Override
   public int hashCode() {
-    return IcebergRewriteManifestsContent.class.hashCode();
+    return Objects.hash(super.hashCode(), IcebergRewriteManifestsContent.class);
   }
 
   @Override
   public String toString() {
-    return "IcebergRewriteManifestsContent{}";
+    return "IcebergRewriteManifestsContent{"
+        + "schedule="
+        + schedule()
+        + ", minIntervalMs="
+        + minIntervalMs()
+        + ", jobOptions="
+        + jobOptions()
+        + ", updateOptions="
+        + updateOptions()
+        + '}';
   }
 }

@@ -39,6 +39,7 @@ import org.apache.gravitino.exceptions.NoSuchPolicyException;
 import org.apache.gravitino.exceptions.PolicyAlreadyExistsException;
 import org.apache.gravitino.lock.LockType;
 import org.apache.gravitino.lock.TreeLockUtils;
+import org.apache.gravitino.maintenance.policy.TableMaintenancePolicies;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
 import org.apache.gravitino.storage.IdGenerator;
@@ -133,6 +134,7 @@ public class PolicyManager implements PolicyDispatcher {
         LockType.WRITE,
         () -> {
           content.validate();
+          TableMaintenancePolicies.validate(type, content);
 
           PolicyEntity policyEntity =
               PolicyEntity.builder()
@@ -379,6 +381,7 @@ public class PolicyManager implements PolicyDispatcher {
     }
 
     newContent.validate();
+    TableMaintenancePolicies.validate(policyEntity.policyType(), newContent);
 
     PolicyEntity.Builder builder = newPolicyBuilder(policyEntity);
     builder.withName(newName);

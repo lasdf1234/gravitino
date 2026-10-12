@@ -32,7 +32,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.MetadataObject;
 
 /** Built-in policy content for Iceberg compaction strategy. */
-public class IcebergDataCompactionContent implements PolicyContent {
+public class IcebergDataCompactionContent extends TableMaintenanceContent {
   /** Property key for strategy type. */
   public static final String STRATEGY_TYPE_KEY = "strategy.type";
   /** Strategy type value for iceberg data compaction. */
@@ -267,7 +267,7 @@ public class IcebergDataCompactionContent implements PolicyContent {
 
   @Override
   public void validate() throws IllegalArgumentException {
-    PolicyContent.super.validate();
+    validatePolicyContentDefaults();
     // All fields are defaulted in the constructor, so only range checks are needed here.
     Preconditions.checkArgument(minDataFileMse >= 0, "minDataFileMse must be >= 0");
     Preconditions.checkArgument(minDeleteFileNumber >= 0, "minDeleteFileNumber must be >= 0");
@@ -313,6 +313,9 @@ public class IcebergDataCompactionContent implements PolicyContent {
     if (!(o instanceof IcebergDataCompactionContent)) {
       return false;
     }
+    if (!super.equals(o)) {
+      return false;
+    }
     IcebergDataCompactionContent that = (IcebergDataCompactionContent) o;
     return Objects.equals(minDataFileMse, that.minDataFileMse)
         && Objects.equals(minDeleteFileNumber, that.minDeleteFileNumber)
@@ -327,6 +330,7 @@ public class IcebergDataCompactionContent implements PolicyContent {
   @Override
   public int hashCode() {
     return Objects.hash(
+        super.hashCode(),
         minDataFileMse,
         minDeleteFileNumber,
         dataFileMseWeight,
@@ -358,6 +362,14 @@ public class IcebergDataCompactionContent implements PolicyContent {
         + '\''
         + ", rewriteOptions="
         + rewriteOptions
+        + ", schedule="
+        + schedule()
+        + ", minIntervalMs="
+        + minIntervalMs()
+        + ", jobOptions="
+        + jobOptions()
+        + ", updateOptions="
+        + updateOptions()
         + '}';
   }
 }

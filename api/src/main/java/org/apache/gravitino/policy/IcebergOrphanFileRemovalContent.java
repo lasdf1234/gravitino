@@ -31,7 +31,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.MetadataObject;
 
 /** Configuration for table-level Iceberg orphan cleanup on an optimizer invocation. */
-public class IcebergOrphanFileRemovalContent implements PolicyContent {
+public class IcebergOrphanFileRemovalContent extends TableMaintenanceContent {
   /** Property key for strategy type. */
   public static final String STRATEGY_TYPE_KEY = "strategy.type";
   /** Property key for the job template. */
@@ -136,7 +136,7 @@ public class IcebergOrphanFileRemovalContent implements PolicyContent {
 
   @Override
   public void validate() {
-    PolicyContent.super.validate();
+    validatePolicyContentDefaults();
     validateOlderThanDays(olderThanDays);
     Preconditions.checkArgument(
         location == null || StringUtils.isNotBlank(location), "location must not be blank");
@@ -150,6 +150,9 @@ public class IcebergOrphanFileRemovalContent implements PolicyContent {
     if (!(other instanceof IcebergOrphanFileRemovalContent)) {
       return false;
     }
+    if (!super.equals(other)) {
+      return false;
+    }
     IcebergOrphanFileRemovalContent that = (IcebergOrphanFileRemovalContent) other;
     return olderThanDays == that.olderThanDays
         && dryRun == that.dryRun
@@ -158,6 +161,6 @@ public class IcebergOrphanFileRemovalContent implements PolicyContent {
 
   @Override
   public int hashCode() {
-    return Objects.hash(olderThanDays, location, dryRun);
+    return Objects.hash(super.hashCode(), olderThanDays, location, dryRun);
   }
 }

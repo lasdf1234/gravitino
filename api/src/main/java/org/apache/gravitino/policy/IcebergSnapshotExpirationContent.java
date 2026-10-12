@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableSet;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.apache.gravitino.MetadataObject;
 
@@ -32,7 +33,7 @@ import org.apache.gravitino.MetadataObject;
  * <p>Configurable thresholds will be added when the expire-snapshots policy lands; this class
  * registers the built-in type for TMS task mapping.
  */
-public class IcebergSnapshotExpirationContent implements PolicyContent {
+public class IcebergSnapshotExpirationContent extends TableMaintenanceContent {
   /** Property key for strategy type. */
   public static final String STRATEGY_TYPE_KEY = "strategy.type";
   /** Property key for the job template. */
@@ -75,16 +76,28 @@ public class IcebergSnapshotExpirationContent implements PolicyContent {
 
   @Override
   public boolean equals(Object other) {
-    return other instanceof IcebergSnapshotExpirationContent;
+    if (!(other instanceof IcebergSnapshotExpirationContent)) {
+      return false;
+    }
+    return super.equals(other);
   }
 
   @Override
   public int hashCode() {
-    return IcebergSnapshotExpirationContent.class.hashCode();
+    return Objects.hash(super.hashCode(), IcebergSnapshotExpirationContent.class);
   }
 
   @Override
   public String toString() {
-    return "IcebergSnapshotExpirationContent{}";
+    return "IcebergSnapshotExpirationContent{"
+        + "schedule="
+        + schedule()
+        + ", minIntervalMs="
+        + minIntervalMs()
+        + ", jobOptions="
+        + jobOptions()
+        + ", updateOptions="
+        + updateOptions()
+        + '}';
   }
 }
