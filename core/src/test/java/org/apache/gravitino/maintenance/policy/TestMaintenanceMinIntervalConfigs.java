@@ -19,10 +19,11 @@
 package org.apache.gravitino.maintenance.policy;
 
 import org.apache.gravitino.Config;
+import org.apache.gravitino.Configs;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
-public class TestTableMaintenanceTaskConfigs {
+public class TestMaintenanceMinIntervalConfigs {
 
   @Test
   void testRegisteredDefaultsMatchTaskTypeDefaults() {
@@ -30,40 +31,39 @@ public class TestTableMaintenanceTaskConfigs {
     for (TableMaintenanceTaskType taskType : TableMaintenanceTaskType.values()) {
       Assertions.assertEquals(
           taskType.defaultMinIntervalMs(),
-          config.get(TableMaintenanceTaskConfigs.entryFor(taskType)));
+          config.get(Configs.maintenanceTaskMinIntervalMs(taskType)));
       Assertions.assertEquals(
           MinIntervalMsResolver.configKey(taskType),
-          TableMaintenanceTaskConfigs.entryFor(taskType).getKey());
+          Configs.maintenanceTaskMinIntervalMs(taskType).getKey());
     }
   }
 
   @Test
   void testResolvePrefersPolicyThenConfigThenDefault() {
     Config config = new Config(false) {};
-    config.set(TableMaintenanceTaskConfigs.COMPACTION_MIN_INTERVAL_MS, 900_000L);
+    config.set(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, 900_000L);
 
     Assertions.assertEquals(
         120_000L,
-        TableMaintenanceTaskConfigs.resolveMinIntervalMs(
+        Configs.resolveMaintenanceMinIntervalMs(
             config, TableMaintenanceTaskType.COMPACTION, 120_000L));
     Assertions.assertEquals(
         900_000L,
-        TableMaintenanceTaskConfigs.resolveMinIntervalMs(
-            config, TableMaintenanceTaskType.COMPACTION, null));
+        Configs.resolveMaintenanceMinIntervalMs(config, TableMaintenanceTaskType.COMPACTION, null));
 
     Config defaultsOnly = new Config(false) {};
     Assertions.assertEquals(
         TableMaintenanceTaskType.ORPHAN_CLEANUP.defaultMinIntervalMs(),
-        TableMaintenanceTaskConfigs.resolveMinIntervalMs(
+        Configs.resolveMaintenanceMinIntervalMs(
             defaultsOnly, TableMaintenanceTaskType.ORPHAN_CLEANUP, null));
   }
 
   @Test
   void testRejectsNegativeMinInterval() {
     Config config = new Config(false) {};
-    config.set(TableMaintenanceTaskConfigs.COMPACTION_MIN_INTERVAL_MS, -1L);
+    config.set(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, -1L);
     Assertions.assertThrows(
         IllegalArgumentException.class,
-        () -> config.get(TableMaintenanceTaskConfigs.COMPACTION_MIN_INTERVAL_MS));
+        () -> config.get(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS));
   }
 }

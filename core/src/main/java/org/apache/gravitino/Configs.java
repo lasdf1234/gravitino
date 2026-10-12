@@ -18,16 +18,20 @@
  */
 package org.apache.gravitino;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.audit.FileAuditWriter;
 import org.apache.gravitino.audit.v2.SimpleFormatterV2;
 import org.apache.gravitino.config.ConfigBuilder;
 import org.apache.gravitino.config.ConfigConstants;
 import org.apache.gravitino.config.ConfigEntry;
+import org.apache.gravitino.maintenance.policy.MinIntervalMsResolver;
+import org.apache.gravitino.maintenance.policy.TableMaintenanceTaskType;
 import org.apache.gravitino.secret.SensitivePropertyKeyKeywords;
 import org.apache.gravitino.stats.storage.JdbcPartitionStatisticStorageFactory;
 import org.apache.gravitino.utils.FileFetcher;
@@ -646,6 +650,92 @@ public class Configs {
           .intConf()
           .checkValue(value -> value > 0, ConfigConstants.POSITIVE_NUMBER_ERROR_MSG)
           .createWithDefault(256 * 1024); // 256KB
+
+  /** Cooldown between finished compaction runs when the policy omits {@code minIntervalMs}. */
+  public static final ConfigEntry<Long> MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS =
+      new ConfigBuilder(MinIntervalMsResolver.configKey(TableMaintenanceTaskType.COMPACTION))
+          .doc(
+              "Minimum interval in milliseconds between finished compaction runs when the "
+                  + "policy omits minIntervalMs")
+          .version(ConfigConstants.VERSION_2_0_0)
+          .longConf()
+          .checkValue(v -> v != null && v >= 0, "minIntervalMs must be >= 0")
+          .createWithDefault(TableMaintenanceTaskType.COMPACTION.defaultMinIntervalMs());
+
+  /**
+   * Cooldown between finished manifest-rewrite runs when the policy omits {@code minIntervalMs}.
+   */
+  public static final ConfigEntry<Long> MAINTENANCE_TASK_MANIFEST_REWRITE_MIN_INTERVAL_MS =
+      new ConfigBuilder(MinIntervalMsResolver.configKey(TableMaintenanceTaskType.MANIFEST_REWRITE))
+          .doc(
+              "Minimum interval in milliseconds between finished manifest-rewrite runs when the "
+                  + "policy omits minIntervalMs")
+          .version(ConfigConstants.VERSION_2_0_0)
+          .longConf()
+          .checkValue(v -> v != null && v >= 0, "minIntervalMs must be >= 0")
+          .createWithDefault(TableMaintenanceTaskType.MANIFEST_REWRITE.defaultMinIntervalMs());
+
+  /** Cooldown between finished snapshot-expiry runs when the policy omits {@code minIntervalMs}. */
+  public static final ConfigEntry<Long> MAINTENANCE_TASK_SNAPSHOT_EXPIRY_MIN_INTERVAL_MS =
+      new ConfigBuilder(MinIntervalMsResolver.configKey(TableMaintenanceTaskType.SNAPSHOT_EXPIRY))
+          .doc(
+              "Minimum interval in milliseconds between finished snapshot-expiry runs when the "
+                  + "policy omits minIntervalMs")
+          .version(ConfigConstants.VERSION_2_0_0)
+          .longConf()
+          .checkValue(v -> v != null && v >= 0, "minIntervalMs must be >= 0")
+          .createWithDefault(TableMaintenanceTaskType.SNAPSHOT_EXPIRY.defaultMinIntervalMs());
+
+  /** Cooldown between finished orphan-cleanup runs when the policy omits {@code minIntervalMs}. */
+  public static final ConfigEntry<Long> MAINTENANCE_TASK_ORPHAN_CLEANUP_MIN_INTERVAL_MS =
+      new ConfigBuilder(MinIntervalMsResolver.configKey(TableMaintenanceTaskType.ORPHAN_CLEANUP))
+          .doc(
+              "Minimum interval in milliseconds between finished orphan-cleanup runs when the "
+                  + "policy omits minIntervalMs")
+          .version(ConfigConstants.VERSION_2_0_0)
+          .longConf()
+          .checkValue(v -> v != null && v >= 0, "minIntervalMs must be >= 0")
+          .createWithDefault(TableMaintenanceTaskType.ORPHAN_CLEANUP.defaultMinIntervalMs());
+
+  /**
+   * Returns the {@code minIntervalMs} config entry for a maintenance task type.
+   *
+   * @param taskType maintenance task type
+   * @return config entry
+   */
+  public static ConfigEntry<Long> maintenanceTaskMinIntervalMs(TableMaintenanceTaskType taskType) {
+    Preconditions.checkNotNull(taskType, "taskType cannot be null");
+    switch (taskType) {
+      case COMPACTION:
+        return MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS;
+      case MANIFEST_REWRITE:
+        return MAINTENANCE_TASK_MANIFEST_REWRITE_MIN_INTERVAL_MS;
+      case SNAPSHOT_EXPIRY:
+        return MAINTENANCE_TASK_SNAPSHOT_EXPIRY_MIN_INTERVAL_MS;
+      case ORPHAN_CLEANUP:
+        return MAINTENANCE_TASK_ORPHAN_CLEANUP_MIN_INTERVAL_MS;
+      default:
+        throw new IllegalArgumentException("Unknown maintenance task type: " + taskType);
+    }
+  }
+
+  /**
+   * Resolves minimum interval: policy content, then server config entry (with code default).
+   *
+   * @param config gravitino server config
+   * @param taskType maintenance task type
+   * @param policyMinIntervalMs value from effective policy content, or null
+   * @return resolved interval in milliseconds
+   */
+  public static long resolveMaintenanceMinIntervalMs(
+      Config config, TableMaintenanceTaskType taskType, @Nullable Long policyMinIntervalMs) {
+    Preconditions.checkNotNull(config, "config cannot be null");
+    Preconditions.checkNotNull(taskType, "taskType cannot be null");
+    if (policyMinIntervalMs != null) {
+      return policyMinIntervalMs;
+    }
+    return config.get(maintenanceTaskMinIntervalMs(taskType));
+  }
 
   public static final ConfigEntry<Boolean> BLOCK_UNSAFE_REMOTE_URI =
       new ConfigBuilder(FileFetcher.BLOCK_UNSAFE_REMOTE_URI_CONFIG)
