@@ -19,6 +19,9 @@
 package org.apache.gravitino.maintenance.policy;
 
 import com.google.common.base.Preconditions;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.meta.PolicyEntity;
@@ -28,9 +31,11 @@ import org.apache.gravitino.utils.MetadataObjectUtil;
 /**
  * Selects the nearest attached maintenance policy of a given task type for a metadata object.
  *
- * <p>Policies are resolved from effective tag associations via {@link
- * PolicyDispatcher#listPolicyInfosForMetadataObject}. Non-inherited matches are preferred over
- * inherited ones. Direct policy–object bindings can be layered in once that storage exists.
+ * <p>Resolution walks the metadata object and its ancestors from nearest to outermost (for a table:
+ * table → schema → catalog). At each level, only policies attached on that object are considered
+ * ({@code inherited == false} from {@link PolicyDispatcher#listPolicyInfosForMetadataObject}).
+ * Among matches at the same level, the policy with the lexicographically smallest name wins. Direct
+ * policy–object bindings can be layered in once that storage exists.
  */
 public class NearestMaintenancePolicyResolver {
 
@@ -59,21 +64,36 @@ public class NearestMaintenancePolicyResolver {
     MetadataObjectUtil.checkMetadataObject(metalake, metadataObject);
     Preconditions.checkNotNull(taskType, "taskType cannot be null");
 
-    PolicyEntity[] effective =
-        policyDispatcher.listPolicyInfosForMetadataObject(metalake, metadataObject);
-    PolicyEntity inheritedMatch = null;
-    for (PolicyEntity policy : effective) {
-      if (!matchesTaskType(policy, taskType)) {
-        continue;
-      }
-      if (!policy.inherited().orElse(false)) {
-        return Optional.of(policy);
-      }
-      if (inheritedMatch == null) {
-        inheritedMatch = policy;
+    for (MetadataObject level : resolutionOrder(metadataObject)) {
+      Optional<PolicyEntity> match = firstDirectMatch(metalake, level, taskType);
+      if (match.isPresent()) {
+        return match;
       }
     }
-    return Optional.ofNullable(inheritedMatch);
+    return Optional.empty();
+  }
+
+  private Optional<PolicyEntity> firstDirectMatch(
+      String metalake, MetadataObject level, TableMaintenanceTaskType taskType) {
+    PolicyEntity[] effective = policyDispatcher.listPolicyInfosForMetadataObject(metalake, level);
+    List<PolicyEntity> matches = new ArrayList<>();
+    for (PolicyEntity policy : effective) {
+      if (matchesTaskType(policy, taskType) && !policy.inherited().orElse(false)) {
+        matches.add(policy);
+      }
+    }
+    if (matches.isEmpty()) {
+      return Optional.empty();
+    }
+    matches.sort(Comparator.comparing(PolicyEntity::name));
+    return Optional.of(matches.get(0));
+  }
+
+  private static List<MetadataObject> resolutionOrder(MetadataObject metadataObject) {
+    List<MetadataObject> order = new ArrayList<>();
+    order.add(metadataObject);
+    order.addAll(MetadataObjectUtil.getParentMetadataObjects(metadataObject));
+    return order;
   }
 
   private static boolean matchesTaskType(PolicyEntity policy, TableMaintenanceTaskType taskType) {

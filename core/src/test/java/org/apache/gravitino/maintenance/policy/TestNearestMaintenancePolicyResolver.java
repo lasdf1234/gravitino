@@ -19,6 +19,7 @@
 package org.apache.gravitino.maintenance.policy;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -30,6 +31,8 @@ import org.apache.gravitino.Configs;
 import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.MetadataObjects;
+import org.apache.gravitino.catalog.CatalogDispatcher;
+import org.apache.gravitino.catalog.SchemaDispatcher;
 import org.apache.gravitino.catalog.TableDispatcher;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
@@ -47,6 +50,10 @@ import org.mockito.Mockito;
 public class TestNearestMaintenancePolicyResolver {
 
   private static final String METALAKE = "ml";
+  private static final MetadataObject CATALOG =
+      MetadataObjects.of(ImmutableList.of("cat"), MetadataObject.Type.CATALOG);
+  private static final MetadataObject SCHEMA =
+      MetadataObjects.of(ImmutableList.of("cat", "db"), MetadataObject.Type.SCHEMA);
   private static final MetadataObject TABLE =
       MetadataObjects.of(ImmutableList.of("cat", "db", "t"), MetadataObject.Type.TABLE);
 
@@ -60,10 +67,19 @@ public class TestNearestMaintenancePolicyResolver {
     resolver = new NearestMaintenancePolicyResolver(dispatcher);
     GravitinoEnv env = mock(GravitinoEnv.class);
     TableDispatcher tableDispatcher = mock(TableDispatcher.class);
+    SchemaDispatcher schemaDispatcher = mock(SchemaDispatcher.class);
+    CatalogDispatcher catalogDispatcher = mock(CatalogDispatcher.class);
     when(env.internalTableDispatcher()).thenReturn(tableDispatcher);
+    when(env.internalSchemaDispatcher()).thenReturn(schemaDispatcher);
+    when(env.internalCatalogDispatcher()).thenReturn(catalogDispatcher);
     when(tableDispatcher.tableExists(any())).thenReturn(true);
+    when(schemaDispatcher.schemaExists(any())).thenReturn(true);
+    when(catalogDispatcher.catalogExists(any())).thenReturn(true);
     gravitinoEnv = mockStatic(GravitinoEnv.class);
     gravitinoEnv.when(GravitinoEnv::getInstance).thenReturn(env);
+
+    when(dispatcher.listPolicyInfosForMetadataObject(eq(METALAKE), any()))
+        .thenReturn(new PolicyEntity[0]);
   }
 
   @AfterEach
@@ -74,12 +90,22 @@ public class TestNearestMaintenancePolicyResolver {
   }
 
   @Test
-  void testPrefersNonInheritedPolicyOverInherited() {
-    PolicyEntity directPolicy = compactionPolicy("table-policy", 11L).copyWithInherited(false);
-    PolicyEntity inheritedPolicy = compactionPolicy("catalog-policy", 22L).copyWithInherited(true);
+  void testPrefersTableOverSchemaAndCatalog() {
+    PolicyEntity tablePolicy = compactionPolicy("table-policy", 11L).copyWithInherited(false);
+    PolicyEntity schemaPolicy = compactionPolicy("schema-policy", 22L).copyWithInherited(false);
+    PolicyEntity catalogPolicy = compactionPolicy("catalog-policy", 33L).copyWithInherited(false);
 
-    Mockito.when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
-        .thenReturn(new PolicyEntity[] {inheritedPolicy, directPolicy});
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
+        .thenReturn(
+            new PolicyEntity[] {
+              schemaPolicy.copyWithInherited(true),
+              catalogPolicy.copyWithInherited(true),
+              tablePolicy
+            });
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, SCHEMA))
+        .thenReturn(new PolicyEntity[] {schemaPolicy, catalogPolicy.copyWithInherited(true)});
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, CATALOG))
+        .thenReturn(new PolicyEntity[] {catalogPolicy});
 
     PolicyEntity resolved =
         resolver.resolveNearest(METALAKE, TABLE, TableMaintenanceTaskType.COMPACTION).orElseThrow();
@@ -87,15 +113,37 @@ public class TestNearestMaintenancePolicyResolver {
   }
 
   @Test
-  void testFallsBackToInheritedWhenNoDirectMatch() {
-    PolicyEntity inheritedPolicy = compactionPolicy("catalog-policy", 22L).copyWithInherited(true);
+  void testPrefersSchemaOverCatalogWhenTableHasNone() {
+    PolicyEntity schemaPolicy = compactionPolicy("schema-policy", 22L).copyWithInherited(false);
+    PolicyEntity catalogPolicy = compactionPolicy("catalog-policy", 33L).copyWithInherited(false);
 
-    Mockito.when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
-        .thenReturn(new PolicyEntity[] {inheritedPolicy});
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
+        .thenReturn(
+            new PolicyEntity[] {
+              schemaPolicy.copyWithInherited(true), catalogPolicy.copyWithInherited(true)
+            });
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, SCHEMA))
+        .thenReturn(new PolicyEntity[] {schemaPolicy, catalogPolicy.copyWithInherited(true)});
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, CATALOG))
+        .thenReturn(new PolicyEntity[] {catalogPolicy});
 
     PolicyEntity resolved =
         resolver.resolveNearest(METALAKE, TABLE, TableMaintenanceTaskType.COMPACTION).orElseThrow();
     Assertions.assertEquals(22L, resolved.id());
+  }
+
+  @Test
+  void testSameLevelPicksLexicographicallySmallestName() {
+    PolicyEntity zebra = compactionPolicy("zebra", 2L).copyWithInherited(false);
+    PolicyEntity alpha = compactionPolicy("alpha", 1L).copyWithInherited(false);
+
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
+        .thenReturn(new PolicyEntity[] {zebra, alpha});
+
+    PolicyEntity resolved =
+        resolver.resolveNearest(METALAKE, TABLE, TableMaintenanceTaskType.COMPACTION).orElseThrow();
+    Assertions.assertEquals(1L, resolved.id());
+    Assertions.assertEquals("alpha", resolved.name());
   }
 
   @Test
@@ -125,7 +173,7 @@ public class TestNearestMaintenancePolicyResolver {
             .build()
             .copyWithInherited(false);
 
-    Mockito.when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
         .thenReturn(new PolicyEntity[] {disabled, orphan});
 
     Assertions.assertTrue(
@@ -135,13 +183,12 @@ public class TestNearestMaintenancePolicyResolver {
   @Test
   void testEffectivePolicyResolvesMinIntervalFromServerConfig() {
     PolicyEntity policy = compactionPolicy("p", 7L).copyWithInherited(false);
-    Mockito.when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
+    when(dispatcher.listPolicyInfosForMetadataObject(METALAKE, TABLE))
         .thenReturn(new PolicyEntity[] {policy});
 
     Config config = new Config(false) {};
     config.set(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, 42_000L);
 
-    // Content classes do not carry TMS fields yet; resolution falls through to server config.
     EffectiveTableMaintenancePolicy effective =
         EffectiveTableMaintenancePolicy.resolve(
                 resolver, METALAKE, TABLE, TableMaintenanceTaskType.COMPACTION, config)
