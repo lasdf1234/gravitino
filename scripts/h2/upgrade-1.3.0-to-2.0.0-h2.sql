@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS `semantic_model_version_info` (
     KEY `idx_smvi_sid` (`schema_id`)
 ) ENGINE=InnoDB COMMENT 'semantic model version information';
 
-CREATE TABLE IF NOT EXISTS `scheduled_tasks_expand` (
+CREATE TABLE IF NOT EXISTS `scheduled_expand_tasks` (
     `task_name` VARCHAR(100) NOT NULL COMMENT 'db-scheduler task name',
     `task_instance` VARCHAR(100) NOT NULL COMMENT 'db-scheduler task instance',
     `task_data` BLOB COMMENT 'serialized task data',
@@ -116,10 +116,10 @@ CREATE TABLE IF NOT EXISTS `scheduled_tasks_expand` (
     `last_failure` TIMESTAMP(6) COMMENT 'last failed execution time',
     PRIMARY KEY (`task_name`, `task_instance`)
 ) COMMENT='db-scheduler expand pool task queue for table maintenance';
-CREATE INDEX IF NOT EXISTS `scheduled_tasks_expand_execution_time_idx` ON `scheduled_tasks_expand`(`execution_time`);
-CREATE INDEX IF NOT EXISTS `scheduled_tasks_expand_last_heartbeat_idx` ON `scheduled_tasks_expand`(`last_heartbeat`);
+CREATE INDEX IF NOT EXISTS `scheduled_expand_tasks_execution_time_idx` ON `scheduled_expand_tasks`(`execution_time`);
+CREATE INDEX IF NOT EXISTS `scheduled_expand_tasks_last_heartbeat_idx` ON `scheduled_expand_tasks`(`last_heartbeat`);
 
-CREATE TABLE IF NOT EXISTS `scheduled_tasks_cron` (
+CREATE TABLE IF NOT EXISTS `scheduled_cron_tasks` (
     `task_name` VARCHAR(100) NOT NULL COMMENT 'db-scheduler task name',
     `task_instance` VARCHAR(100) NOT NULL COMMENT 'db-scheduler task instance',
     `task_data` BLOB COMMENT 'serialized task data',
@@ -133,10 +133,10 @@ CREATE TABLE IF NOT EXISTS `scheduled_tasks_cron` (
     `last_failure` TIMESTAMP(6) COMMENT 'last failed execution time',
     PRIMARY KEY (`task_name`, `task_instance`)
 ) COMMENT='db-scheduler cron pool task queue for table maintenance';
-CREATE INDEX IF NOT EXISTS `scheduled_tasks_cron_execution_time_idx` ON `scheduled_tasks_cron`(`execution_time`);
-CREATE INDEX IF NOT EXISTS `scheduled_tasks_cron_last_heartbeat_idx` ON `scheduled_tasks_cron`(`last_heartbeat`);
+CREATE INDEX IF NOT EXISTS `scheduled_cron_tasks_execution_time_idx` ON `scheduled_cron_tasks`(`execution_time`);
+CREATE INDEX IF NOT EXISTS `scheduled_cron_tasks_last_heartbeat_idx` ON `scheduled_cron_tasks`(`last_heartbeat`);
 
-CREATE TABLE IF NOT EXISTS `scheduled_tasks_commit` (
+CREATE TABLE IF NOT EXISTS `scheduled_commit_tasks` (
     `task_name` VARCHAR(100) NOT NULL COMMENT 'db-scheduler task name',
     `task_instance` VARCHAR(100) NOT NULL COMMENT 'db-scheduler task instance',
     `task_data` BLOB COMMENT 'serialized task data',
@@ -150,8 +150,8 @@ CREATE TABLE IF NOT EXISTS `scheduled_tasks_commit` (
     `last_failure` TIMESTAMP(6) COMMENT 'last failed execution time',
     PRIMARY KEY (`task_name`, `task_instance`)
 ) COMMENT='db-scheduler commit pool task queue for table maintenance';
-CREATE INDEX IF NOT EXISTS `scheduled_tasks_commit_execution_time_idx` ON `scheduled_tasks_commit`(`execution_time`);
-CREATE INDEX IF NOT EXISTS `scheduled_tasks_commit_last_heartbeat_idx` ON `scheduled_tasks_commit`(`last_heartbeat`);
+CREATE INDEX IF NOT EXISTS `scheduled_commit_tasks_execution_time_idx` ON `scheduled_commit_tasks`(`execution_time`);
+CREATE INDEX IF NOT EXISTS `scheduled_commit_tasks_last_heartbeat_idx` ON `scheduled_commit_tasks`(`last_heartbeat`);
 
 CREATE TABLE IF NOT EXISTS `table_maintenance_job` (
     `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'auto increment id',

@@ -668,7 +668,7 @@ CREATE TABLE IF NOT EXISTS `iceberg_cleanup_job` (
   KEY `idx_object` (`catalog_id`, `namespace`(255), `table_name`(128), `state`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT 'async Iceberg table cleanup jobs';
 
-CREATE TABLE IF NOT EXISTS `scheduled_tasks_expand` (
+CREATE TABLE IF NOT EXISTS `scheduled_expand_tasks` (
     `task_name` VARCHAR(100) NOT NULL,
     `task_instance` VARCHAR(100) NOT NULL,
     `task_data` BLOB,
@@ -686,7 +686,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_tasks_expand` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
   COMMENT 'db-scheduler expand pool task queue for table maintenance';
 
-CREATE TABLE IF NOT EXISTS `scheduled_tasks_cron` (
+CREATE TABLE IF NOT EXISTS `scheduled_cron_tasks` (
     `task_name` VARCHAR(100) NOT NULL,
     `task_instance` VARCHAR(100) NOT NULL,
     `task_data` BLOB,
@@ -704,7 +704,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_tasks_cron` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
   COMMENT 'db-scheduler cron pool task queue for table maintenance';
 
-CREATE TABLE IF NOT EXISTS `scheduled_tasks_commit` (
+CREATE TABLE IF NOT EXISTS `scheduled_commit_tasks` (
     `task_name` VARCHAR(100) NOT NULL,
     `task_instance` VARCHAR(100) NOT NULL,
     `task_data` BLOB,

@@ -44,13 +44,13 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(TableMaintenanceSchedulerPools.class);
 
   /** Expand-pool db-scheduler table. */
-  public static final String EXPAND_TASKS_TABLE = "scheduled_tasks_expand";
+  public static final String EXPAND_TASKS_TABLE = "scheduled_expand_tasks";
 
   /** Cron-pool db-scheduler table. */
-  public static final String CRON_TASKS_TABLE = "scheduled_tasks_cron";
+  public static final String CRON_TASKS_TABLE = "scheduled_cron_tasks";
 
   /** Commit-pool db-scheduler table. */
-  public static final String COMMIT_TASKS_TABLE = "scheduled_tasks_commit";
+  public static final String COMMIT_TASKS_TABLE = "scheduled_commit_tasks";
 
   private final List<Scheduler> schedulers = new ArrayList<>();
 
