@@ -27,6 +27,29 @@ gravitino.jobExecutor.local.sparkHome=/path/to/spark
 
 `gravitino.job.statusPullIntervalInMs` defaults to five minutes. Job status is polled rather than pushed, so REST status can lag the real Spark process by a full interval, which makes a working job look hung. Lower it to `10000` for local work and restart the server.
 
+### TMS cluster-static client auth
+
+For in-process Table Maintenance Service (TMS), client credentials live in `gravitino.conf`, not in policy
+content. At `runJob`, the control plane overlays them onto the policy peer bags:
+
+| Prefix | Merged into | Purpose |
+|--------|-------------|---------|
+| `gravitino.maintenance.gravitinoAuth.` | `updateOptions` | Gravitino control-plane / updater client |
+| `gravitino.maintenance.ircAuth.` | `jobOptions` | Iceberg REST client for Spark jobs |
+
+Policy `jobOptions` and `updateOptions` carry non-sensitive runtime props only. Cluster auth keys win on
+duplicate entries.
+
+```properties
+gravitino.maintenance.gravitinoAuth.authType = oauth2
+gravitino.maintenance.gravitinoAuth.oauth2ServerUri = https://idp.example/realms/demo/protocol/openid-connect/token
+gravitino.maintenance.gravitinoAuth.oauthCredential = client_id:client_secret
+
+gravitino.maintenance.ircAuth.authType = oauth2
+gravitino.maintenance.ircAuth.oauth2ServerUri = https://idp.example/realms/demo/protocol/openid-connect/token
+gravitino.maintenance.ircAuth.oauthCredential = client_id:client_secret
+```
+
 ## CLI Configuration
 
 The CLI needs to know where Gravitino is and which components to use. This is a minimal working file for `submit-strategy-jobs`.
