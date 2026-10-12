@@ -24,10 +24,10 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
 /**
- * Read-only lookup of {@code job_run_meta} status for occupancy reconcile.
+ * Read-only lookup of {@code job_run_meta} status for occupancy checks.
  *
- * <p>TMS closes stale {@code table_maintenance_job} rows when the Gravitino job is already terminal
- * (or missing) without inventing snapshot metrics.
+ * <p>When {@code table_maintenance_job.finished_at} is null, {@code OccupancyGate} consults this
+ * mapper instead of backfilling {@code finished_at}.
  */
 public interface JobRunStatusMapper {
 

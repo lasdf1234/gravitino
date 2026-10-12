@@ -96,13 +96,6 @@ public class TableMaintenanceJobSQLProviderFactory {
   }
 
   /**
-   * @return SELECT statement for in-flight rows
-   */
-  public static String listInFlight() {
-    return getProvider().listInFlight();
-  }
-
-  /**
    * @param tableId table entity id
    * @param policyId policy entity id
    * @return SELECT statement

@@ -96,20 +96,7 @@ public class TableMaintenanceJobBaseSQLProvider {
   }
 
   /**
-   * Lists in-flight rows ({@code finished_at IS NULL}) for occupancy reconcile (§5.2).
-   *
-   * @return SELECT statement
-   */
-  public String listInFlight() {
-    return "SELECT id, job_id AS jobId, table_id AS tableId, policy_id AS policyId,"
-        + " before_snapshot_id AS beforeSnapshotId, after_snapshot_id AS afterSnapshotId,"
-        + " finished_at AS finishedAt, created_at AS createdAt FROM "
-        + TABLE_NAME
-        + " WHERE finished_at IS NULL";
-  }
-
-  /**
-   * Returns an in-flight row for {@code (table_id, policy_id)} if one exists.
+   * Returns a row with {@code finished_at IS NULL} for {@code (table_id, policy_id)} if one exists.
    *
    * @param tableId table entity id
    * @param policyId policy entity id

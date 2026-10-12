@@ -18,7 +18,6 @@
  */
 package org.apache.gravitino.maintenance.storage.mapper;
 
-import java.util.List;
 import javax.annotation.Nullable;
 import org.apache.gravitino.maintenance.storage.po.TableMaintenanceJobPO;
 import org.apache.ibatis.annotations.DeleteProvider;
@@ -55,9 +54,6 @@ public interface TableMaintenanceJobMapper {
 
   @DeleteProvider(type = TableMaintenanceJobSQLProviderFactory.class, method = "deleteByJobId")
   int deleteByJobId(@Param("jobId") long jobId);
-
-  @SelectProvider(type = TableMaintenanceJobSQLProviderFactory.class, method = "listInFlight")
-  List<TableMaintenanceJobPO> listInFlight();
 
   @Nullable
   @SelectProvider(
