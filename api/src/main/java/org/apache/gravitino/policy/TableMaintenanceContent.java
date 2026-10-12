@@ -34,9 +34,10 @@ import org.apache.gravitino.maintenance.policy.MaintenanceTrigger;
  * {@code validate()} — validation is done by {@link
  * org.apache.gravitino.maintenance.policy.TableMaintenancePolicies}.
  *
- * <p>{@code jobOptions} and {@code updateOptions} are sibling maps on the runJob path ({@code
- * jobOptions} ⊕ ircAuth, {@code updateOptions} ⊕ gravitinoAuth). Empty maps mean “use cluster
- * defaults only”.
+ * <p>{@code jobOptions} and {@code updateOptions} are sibling runtime option bags for TMS job
+ * submission. Cluster-static client auth is configured separately in {@code gravitino.conf} (see
+ * {@code gravitino.maintenance.gravitinoAuth.*} and {@code gravitino.maintenance.ircAuth.*}). Empty
+ * maps mean “use cluster defaults only”.
  */
 public abstract class TableMaintenanceContent implements PolicyContent {
 
