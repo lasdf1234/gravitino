@@ -38,7 +38,7 @@ class TestOccupancyGate extends TestJDBCBackend {
   @TestTemplate
   void testInFlightReadsJobMetaServiceWithoutBackfillingFinishedAt() throws IOException {
     String metalakeName = "tms_occ_ml";
-    BaseMetalake metalake = createAndInsertMakeLake(metalakeName);
+    createAndInsertMakeLake(metalakeName);
     createAndInsertCatalog(metalakeName, "cat");
     createAndInsertSchema(metalakeName, "cat", "sch");
     TableEntity table = createAndInsertTableEntity(Namespace.of(metalakeName, "cat", "sch"), "tbl");
