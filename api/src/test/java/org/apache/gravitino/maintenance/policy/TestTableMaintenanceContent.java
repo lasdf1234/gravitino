@@ -126,21 +126,6 @@ public class TestTableMaintenanceContent {
   }
 
   @Test
-  void testRejectSensitiveOptionKeys() {
-    TableMaintenanceContent content =
-        (TableMaintenanceContent)
-            PolicyContents.icebergRewriteManifests(
-                null, null, ImmutableMap.of("access_token", "secret"), null);
-    IllegalArgumentException ex =
-        Assertions.assertThrows(
-            IllegalArgumentException.class,
-            () ->
-                TableMaintenancePolicies.validate(
-                    Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, content));
-    Assertions.assertTrue(ex.getMessage().contains("credential-shaped"));
-  }
-
-  @Test
   void testCronExpressionGrammar() {
     Assertions.assertDoesNotThrow(() -> MaintenanceTrigger.validateCronExpression("0 0 2 * * ?"));
     Assertions.assertThrows(

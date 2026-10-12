@@ -358,13 +358,13 @@ components:
           description: Cooldown after last finished job for this policy type.
         jobOptions:
           type: object
-          description: Non-sensitive Spark / IRC client options merged into runJob conf.
+          description: Spark / IRC client options merged into runJob conf.
           additionalProperties:
             type: string
             minLength: 1
         updateOptions:
           type: object
-          description: Non-sensitive Gravitino updater options merged into runJob updateOptions.
+          description: Gravitino updater options merged into runJob updateOptions.
           additionalProperties:
             type: string
             minLength: 1

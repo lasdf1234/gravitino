@@ -116,6 +116,5 @@ public final class TableMaintenancePolicies {
           Preconditions.checkArgument(
               StringUtils.isNotBlank(value), "%s '%s' must have non-empty value", mapName, key);
         });
-    MaintenanceSensitiveOptionKeys.validateNonSensitive(options, mapName);
   }
 }
