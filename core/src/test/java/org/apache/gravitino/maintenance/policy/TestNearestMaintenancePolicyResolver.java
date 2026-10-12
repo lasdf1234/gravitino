@@ -148,19 +148,18 @@ public class TestNearestMaintenancePolicyResolver {
             .orElseThrow();
 
     Assertions.assertEquals(42_000L, effective.minIntervalMs());
-    Assertions.assertNull(effective.maintenanceFields());
+    Assertions.assertNull(effective.schedule());
     Assertions.assertEquals(7L, effective.policy().id());
   }
 
   @Test
-  void testEffectivePolicyConstructorKeepsExplicitFields() {
-    TableMaintenancePolicyFields fields =
-        new TableMaintenancePolicyFields(new TableMaintenanceSchedule(true, null), 42_000L, null);
+  void testEffectivePolicyConstructorKeepsScheduleAndInterval() {
+    TableMaintenanceSchedule schedule = new TableMaintenanceSchedule(true, null);
     PolicyEntity policy = compactionPolicy("p", 7L).copyWithInherited(false);
     EffectiveTableMaintenancePolicy effective =
         new EffectiveTableMaintenancePolicy(
-            policy, TableMaintenanceTaskType.COMPACTION, fields, 42_000L);
-    Assertions.assertEquals(fields, effective.maintenanceFields());
+            policy, TableMaintenanceTaskType.COMPACTION, schedule, 42_000L);
+    Assertions.assertEquals(schedule, effective.schedule());
     Assertions.assertEquals(42_000L, effective.minIntervalMs());
     Assertions.assertEquals(TableMaintenanceTaskType.COMPACTION, effective.taskType());
   }

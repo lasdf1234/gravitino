@@ -26,12 +26,17 @@ import org.apache.gravitino.Configs;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.meta.PolicyEntity;
 
-/** Effective TMS policy content for a table and maintenance task type. */
+/**
+ * Effective scheduling view for a table and maintenance task type.
+ *
+ * <p>Carries the nearest policy plus the schedule and resolved {@code minIntervalMs} used by the
+ * TMS scheduler. Job submit options stay on the policy content and are read at {@code runJob} time.
+ */
 public final class EffectiveTableMaintenancePolicy {
 
   private final PolicyEntity policy;
   private final TableMaintenanceTaskType taskType;
-  @Nullable private final TableMaintenancePolicyFields maintenanceFields;
+  @Nullable private final TableMaintenanceSchedule schedule;
   private final long minIntervalMs;
 
   /**
@@ -39,17 +44,17 @@ public final class EffectiveTableMaintenancePolicy {
    *
    * @param policy nearest policy entity
    * @param taskType maintenance task type
-   * @param maintenanceFields parsed TMS fields from policy content
+   * @param schedule evaluate triggers from policy content, or null when unset
    * @param minIntervalMs resolved minimum interval
    */
   public EffectiveTableMaintenancePolicy(
       PolicyEntity policy,
       TableMaintenanceTaskType taskType,
-      @Nullable TableMaintenancePolicyFields maintenanceFields,
+      @Nullable TableMaintenanceSchedule schedule,
       long minIntervalMs) {
     this.policy = Preconditions.checkNotNull(policy, "policy");
     this.taskType = Preconditions.checkNotNull(taskType, "taskType");
-    this.maintenanceFields = maintenanceFields;
+    this.schedule = schedule;
     this.minIntervalMs = minIntervalMs;
   }
 
@@ -68,11 +73,11 @@ public final class EffectiveTableMaintenancePolicy {
   }
 
   /**
-   * @return TMS fields from policy content, or null
+   * @return schedule from policy content, or null when unset
    */
   @Nullable
-  public TableMaintenancePolicyFields maintenanceFields() {
-    return maintenanceFields;
+  public TableMaintenanceSchedule schedule() {
+    return schedule;
   }
 
   /**
@@ -104,10 +109,11 @@ public final class EffectiveTableMaintenancePolicy {
             policy -> {
               TableMaintenancePolicyFields fields =
                   TableMaintenancePolicyContentSupport.maintenanceFields(policy.content());
+              TableMaintenanceSchedule schedule = fields == null ? null : fields.schedule();
               Long policyInterval = fields == null ? null : fields.minIntervalMs();
               long interval =
                   Configs.resolveMaintenanceMinIntervalMs(config, taskType, policyInterval);
-              return new EffectiveTableMaintenancePolicy(policy, taskType, fields, interval);
+              return new EffectiveTableMaintenancePolicy(policy, taskType, schedule, interval);
             });
   }
 }
