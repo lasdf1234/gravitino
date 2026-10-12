@@ -24,6 +24,7 @@ import java.util.Objects;
 import java.util.Set;
 import javax.annotation.Nullable;
 import org.apache.gravitino.MetadataObject;
+import org.apache.gravitino.maintenance.policy.MaintenanceTrigger;
 
 /** Utility class for creating instances of {@link PolicyContent}. */
 public class PolicyContents {
@@ -134,7 +135,7 @@ public class PolicyContents {
       String rewriteStrategy,
       String sortOrder,
       Map<String, String> rewriteOptions) {
-    return new IcebergDataCompactionContent(
+    return icebergDataCompaction(
         minDataFileMse,
         minDeleteFileNumber,
         dataFileMseWeight,
@@ -142,7 +143,54 @@ public class PolicyContents {
         maxPartitionNum,
         rewriteStrategy,
         sortOrder,
-        rewriteOptions);
+        rewriteOptions,
+        null,
+        null,
+        null,
+        null);
+  }
+
+  /**
+   * Creates an iceberg compaction policy content with optional TMS peer fields.
+   *
+   * @param minDataFileMse minimum threshold for custom-data-file-mse
+   * @param minDeleteFileNumber minimum threshold for custom-delete-file-number
+   * @param dataFileMseWeight weight used for custom-data-file-mse score contribution
+   * @param deleteFileNumberWeight weight used for custom-delete-file-number score contribution
+   * @param maxPartitionNum maximum partition number selected for compaction
+   * @param rewriteStrategy Iceberg rewrite_data_files top-level strategy
+   * @param sortOrder Iceberg rewrite_data_files top-level sort_order
+   * @param rewriteOptions rewrite options forwarded as job.options.*
+   * @param schedule evaluate trigger, or null
+   * @param minIntervalMs cooldown ms, or null
+   * @param jobOptions Spark / IRC options, or null
+   * @param updateOptions updater options, or null
+   * @return iceberg compaction policy content
+   */
+  public static PolicyContent icebergDataCompaction(
+      long minDataFileMse,
+      long minDeleteFileNumber,
+      long dataFileMseWeight,
+      long deleteFileNumberWeight,
+      long maxPartitionNum,
+      String rewriteStrategy,
+      String sortOrder,
+      Map<String, String> rewriteOptions,
+      @Nullable MaintenanceTrigger schedule,
+      @Nullable Long minIntervalMs,
+      @Nullable Map<String, String> jobOptions,
+      @Nullable Map<String, String> updateOptions) {
+    IcebergDataCompactionContent content =
+        new IcebergDataCompactionContent(
+            minDataFileMse,
+            minDeleteFileNumber,
+            dataFileMseWeight,
+            deleteFileNumberWeight,
+            maxPartitionNum,
+            rewriteStrategy,
+            sortOrder,
+            rewriteOptions);
+    return withPeerFields(content, schedule, minIntervalMs, jobOptions, updateOptions);
   }
 
   /**
@@ -165,7 +213,107 @@ public class PolicyContents {
    */
   public static PolicyContent icebergOrphanFileRemoval(
       long olderThanDays, @Nullable String location, boolean dryRun) {
-    return new IcebergOrphanFileRemovalContent(olderThanDays, location, dryRun);
+    return icebergOrphanFileRemoval(olderThanDays, location, dryRun, null, null, null, null);
+  }
+
+  /**
+   * Creates orphan cleanup policy content with optional TMS peer fields.
+   *
+   * @param olderThanDays minimum file age in days
+   * @param location optional scan location within the table
+   * @param dryRun whether to list candidates without deleting them
+   * @param schedule evaluate trigger, or null
+   * @param minIntervalMs cooldown ms, or null
+   * @param jobOptions Spark / IRC options, or null
+   * @param updateOptions updater options, or null
+   * @return orphan cleanup policy content
+   */
+  public static PolicyContent icebergOrphanFileRemoval(
+      long olderThanDays,
+      @Nullable String location,
+      boolean dryRun,
+      @Nullable MaintenanceTrigger schedule,
+      @Nullable Long minIntervalMs,
+      @Nullable Map<String, String> jobOptions,
+      @Nullable Map<String, String> updateOptions) {
+    IcebergOrphanFileRemovalContent content =
+        new IcebergOrphanFileRemovalContent(olderThanDays, location, dryRun);
+    return withPeerFields(content, schedule, minIntervalMs, jobOptions, updateOptions);
+  }
+
+  /**
+   * Creates placeholder Iceberg rewrite-manifests policy content.
+   *
+   * @return rewrite-manifests policy content
+   */
+  public static PolicyContent icebergRewriteManifests() {
+    return icebergRewriteManifests(null, null, null, null);
+  }
+
+  /**
+   * Creates placeholder Iceberg rewrite-manifests policy content with optional TMS peer fields.
+   *
+   * @param schedule evaluate trigger, or null
+   * @param minIntervalMs cooldown ms, or null
+   * @param jobOptions Spark / IRC options, or null
+   * @param updateOptions updater options, or null
+   * @return rewrite-manifests policy content
+   */
+  public static PolicyContent icebergRewriteManifests(
+      @Nullable MaintenanceTrigger schedule,
+      @Nullable Long minIntervalMs,
+      @Nullable Map<String, String> jobOptions,
+      @Nullable Map<String, String> updateOptions) {
+    return withPeerFields(
+        new IcebergRewriteManifestsContent(), schedule, minIntervalMs, jobOptions, updateOptions);
+  }
+
+  /**
+   * Creates placeholder Iceberg snapshot-expiration policy content.
+   *
+   * @return snapshot-expiration policy content
+   */
+  public static PolicyContent icebergSnapshotExpiration() {
+    return icebergSnapshotExpiration(null, null, null, null);
+  }
+
+  /**
+   * Creates placeholder Iceberg snapshot-expiration policy content with optional TMS peer fields.
+   *
+   * @param schedule evaluate trigger, or null
+   * @param minIntervalMs cooldown ms, or null
+   * @param jobOptions Spark / IRC options, or null
+   * @param updateOptions updater options, or null
+   * @return snapshot-expiration policy content
+   */
+  public static PolicyContent icebergSnapshotExpiration(
+      @Nullable MaintenanceTrigger schedule,
+      @Nullable Long minIntervalMs,
+      @Nullable Map<String, String> jobOptions,
+      @Nullable Map<String, String> updateOptions) {
+    return withPeerFields(
+        new IcebergSnapshotExpirationContent(), schedule, minIntervalMs, jobOptions, updateOptions);
+  }
+
+  /**
+   * Attaches optional TMS peer fields without adding them to task-specific constructors.
+   *
+   * @param content maintenance content
+   * @param schedule evaluate trigger, or null
+   * @param minIntervalMs cooldown ms, or null
+   * @param jobOptions Spark / IRC options, or null
+   * @param updateOptions updater options, or null
+   * @param <T> concrete maintenance content type
+   * @return the same content with peer fields applied
+   */
+  public static <T extends TableMaintenanceContent> T withPeerFields(
+      T content,
+      @Nullable MaintenanceTrigger schedule,
+      @Nullable Long minIntervalMs,
+      @Nullable Map<String, String> jobOptions,
+      @Nullable Map<String, String> updateOptions) {
+    content.setPeerFields(schedule, minIntervalMs, jobOptions, updateOptions);
+    return content;
   }
 
   /**

@@ -107,6 +107,8 @@ import org.apache.gravitino.model.ModelVersion;
 import org.apache.gravitino.policy.ColumnMaskContent;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
+import org.apache.gravitino.policy.IcebergRewriteManifestsContent;
+import org.apache.gravitino.policy.IcebergSnapshotExpirationContent;
 import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyContents;
 import org.apache.gravitino.policy.RowFilterContent;
@@ -684,6 +686,28 @@ public class DTOConverters {
           .withOlderThanDays(content.olderThanDays())
           .withLocation(content.location())
           .withDryRun(content.dryRun())
+          .withSchedule(PolicyContentDTO.MaintenanceTriggerDTO.fromDomain(content.schedule()))
+          .withMinIntervalMs(content.minIntervalMs())
+          .withJobOptions(emptyToNull(content.jobOptions()))
+          .withUpdateOptions(emptyToNull(content.updateOptions()))
+          .build();
+    }
+    if (policyContent instanceof IcebergRewriteManifestsContent) {
+      IcebergRewriteManifestsContent content = (IcebergRewriteManifestsContent) policyContent;
+      return PolicyContentDTO.IcebergRewriteManifestsContentDTO.builder()
+          .withSchedule(PolicyContentDTO.MaintenanceTriggerDTO.fromDomain(content.schedule()))
+          .withMinIntervalMs(content.minIntervalMs())
+          .withJobOptions(emptyToNull(content.jobOptions()))
+          .withUpdateOptions(emptyToNull(content.updateOptions()))
+          .build();
+    }
+    if (policyContent instanceof IcebergSnapshotExpirationContent) {
+      IcebergSnapshotExpirationContent content = (IcebergSnapshotExpirationContent) policyContent;
+      return PolicyContentDTO.IcebergSnapshotExpirationContentDTO.builder()
+          .withSchedule(PolicyContentDTO.MaintenanceTriggerDTO.fromDomain(content.schedule()))
+          .withMinIntervalMs(content.minIntervalMs())
+          .withJobOptions(emptyToNull(content.jobOptions()))
+          .withUpdateOptions(emptyToNull(content.updateOptions()))
           .build();
     }
     if (policyContent instanceof IcebergDataCompactionContent) {
@@ -698,6 +722,12 @@ public class DTOConverters {
           .withRewriteStrategy(icebergCompactionContent.rewriteStrategy())
           .withSortOrder(icebergCompactionContent.sortOrder())
           .withRewriteOptions(icebergCompactionContent.rewriteOptions())
+          .withSchedule(
+              PolicyContentDTO.MaintenanceTriggerDTO.fromDomain(
+                  icebergCompactionContent.schedule()))
+          .withMinIntervalMs(icebergCompactionContent.minIntervalMs())
+          .withJobOptions(emptyToNull(icebergCompactionContent.jobOptions()))
+          .withUpdateOptions(emptyToNull(icebergCompactionContent.updateOptions()))
           .build();
     }
 
@@ -1563,7 +1593,31 @@ public class DTOConverters {
       PolicyContentDTO.IcebergOrphanFileRemovalContentDTO content =
           (PolicyContentDTO.IcebergOrphanFileRemovalContentDTO) policyContentDTO;
       return PolicyContents.icebergOrphanFileRemoval(
-          content.olderThanDays(), content.location(), content.dryRun());
+          content.olderThanDays(),
+          content.location(),
+          content.dryRun(),
+          content.schedule() == null ? null : content.schedule().toDomain(),
+          content.minIntervalMs(),
+          content.jobOptions(),
+          content.updateOptions());
+    }
+    if (policyContentDTO instanceof PolicyContentDTO.IcebergRewriteManifestsContentDTO) {
+      PolicyContentDTO.IcebergRewriteManifestsContentDTO content =
+          (PolicyContentDTO.IcebergRewriteManifestsContentDTO) policyContentDTO;
+      return PolicyContents.icebergRewriteManifests(
+          content.schedule() == null ? null : content.schedule().toDomain(),
+          content.minIntervalMs(),
+          content.jobOptions(),
+          content.updateOptions());
+    }
+    if (policyContentDTO instanceof PolicyContentDTO.IcebergSnapshotExpirationContentDTO) {
+      PolicyContentDTO.IcebergSnapshotExpirationContentDTO content =
+          (PolicyContentDTO.IcebergSnapshotExpirationContentDTO) policyContentDTO;
+      return PolicyContents.icebergSnapshotExpiration(
+          content.schedule() == null ? null : content.schedule().toDomain(),
+          content.minIntervalMs(),
+          content.jobOptions(),
+          content.updateOptions());
     }
     if (policyContentDTO instanceof PolicyContentDTO.IcebergCompactionContentDTO) {
       PolicyContentDTO.IcebergCompactionContentDTO icebergCompactionContentDTO =
@@ -1576,7 +1630,13 @@ public class DTOConverters {
           icebergCompactionContentDTO.maxPartitionNum(),
           icebergCompactionContentDTO.rewriteStrategy(),
           icebergCompactionContentDTO.sortOrder(),
-          icebergCompactionContentDTO.rewriteOptions());
+          icebergCompactionContentDTO.rewriteOptions(),
+          icebergCompactionContentDTO.schedule() == null
+              ? null
+              : icebergCompactionContentDTO.schedule().toDomain(),
+          icebergCompactionContentDTO.minIntervalMs(),
+          icebergCompactionContentDTO.jobOptions(),
+          icebergCompactionContentDTO.updateOptions());
     }
 
     if (policyContentDTO instanceof PolicyContentDTO.RowFilterContentDTO) {
@@ -1593,5 +1653,9 @@ public class DTOConverters {
 
     throw new IllegalArgumentException(
         "Unsupported policy content type: " + policyContentDTO.getClass());
+  }
+
+  private static Map<String, String> emptyToNull(Map<String, String> options) {
+    return options == null || options.isEmpty() ? null : options;
   }
 }

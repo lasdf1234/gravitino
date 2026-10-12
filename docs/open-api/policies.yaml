@@ -334,42 +334,98 @@ components:
           items:
             $ref: "#/components/schemas/TagForPolicyAssociation"
 
-    IcebergCompactionContent:
+    MaintenanceTrigger:
       type: object
-      description: Built-in Iceberg compaction thresholds, scoring weights, and job options.
+      description: >
+        Evaluate triggers for table maintenance (event and/or cron). At least one of onCommit or
+        cronExpression should be set when the schedule object is present.
       properties:
-        minDataFileMse:
+        onCommit:
+          type: boolean
+          description: Whether IRC commit should enqueue maintenance. Not allowed for orphan-cleanup.
+        cronExpression:
+          type: string
+          description: >
+            Quartz cron with 6 fields (seconds minutes hours day-of-month month day-of-week) or 7
+            fields (optional year). Server validates field count and allowed tokens only; Quartz
+            value ranges and cross-field rules are enforced when the scheduler expands the expression.
+
+    TableMaintenancePeerFields:
+      type: object
+      description: >
+        Optional TMS peer fields shared by built-in table-maintenance policy contents
+        (schedule, minIntervalMs, jobOptions, updateOptions). Stored on all four maintenance
+        types for schema symmetry. For placeholder types whose generated trigger-expr is false
+        (rewrite-manifests, snapshot-expiration), peers are accepted and persisted but are not
+        evaluated for enqueue until that type is fully wired.
+      properties:
+        schedule:
+          $ref: '#/components/schemas/MaintenanceTrigger'
+        minIntervalMs:
           type: integer
           format: int64
           minimum: 0
-          default: 405323966463344
-        minDeleteFileNumber:
-          type: integer
-          format: int64
-          minimum: 0
-          default: 1
-        dataFileMseWeight:
-          type: integer
-          format: int64
-          minimum: 0
-          default: 1
-        deleteFileNumberWeight:
-          type: integer
-          format: int64
-          minimum: 0
-          default: 100
-        maxPartitionNum:
-          type: integer
-          format: int64
-          minimum: 1
-          default: 50
-        rewriteOptions:
+          description: Cooldown after last finished job for this policy type.
+        jobOptions:
           type: object
-          default: {}
-          description: Rewrite options with nonempty values and keys matching [A-Za-z0-9._-]+, without the job.options. prefix.
+          description: Spark / IRC client options merged into runJob conf (separate from rewriteOptions).
           additionalProperties:
             type: string
             minLength: 1
+        updateOptions:
+          type: object
+          description: Gravitino updater options merged into runJob updateOptions.
+          additionalProperties:
+            type: string
+            minLength: 1
+
+    IcebergCompactionContent:
+      allOf:
+        - $ref: '#/components/schemas/TableMaintenancePeerFields'
+        - type: object
+          description: Built-in Iceberg compaction thresholds, scoring weights, and rewrite options.
+          properties:
+            minDataFileMse:
+              type: integer
+              format: int64
+              minimum: 0
+              default: 405323966463344
+            minDeleteFileNumber:
+              type: integer
+              format: int64
+              minimum: 0
+              default: 1
+            dataFileMseWeight:
+              type: integer
+              format: int64
+              minimum: 0
+              default: 1
+            deleteFileNumberWeight:
+              type: integer
+              format: int64
+              minimum: 0
+              default: 100
+            maxPartitionNum:
+              type: integer
+              format: int64
+              minimum: 1
+              default: 50
+            rewriteStrategy:
+              type: string
+              enum: [binpack, sort]
+              default: binpack
+              description: Iceberg rewrite_data_files top-level strategy.
+            sortOrder:
+              type: string
+              default: ""
+              description: Iceberg rewrite_data_files top-level sort_order. Required when rewriteStrategy is sort; must be empty for binpack.
+            rewriteOptions:
+              type: object
+              default: {}
+              description: Rewrite options with nonempty values and keys matching [A-Za-z0-9._-]+, without the job.options. prefix.
+              additionalProperties:
+                type: string
+                minLength: 1
 
     IcebergCompactionPolicy:
       allOf:
@@ -396,24 +452,26 @@ components:
               $ref: '#/components/schemas/IcebergCompactionContent'
 
     IcebergOrphanFileRemovalContent:
-      type: object
-      description: Table-level orphan cleanup options. Scheduling is configured separately.
-      properties:
-        olderThanDays:
-          type: integer
-          format: int64
-          minimum: 1
-          maximum: 36500
-          default: 3
-          description: Minimum age of orphan files in days, including for dry runs.
-        location:
-          type: string
-          nullable: true
-          description: Optional scan location within the target table's storage root.
-        dryRun:
-          type: boolean
-          default: false
-          description: List candidates without deleting them.
+      allOf:
+        - $ref: '#/components/schemas/TableMaintenancePeerFields'
+        - type: object
+          description: Table-level orphan cleanup options plus optional TMS peer fields.
+          properties:
+            olderThanDays:
+              type: integer
+              format: int64
+              minimum: 1
+              maximum: 36500
+              default: 3
+              description: Minimum age of orphan files in days, including for dry runs.
+            location:
+              type: string
+              nullable: true
+              description: Optional scan location within the target table's storage root.
+            dryRun:
+              type: boolean
+              default: false
+              description: List candidates without deleting them.
 
     IcebergOrphanFileRemovalPolicy:
       allOf:
@@ -438,6 +496,72 @@ components:
               enum: [system_iceberg_orphan_file_removal]
             content:
               $ref: '#/components/schemas/IcebergOrphanFileRemovalContent'
+
+    IcebergRewriteManifestsContent:
+      allOf:
+        - $ref: '#/components/schemas/TableMaintenancePeerFields'
+        - type: object
+          description: >
+            Placeholder content for system_iceberg_rewrite_manifests. Configurable thresholds land
+            in a follow-up. Peer fields may be stored now; trigger-expr remains false so schedule
+            does not enqueue until the type is wired.
+
+    IcebergRewriteManifestsPolicy:
+      allOf:
+        - $ref: '#/components/schemas/PolicyBase'
+        - type: object
+          required: [content]
+          properties:
+            policyType:
+              type: string
+              enum: [system_iceberg_rewrite_manifests]
+            content:
+              $ref: '#/components/schemas/IcebergRewriteManifestsContent'
+
+    IcebergRewriteManifestsPolicyCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/PolicyCreateRequestBase'
+        - type: object
+          required: [content]
+          properties:
+            policyType:
+              type: string
+              enum: [system_iceberg_rewrite_manifests]
+            content:
+              $ref: '#/components/schemas/IcebergRewriteManifestsContent'
+
+    IcebergSnapshotExpirationContent:
+      allOf:
+        - $ref: '#/components/schemas/TableMaintenancePeerFields'
+        - type: object
+          description: >
+            Placeholder content for system_iceberg_snapshot_expiration. Configurable thresholds land
+            in a follow-up. Peer fields may be stored now; trigger-expr remains false so schedule
+            does not enqueue until the type is wired.
+
+    IcebergSnapshotExpirationPolicy:
+      allOf:
+        - $ref: '#/components/schemas/PolicyBase'
+        - type: object
+          required: [content]
+          properties:
+            policyType:
+              type: string
+              enum: [system_iceberg_snapshot_expiration]
+            content:
+              $ref: '#/components/schemas/IcebergSnapshotExpirationContent'
+
+    IcebergSnapshotExpirationPolicyCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/PolicyCreateRequestBase'
+        - type: object
+          required: [content]
+          properties:
+            policyType:
+              type: string
+              enum: [system_iceberg_snapshot_expiration]
+            content:
+              $ref: '#/components/schemas/IcebergSnapshotExpirationContent'
 
     RowFilterContent:
       type: object
@@ -593,7 +717,7 @@ components:
             policyType:
               type: string
               not:
-                enum: [system_iceberg_compaction, system_iceberg_orphan_file_removal, system_row_filter, system_column_mask]
+                enum: [system_iceberg_compaction, system_iceberg_orphan_file_removal, system_iceberg_rewrite_manifests, system_iceberg_snapshot_expiration, system_row_filter, system_column_mask]
             content:
               $ref: '#/components/schemas/CustomPolicyContent'
 
@@ -604,6 +728,8 @@ components:
         - $ref: '#/components/schemas/CustomPolicy'
         - $ref: '#/components/schemas/IcebergOrphanFileRemovalPolicy'
         - $ref: '#/components/schemas/IcebergCompactionPolicy'
+        - $ref: '#/components/schemas/IcebergRewriteManifestsPolicy'
+        - $ref: '#/components/schemas/IcebergSnapshotExpirationPolicy'
         - $ref: '#/components/schemas/RowFilterPolicy'
         - $ref: '#/components/schemas/ColumnMaskPolicy'
       discriminator:
@@ -612,6 +738,8 @@ components:
           custom: '#/components/schemas/CustomPolicy'
           system_iceberg_orphan_file_removal: '#/components/schemas/IcebergOrphanFileRemovalPolicy'
           system_iceberg_compaction: '#/components/schemas/IcebergCompactionPolicy'
+          system_iceberg_rewrite_manifests: '#/components/schemas/IcebergRewriteManifestsPolicy'
+          system_iceberg_snapshot_expiration: '#/components/schemas/IcebergSnapshotExpirationPolicy'
           system_row_filter: '#/components/schemas/RowFilterPolicy'
           system_column_mask: '#/components/schemas/ColumnMaskPolicy'
 
@@ -684,7 +812,7 @@ components:
             policyType:
               type: string
               not:
-                enum: [system_iceberg_compaction, system_iceberg_orphan_file_removal, system_row_filter, system_column_mask]
+                enum: [system_iceberg_compaction, system_iceberg_orphan_file_removal, system_iceberg_rewrite_manifests, system_iceberg_snapshot_expiration, system_row_filter, system_column_mask]
             content:
               $ref: '#/components/schemas/CustomPolicyContent'
 
@@ -694,6 +822,8 @@ components:
       oneOf:
         - $ref: '#/components/schemas/CustomPolicyCreateRequest'
         - $ref: '#/components/schemas/IcebergOrphanFileRemovalPolicyCreateRequest'
+        - $ref: '#/components/schemas/IcebergRewriteManifestsPolicyCreateRequest'
+        - $ref: '#/components/schemas/IcebergSnapshotExpirationPolicyCreateRequest'
         - $ref: '#/components/schemas/IcebergCompactionPolicyCreateRequest'
         - $ref: '#/components/schemas/RowFilterPolicyCreateRequest'
         - $ref: '#/components/schemas/ColumnMaskPolicyCreateRequest'
@@ -702,6 +832,8 @@ components:
         mapping:
           custom: '#/components/schemas/CustomPolicyCreateRequest'
           system_iceberg_orphan_file_removal: '#/components/schemas/IcebergOrphanFileRemovalPolicyCreateRequest'
+          system_iceberg_rewrite_manifests: '#/components/schemas/IcebergRewriteManifestsPolicyCreateRequest'
+          system_iceberg_snapshot_expiration: '#/components/schemas/IcebergSnapshotExpirationPolicyCreateRequest'
           system_iceberg_compaction: '#/components/schemas/IcebergCompactionPolicyCreateRequest'
           system_row_filter: '#/components/schemas/RowFilterPolicyCreateRequest'
           system_column_mask: '#/components/schemas/ColumnMaskPolicyCreateRequest'
@@ -794,7 +926,7 @@ components:
             policyType:
               type: string
               not:
-                enum: [system_iceberg_compaction, system_iceberg_orphan_file_removal, system_row_filter, system_column_mask]
+                enum: [system_iceberg_compaction, system_iceberg_orphan_file_removal, system_iceberg_rewrite_manifests, system_iceberg_snapshot_expiration, system_row_filter, system_column_mask]
             newContent:
               $ref: '#/components/schemas/CustomPolicyContent'
 
@@ -819,6 +951,28 @@ components:
               enum: [system_iceberg_orphan_file_removal]
             newContent:
               $ref: '#/components/schemas/IcebergOrphanFileRemovalContent'
+
+    UpdateIcebergRewriteManifestsPolicyContentRequest:
+      allOf:
+        - $ref: '#/components/schemas/UpdatePolicyContentRequestBase'
+        - type: object
+          properties:
+            policyType:
+              type: string
+              enum: [system_iceberg_rewrite_manifests]
+            newContent:
+              $ref: '#/components/schemas/IcebergRewriteManifestsContent'
+
+    UpdateIcebergSnapshotExpirationPolicyContentRequest:
+      allOf:
+        - $ref: '#/components/schemas/UpdatePolicyContentRequestBase'
+        - type: object
+          properties:
+            policyType:
+              type: string
+              enum: [system_iceberg_snapshot_expiration]
+            newContent:
+              $ref: '#/components/schemas/IcebergSnapshotExpirationContent'
 
     UpdateRowFilterPolicyContentRequest:
       allOf:
@@ -848,6 +1002,8 @@ components:
         - $ref: '#/components/schemas/UpdateCustomPolicyContentRequest'
         - $ref: '#/components/schemas/UpdateIcebergCompactionPolicyContentRequest'
         - $ref: '#/components/schemas/UpdateIcebergOrphanFileRemovalPolicyContentRequest'
+        - $ref: '#/components/schemas/UpdateIcebergRewriteManifestsPolicyContentRequest'
+        - $ref: '#/components/schemas/UpdateIcebergSnapshotExpirationPolicyContentRequest'
         - $ref: '#/components/schemas/UpdateRowFilterPolicyContentRequest'
         - $ref: '#/components/schemas/UpdateColumnMaskPolicyContentRequest'
       discriminator:
@@ -856,6 +1012,8 @@ components:
           custom: '#/components/schemas/UpdateCustomPolicyContentRequest'
           system_iceberg_compaction: '#/components/schemas/UpdateIcebergCompactionPolicyContentRequest'
           system_iceberg_orphan_file_removal: '#/components/schemas/UpdateIcebergOrphanFileRemovalPolicyContentRequest'
+          system_iceberg_rewrite_manifests: '#/components/schemas/UpdateIcebergRewriteManifestsPolicyContentRequest'
+          system_iceberg_snapshot_expiration: '#/components/schemas/UpdateIcebergSnapshotExpirationPolicyContentRequest'
           system_row_filter: '#/components/schemas/UpdateRowFilterPolicyContentRequest'
           system_column_mask: '#/components/schemas/UpdateColumnMaskPolicyContentRequest'
       example: {
