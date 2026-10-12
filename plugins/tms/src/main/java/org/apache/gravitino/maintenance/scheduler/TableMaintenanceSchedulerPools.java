@@ -31,7 +31,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Starts and stops three isolated db-scheduler pools over {@code scheduled_tasks} (§5.2, §7.2).
+ * Starts and stops three isolated db-scheduler pools (§5.2, §7.2), each with its own task table.
+ *
+ * <p>db-scheduler requires a dedicated {@code tableName} per Scheduler instance for multi-pool
+ * isolation; sharing one table across pools is unsupported.
  *
  * <p>Task handlers are intentionally minimal in this change; submit and occupancy logic land in
  * follow-up PRs.
@@ -40,7 +43,14 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(TableMaintenanceSchedulerPools.class);
 
-  private static final String SCHEDULED_TASKS_TABLE = "scheduled_tasks";
+  /** Expand-pool db-scheduler table. */
+  public static final String EXPAND_TASKS_TABLE = "scheduled_tasks_expand";
+
+  /** Cron-pool db-scheduler table. */
+  public static final String CRON_TASKS_TABLE = "scheduled_tasks_cron";
+
+  /** Commit-pool db-scheduler table. */
+  public static final String COMMIT_TASKS_TABLE = "scheduled_tasks_commit";
 
   private final List<Scheduler> schedulers = new ArrayList<>();
 
@@ -59,18 +69,21 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
             dataSource,
             config,
             config.expandThreads(),
+            EXPAND_TASKS_TABLE,
             noopTask(TableMaintenanceTaskNames.POLICY_EXPAND)));
     schedulers.add(
         buildScheduler(
             dataSource,
             config,
             config.cronThreads(),
+            CRON_TASKS_TABLE,
             noopTask(TableMaintenanceTaskNames.CRON_JOB)));
     schedulers.add(
         buildScheduler(
             dataSource,
             config,
             config.commitThreads(),
+            COMMIT_TASKS_TABLE,
             noopTask(TableMaintenanceTaskNames.COMMIT_JOB)));
 
     schedulers.forEach(Scheduler::start);
@@ -96,13 +109,17 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
   }
 
   private static Scheduler buildScheduler(
-      DataSource dataSource, TableMaintenanceConfig config, int threads, Task<Void> task) {
+      DataSource dataSource,
+      TableMaintenanceConfig config,
+      int threads,
+      String tableName,
+      Task<Void> task) {
     return Scheduler.create(dataSource, task)
         .threads(threads)
         .pollingInterval(Duration.ofMillis(config.pollingIntervalMs()))
         .heartbeatInterval(Duration.ofMillis(config.heartbeatIntervalMs()))
         .missedHeartbeatsLimit(config.missedHeartbeatsLimit())
-        .tableName(SCHEDULED_TASKS_TABLE)
+        .tableName(tableName)
         .registerShutdownHook()
         .build();
   }
