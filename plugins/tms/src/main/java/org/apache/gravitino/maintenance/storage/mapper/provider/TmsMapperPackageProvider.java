@@ -20,6 +20,7 @@ package org.apache.gravitino.maintenance.storage.mapper.provider;
 
 import com.google.common.collect.ImmutableList;
 import java.util.List;
+import org.apache.gravitino.maintenance.storage.mapper.JobRunStatusMapper;
 import org.apache.gravitino.maintenance.storage.mapper.TableMaintenanceJobMapper;
 import org.apache.gravitino.maintenance.storage.mapper.TableSnapshotMetricsMapper;
 import org.apache.gravitino.storage.relational.mapper.provider.MapperPackageProvider;
@@ -29,6 +30,9 @@ public class TmsMapperPackageProvider implements MapperPackageProvider {
 
   @Override
   public List<Class<?>> getMapperClasses() {
-    return ImmutableList.of(TableMaintenanceJobMapper.class, TableSnapshotMetricsMapper.class);
+    return ImmutableList.of(
+        TableMaintenanceJobMapper.class,
+        TableSnapshotMetricsMapper.class,
+        JobRunStatusMapper.class);
   }
 }

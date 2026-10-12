@@ -95,6 +95,33 @@ public class TableMaintenanceJobSQLProviderFactory {
     return getProvider().deleteByJobId(jobId);
   }
 
+  /**
+   * @return SELECT statement for in-flight rows
+   */
+  public static String listInFlight() {
+    return getProvider().listInFlight();
+  }
+
+  /**
+   * @param tableId table entity id
+   * @param policyId policy entity id
+   * @return SELECT statement
+   */
+  public static String selectInFlightByTableAndPolicy(
+      @Param("tableId") long tableId, @Param("policyId") long policyId) {
+    return getProvider().selectInFlightByTableAndPolicy(tableId, policyId);
+  }
+
+  /**
+   * @param tableId table entity id
+   * @param policyId policy entity id
+   * @return SELECT statement
+   */
+  public static String selectMaxFinishedAt(
+      @Param("tableId") long tableId, @Param("policyId") long policyId) {
+    return getProvider().selectMaxFinishedAt(tableId, policyId);
+  }
+
   static TableMaintenanceJobBaseSQLProvider getProvider() {
     String databaseId =
         SqlSessionFactoryHelper.getInstance()

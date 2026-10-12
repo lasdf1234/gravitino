@@ -20,6 +20,7 @@ package org.apache.gravitino.maintenance.storage.service;
 
 import static org.apache.gravitino.metrics.source.MetricsSource.GRAVITINO_RELATIONAL_STORE_METRIC_NAME;
 
+import java.util.List;
 import javax.annotation.Nullable;
 import org.apache.gravitino.maintenance.storage.mapper.TableMaintenanceJobMapper;
 import org.apache.gravitino.maintenance.storage.mapper.TableSnapshotMetricsMapper;
@@ -125,5 +126,47 @@ public class TableMaintenanceJobMetaService {
         () ->
             SessionUtils.doWithoutCommit(
                 TableMaintenanceJobMapper.class, mapper -> mapper.deleteByJobId(jobId)));
+  }
+
+  /**
+   * Lists rows still marked in-flight ({@code finished_at IS NULL}).
+   *
+   * @return in-flight job rows
+   */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "listInFlightTableMaintenanceJobs")
+  public List<TableMaintenanceJobPO> listInFlight() {
+    return SessionUtils.getWithoutCommit(
+        TableMaintenanceJobMapper.class, TableMaintenanceJobMapper::listInFlight);
+  }
+
+  /**
+   * @param tableId table entity id
+   * @param policyId policy entity id
+   * @return true when an unfinished row exists for the pair
+   */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "hasInFlightTableMaintenanceJob")
+  public boolean hasInFlight(long tableId, long policyId) {
+    return SessionUtils.getWithoutCommit(
+            TableMaintenanceJobMapper.class,
+            mapper -> mapper.selectInFlightByTableAndPolicy(tableId, policyId))
+        != null;
+  }
+
+  /**
+   * @param tableId table entity id
+   * @param policyId policy entity id
+   * @return latest {@code finished_at}, or null when none finished yet
+   */
+  @Nullable
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getMaxFinishedAtTableMaintenanceJob")
+  public Long maxFinishedAt(long tableId, long policyId) {
+    return SessionUtils.getWithoutCommit(
+        TableMaintenanceJobMapper.class, mapper -> mapper.selectMaxFinishedAt(tableId, policyId));
   }
 }
