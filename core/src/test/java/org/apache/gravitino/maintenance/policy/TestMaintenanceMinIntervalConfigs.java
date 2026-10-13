@@ -19,7 +19,6 @@
 package org.apache.gravitino.maintenance.policy;
 
 import org.apache.gravitino.Config;
-import org.apache.gravitino.Configs;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -31,39 +30,40 @@ public class TestMaintenanceMinIntervalConfigs {
     for (TableMaintenanceTaskType taskType : TableMaintenanceTaskType.values()) {
       Assertions.assertEquals(
           taskType.defaultMinIntervalMs(),
-          config.get(Configs.maintenanceTaskMinIntervalMs(taskType)));
+          config.get(MaintenanceMinIntervalConfigs.forTaskType(taskType)));
       Assertions.assertEquals(
           MinIntervalMsResolver.configKey(taskType),
-          Configs.maintenanceTaskMinIntervalMs(taskType).getKey());
+          MaintenanceMinIntervalConfigs.forTaskType(taskType).getKey());
     }
   }
 
   @Test
   void testResolvePrefersPolicyThenConfigThenDefault() {
     Config config = new Config(false) {};
-    config.set(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, 900_000L);
+    config.set(MaintenanceMinIntervalConfigs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, 900_000L);
 
     Assertions.assertEquals(
         120_000L,
-        Configs.resolveMaintenanceMinIntervalMs(
+        MaintenanceMinIntervalConfigs.resolve(
             config, TableMaintenanceTaskType.COMPACTION, 120_000L));
     Assertions.assertEquals(
         900_000L,
-        Configs.resolveMaintenanceMinIntervalMs(config, TableMaintenanceTaskType.COMPACTION, null));
+        MaintenanceMinIntervalConfigs.resolve(config, TableMaintenanceTaskType.COMPACTION, null));
 
     Config defaultsOnly = new Config(false) {};
     Assertions.assertEquals(
         TableMaintenanceTaskType.ORPHAN_CLEANUP.defaultMinIntervalMs(),
-        Configs.resolveMaintenanceMinIntervalMs(
+        MaintenanceMinIntervalConfigs.resolve(
             defaultsOnly, TableMaintenanceTaskType.ORPHAN_CLEANUP, null));
   }
 
   @Test
   void testRejectsNegativeMinInterval() {
     Config config = new Config(false) {};
-    config.set(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, -1L);
+    config.set(MaintenanceMinIntervalConfigs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, -1L);
     Assertions.assertThrows(
         IllegalArgumentException.class,
-        () -> config.get(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS));
+        () ->
+            config.get(MaintenanceMinIntervalConfigs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS));
   }
 }

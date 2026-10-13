@@ -27,7 +27,6 @@ import static org.mockito.Mockito.when;
 import com.google.common.collect.ImmutableList;
 import java.time.Instant;
 import org.apache.gravitino.Config;
-import org.apache.gravitino.Configs;
 import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.MetadataObjects;
@@ -187,7 +186,7 @@ public class TestNearestMaintenancePolicyResolver {
         .thenReturn(new PolicyEntity[] {policy});
 
     Config config = new Config(false) {};
-    config.set(Configs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, 42_000L);
+    config.set(MaintenanceMinIntervalConfigs.MAINTENANCE_TASK_COMPACTION_MIN_INTERVAL_MS, 42_000L);
 
     EffectiveTableMaintenancePolicy effective =
         EffectiveTableMaintenancePolicy.resolve(

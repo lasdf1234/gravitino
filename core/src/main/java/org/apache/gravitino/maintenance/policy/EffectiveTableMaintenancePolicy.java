@@ -22,7 +22,6 @@ import com.google.common.base.Preconditions;
 import java.util.Optional;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
-import org.apache.gravitino.Configs;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.meta.PolicyEntity;
 
@@ -112,7 +111,7 @@ public final class EffectiveTableMaintenancePolicy {
               TableMaintenanceSchedule schedule = fields == null ? null : fields.schedule();
               Long policyInterval = fields == null ? null : fields.minIntervalMs();
               long interval =
-                  Configs.resolveMaintenanceMinIntervalMs(config, taskType, policyInterval);
+                  MaintenanceMinIntervalConfigs.resolve(config, taskType, policyInterval);
               return new EffectiveTableMaintenancePolicy(policy, taskType, schedule, interval);
             });
   }
