@@ -202,6 +202,7 @@ public class TableMaintenanceActionMetaService {
       baseMetricName = "getMaxFinishedAtTableMaintenanceAction")
   public Long maxFinishedAt(long tableId, long policyId) {
     return SessionUtils.getWithoutCommit(
-        TableMaintenanceActionMapper.class, mapper -> mapper.selectMaxFinishedAt(tableId, policyId));
+        TableMaintenanceActionMapper.class,
+        mapper -> mapper.selectMaxFinishedAt(tableId, policyId));
   }
 }
