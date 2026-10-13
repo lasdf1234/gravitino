@@ -22,7 +22,7 @@ import java.io.IOException;
 import java.util.function.Function;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.job.JobHandle;
-import org.apache.gravitino.maintenance.storage.service.TableMaintenanceJobMetaService;
+import org.apache.gravitino.maintenance.storage.service.TableMaintenanceActionMetaService;
 import org.apache.gravitino.meta.JobEntity;
 import org.apache.gravitino.meta.JobTemplateEntity;
 import org.apache.gravitino.meta.TableEntity;
@@ -45,11 +45,14 @@ class TestOccupancyGate extends TestJDBCBackend {
     JobTemplateEntity template =
         createAndInsertShellJobTemplateEntity("occ-template", "comment", metalakeName);
 
-    TableMaintenanceJobMetaService jobs = TableMaintenanceJobMetaService.getInstance();
-    OccupancyGate gate = new OccupancyGate(jobs);
+    TableMaintenanceActionMetaService actions = TableMaintenanceActionMetaService.getInstance();
+    OccupancyGate gate = new OccupancyGate(actions);
     long policyId = 22L;
 
     Assertions.assertFalse(gate.isInFlight(table.id(), policyId));
+
+    long actionId = actions.insertInFlight(table.id(), policyId);
+    Assertions.assertTrue(gate.isInFlight(table.id(), policyId));
 
     JobEntity started =
         JobEntity.builder()
@@ -63,12 +66,12 @@ class TestOccupancyGate extends TestJDBCBackend {
             .withFinishedAt(0L)
             .build();
     backend.insert(started, false);
-    jobs.insertJob(started.id(), table.id(), policyId);
+    actions.bindJobId(actionId, started.id());
 
     Assertions.assertTrue(gate.isInFlight(table.id(), policyId));
     Assertions.assertTrue(
         gate.shouldSkip(table.id(), policyId, 3_600_000L, System.currentTimeMillis()));
-    Assertions.assertNull(jobs.getJob(started.id()).finishedAt());
+    Assertions.assertNull(actions.getByJobId(started.id()).finishedAt());
 
     long finishedAt = 1_700_000_000_000L;
     JobMetaService.getInstance()
@@ -88,7 +91,7 @@ class TestOccupancyGate extends TestJDBCBackend {
                         .build());
 
     Assertions.assertFalse(gate.isInFlight(table.id(), policyId));
-    Assertions.assertNull(jobs.getJob(started.id()).finishedAt());
+    Assertions.assertNull(actions.getByJobId(started.id()).finishedAt());
     Assertions.assertTrue(
         gate.withinMinInterval(table.id(), policyId, 3_600_000L, finishedAt + 1_000L));
     Assertions.assertFalse(
@@ -103,14 +106,15 @@ class TestOccupancyGate extends TestJDBCBackend {
     createAndInsertSchema(metalakeName, "cat", "sch");
     TableEntity table = createAndInsertTableEntity(Namespace.of(metalakeName, "cat", "sch"), "tbl");
 
-    TableMaintenanceJobMetaService jobs = TableMaintenanceJobMetaService.getInstance();
-    OccupancyGate gate = new OccupancyGate(jobs);
+    TableMaintenanceActionMetaService actions = TableMaintenanceActionMetaService.getInstance();
+    OccupancyGate gate = new OccupancyGate(actions);
     long policyId = 44L;
     long jobId = 7002L;
     long finishedAt = 1_700_000_100_000L;
 
-    jobs.insertJob(jobId, table.id(), policyId);
-    jobs.markFinished(jobId, 200L, finishedAt);
+    long actionId = actions.insertInFlight(table.id(), policyId);
+    actions.bindJobId(actionId, jobId);
+    actions.markFinished(jobId, 200L, finishedAt);
     Assertions.assertFalse(gate.isInFlight(table.id(), policyId));
     Assertions.assertTrue(
         gate.withinMinInterval(table.id(), policyId, 3_600_000L, finishedAt + 1_000L));
