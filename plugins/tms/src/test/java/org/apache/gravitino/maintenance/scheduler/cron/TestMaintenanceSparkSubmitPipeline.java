@@ -35,7 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.ChainStep;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.storage.service.OccupancyClaim;
 import org.apache.gravitino.maintenance.storage.service.TableMaintenanceActionMetaService;
@@ -86,12 +86,10 @@ class TestMaintenanceSparkSubmitPipeline {
     shared.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "expire_snapshots");
     shared.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
     MaintenanceJobSpec batch =
-        new MaintenanceJobSpec(
-            "metalake",
-            List.of(
+        new MaintenanceJobSpec(List.of(
                 new TableTarget(10L, List.of("metalake", "iceberg", "db", "t1")),
                 new TableTarget(11L, List.of("metalake", "iceberg", "db", "t2"))),
-            List.of(new ChainStep(POLICY_ID, "expire_snapshots")),
+            List.of(new Operation(POLICY_ID, "expire_snapshots")),
             shared);
 
     pipeline(gate, actions, submitter).submit(CronJobIds.forBatch(0L, POLICY_ID), batch);
@@ -185,12 +183,10 @@ class TestMaintenanceSparkSubmitPipeline {
     shared.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
 
     MaintenanceJobSpec batch =
-        new MaintenanceJobSpec(
-            "metalake",
-            List.of(
+        new MaintenanceJobSpec(List.of(
                 new TableTarget(10L, List.of("metalake", "iceberg", "db", "t1")),
                 new TableTarget(11L, List.of("metalake", "iceberg", "db", "t2"))),
-            List.of(new ChainStep(POLICY_ID, "expire_snapshots")),
+            List.of(new Operation(POLICY_ID, "expire_snapshots")),
             shared);
 
     pipeline(mockGate(false), actions, submitter).submit(CronJobIds.forBatch(0L, POLICY_ID), batch);
@@ -279,10 +275,8 @@ class TestMaintenanceSparkSubmitPipeline {
   }
 
   private static MaintenanceJobSpec spec(Map<String, String> jobConf) {
-    return new MaintenanceJobSpec(
-        "metalake",
-        List.of(new TableTarget(TABLE_ID, List.of("metalake", "iceberg", "db", "t"))),
-        List.of(new ChainStep(POLICY_ID, "rewrite_data_files")),
+    return new MaintenanceJobSpec(List.of(new TableTarget(TABLE_ID, List.of("metalake", "iceberg", "db", "t"))),
+        List.of(new Operation(POLICY_ID, "rewrite_data_files")),
         jobConf);
   }
 }
