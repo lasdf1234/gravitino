@@ -42,7 +42,7 @@ import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceTableRefs.Reso
  *
  * <p>Chain {@code jobConf} starts from the first policy, takes the max of resource-shaped keys from
  * later members, and {@code putIfAbsent}s remaining keys so later types keep their procedure params
- * (e.g. expire {@code older_than}) when auth bags already agree. {@code policy_rules_by_type} is
+ * (e.g. expire {@code older_than}) when auth bags already agree. {@code rules} is
  * unioned across members so each type keeps its enqueue-time rules for in-Spark recommend.
  */
 final class CommitJobSpecFactory {
@@ -52,7 +52,7 @@ final class CommitJobSpecFactory {
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
           "catalog_name",
           "table_identifier",
-          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY);
+          MaintenanceJobTemplates.RULES_KEY);
 
   private final MaintenanceJobConfBuilder jobConfBuilder;
 
@@ -122,28 +122,28 @@ final class CommitJobSpecFactory {
   }
 
   /**
-   * Union {@link MaintenanceJobTemplates#POLICY_RULES_BY_TYPE_KEY} maps so each chain type keeps
+   * Union {@link MaintenanceJobTemplates#RULES_KEY} maps so each chain type keeps
    * its own enqueue-time rules for in-Spark recommend.
    */
   static void mergePolicyRulesByType(Map<String, String> into, Map<String, String> from) {
-    String fromJson = from.get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY);
+    String fromJson = from.get(MaintenanceJobTemplates.RULES_KEY);
     if (fromJson == null || fromJson.trim().isEmpty()) {
       return;
     }
     Map<String, Map<String, Object>> merged =
         new LinkedHashMap<>(
-            parseRulesByType(into.get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY)));
+            parseRulesByType(into.get(MaintenanceJobTemplates.RULES_KEY)));
     Map<String, Map<String, Object>> later = parseRulesByType(fromJson);
     for (Map.Entry<String, Map<String, Object>> entry : later.entrySet()) {
       merged.putIfAbsent(entry.getKey(), entry.getValue());
     }
     try {
       into.put(
-          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
+          MaintenanceJobTemplates.RULES_KEY,
           JsonUtils.anyFieldMapper().writeValueAsString(merged));
     } catch (JsonProcessingException e) {
       throw new IllegalStateException(
-          "Failed to serialize " + MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY, e);
+          "Failed to serialize " + MaintenanceJobTemplates.RULES_KEY, e);
     }
   }
 
@@ -158,7 +158,7 @@ final class CommitJobSpecFactory {
       return parsed == null ? Map.of() : parsed;
     } catch (JsonProcessingException e) {
       throw new IllegalStateException(
-          "Failed to parse " + MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY, e);
+          "Failed to parse " + MaintenanceJobTemplates.RULES_KEY, e);
     }
   }
 }
