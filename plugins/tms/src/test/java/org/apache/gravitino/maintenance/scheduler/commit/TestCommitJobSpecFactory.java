@@ -53,14 +53,14 @@ class TestCommitJobSpecFactory {
             List.of(compaction, expire), new ResolvedTableRef(101L, "iceberg", "db.t"));
 
     Assertions.assertTrue(spec.isValid());
-    Assertions.assertEquals(2, spec.getSteps().size());
+    Assertions.assertEquals(2, spec.getOperations().size());
     Assertions.assertEquals(
         "rewrite_data_files,expire_snapshots",
         spec.getJobConf().get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_policy_id"));
     Assertions.assertEquals(101L, spec.getTables().get(0).getTableId());
-    Assertions.assertEquals(202L, spec.getSteps().get(0).getPolicyId());
+    Assertions.assertEquals(202L, spec.getOperations().get(0).getPolicyId());
     // Later chain members contribute procedure params the first policy does not set.
     Assertions.assertEquals("7d", spec.getJobConf().get("older_than"));
     Assertions.assertEquals("10", spec.getJobConf().get("retain_last"));

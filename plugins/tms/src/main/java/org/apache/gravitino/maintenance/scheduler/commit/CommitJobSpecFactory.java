@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.ChainStep;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
@@ -80,11 +80,11 @@ final class CommitJobSpecFactory {
     String metalake = first.policy().namespace().level(0);
     Map<String, String> jobConf = buildChainJobConf(chain, ref);
     List<TableTarget> targets = List.of(MaintenanceJobSpecFactory.toTarget(metalake, ref));
-    List<ChainStep> steps =
+    List<Operation> operations =
         chain.stream()
-            .map(m -> new ChainStep(m.policy().id(), m.maintenanceType()))
+            .map(m -> new Operation(m.policy().id(), m.maintenanceType()))
             .collect(Collectors.toList());
-    return new MaintenanceJobSpec(metalake, targets, steps, jobConf);
+    return new MaintenanceJobSpec(targets, operations, jobConf);
   }
 
   private Map<String, String> buildChainJobConf(
