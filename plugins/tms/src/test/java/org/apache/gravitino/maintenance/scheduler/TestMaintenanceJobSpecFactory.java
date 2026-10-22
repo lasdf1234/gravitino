@@ -58,8 +58,7 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertEquals(List.of(10L, 11L), spec.tableIds());
     Assertions.assertEquals(1, spec.getOperations().size());
     Assertions.assertEquals(202L, spec.getOperations().get(0).getPolicyId());
-    Assertions.assertEquals(
-        "rewrite_data_files", spec.getOperations().get(0).getMaintenanceType());
+    Assertions.assertEquals("rewrite_data_files", spec.getOperations().get(0).getMaintenanceType());
     Assertions.assertNull(spec.getJobConf().get("catalog_name"));
     Assertions.assertNull(spec.getJobConf().get("table_identifier"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
@@ -72,6 +71,7 @@ class TestMaintenanceJobSpecFactory {
         MaintenanceJobSpecFactory.jobConfForTable(spec.getJobConf(), first);
     Assertions.assertEquals("iceberg", perTable.get("catalog_name"));
     Assertions.assertEquals("db.t1", perTable.get("table_identifier"));
+    Assertions.assertEquals("10", perTable.get("table_id"));
     Assertions.assertFalse(perTable.containsKey("tms_table_id"));
   }
 
