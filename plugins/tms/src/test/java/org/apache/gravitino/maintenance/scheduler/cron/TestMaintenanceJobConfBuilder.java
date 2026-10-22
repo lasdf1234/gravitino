@@ -85,7 +85,7 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertTrue(conf.get("options").contains("min-input-files"));
     Assertions.assertNull(conf.get("where_clause"));
     Assertions.assertEquals("rest", conf.get("catalog_type"));
-    Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_type"));
+    Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
     Assertions.assertTrue(
         conf.get("spark_conf").contains("\"spark.sql.catalog.iceberg.rest.auth.type\":\"basic\""));
     Assertions.assertNull(conf.get("rest.auth.type"));
@@ -112,7 +112,7 @@ class TestMaintenanceJobConfBuilder {
         new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
             .build(policy, "iceberg");
 
-    Assertions.assertEquals("remove_orphan_files", conf.get("maintenance_type"));
+    Assertions.assertEquals("remove_orphan_files", conf.get("maintenance_types"));
     Assertions.assertEquals("false", conf.get("dry_run"));
     Assertions.assertEquals("2024-06-08 12:00:00Z", conf.get("older_than"));
   }
