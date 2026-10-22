@@ -87,6 +87,11 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertEquals("rest", conf.get("catalog_type"));
     Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
     Assertions.assertTrue(
+        conf.get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY)
+            .contains("\"rewrite_data_files\""));
+    Assertions.assertTrue(
+        conf.get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY).contains("trigger-expr"));
+    Assertions.assertTrue(
         conf.get("spark_conf").contains("\"spark.sql.catalog.iceberg.rest.auth.type\":\"basic\""));
     Assertions.assertNull(conf.get("rest.auth.type"));
     Assertions.assertTrue(conf.get("updater_options").contains("\"metalake\":\"ml\""));

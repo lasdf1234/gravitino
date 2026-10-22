@@ -90,6 +90,7 @@ public final class MaintenanceJobConfBuilder {
           MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
           MaintenanceJobTemplates.TMS_TABLE_ID_KEY,
           MaintenanceJobTemplates.TMS_POLICY_ID_KEY,
+          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
           "gravitino_job_id");
 
   private final Config gravitinoConfig;
@@ -150,8 +151,16 @@ public final class MaintenanceJobConfBuilder {
     putTypedProcedureParams(jobConf, content);
 
     jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(policy.id()));
-    MaintenanceJobTemplates.maintenanceType(policy.policyType())
-        .ifPresent(type -> jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type));
+    Optional<String> maintenanceType = MaintenanceJobTemplates.maintenanceType(policy.policyType());
+    maintenanceType.ifPresent(
+        type -> jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type));
+    if (content != null && maintenanceType.isPresent()) {
+      Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
+      rulesByType.put(maintenanceType.get(), new LinkedHashMap<>(content.rules()));
+      jobConf.put(
+          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
+          writeJson(rulesByType, MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY));
+    }
 
     jobConf.put(
         MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
