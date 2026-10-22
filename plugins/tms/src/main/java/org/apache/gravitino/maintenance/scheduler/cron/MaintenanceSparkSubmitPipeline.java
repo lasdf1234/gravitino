@@ -23,7 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 import javax.annotation.Nullable;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.ChainStep;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory;
 import org.apache.gravitino.maintenance.storage.service.OccupancyClaim;
@@ -89,7 +89,7 @@ public final class MaintenanceSparkSubmitPipeline {
       return;
     }
 
-    ChainStep step = spec.getSteps().get(0);
+    Operation step = spec.getOperations().get(0);
     long policyId = step.getPolicyId();
     long expectedPolicyId =
         tableIds.isPresent() ? tableIds.get().policyId() : batchIds.get().policyId();
@@ -153,7 +153,7 @@ public final class MaintenanceSparkSubmitPipeline {
           e.toString());
       return;
     }
-    runAndBind(spec.getMetalake(), jobConf, claim.get(), target.getTableId(), policyId);
+    runAndBind(spec.metalake(), jobConf, claim.get(), target.getTableId(), policyId);
   }
 
   private void runAndBind(
