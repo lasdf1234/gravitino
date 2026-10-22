@@ -19,6 +19,7 @@
 package org.apache.gravitino.maintenance.scheduler.commit;
 
 import com.google.common.base.Preconditions;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -37,8 +38,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Commit-pool control-plane submit (§5.2.3): consume enqueue-time {@link MaintenanceJobSpec} →
- * abort if any step is in-flight → soft-slot claim on the first step → one chained {@code runJob} →
- * bind.
+ * abort if any step is in-flight → soft-slot claim for every chain policy → one chained {@code
+ * runJob} → bind the same job id on every claim.
  *
  * <p>Chain collection, cooldown filtering, auth consistency, and jobConf merge happen at enqueue
  * (see {@link RelationalCommitJobScheduler}). The caller always deletes the one-shot {@code
@@ -119,21 +120,22 @@ public final class MaintenanceCommitSubmitPipeline {
       }
     }
 
-    Operation first = spec.getOperations().get(0);
-    Optional<OccupancyClaim> claim =
-        actionMetaService.tryAcquireInFlight(tableId, first.getPolicyId(), claimTimeoutMs);
-    if (claim.isEmpty()) {
+    List<Long> policyIds =
+        spec.getOperations().stream().map(Operation::getPolicyId).collect(Collectors.toList());
+    Optional<List<OccupancyClaim>> claims =
+        actionMetaService.tryAcquireInFlightBatch(tableId, policyIds, claimTimeoutMs);
+    if (claims.isEmpty()) {
       LOG.info(
-          "Skipping commit-job submit for table {} (lost soft-slot race on first policy {})",
+          "Skipping commit-job submit for table {} (lost soft-slot race on chain policies {})",
           tableId,
-          first.getPolicyId());
+          policyIds);
       return;
     }
 
-    runAndBind(spec, claim.get(), tableId);
+    runAndBind(spec, claims.get(), tableId);
   }
 
-  private void runAndBind(MaintenanceJobSpec spec, OccupancyClaim claim, long tableId) {
+  private void runAndBind(MaintenanceJobSpec spec, List<OccupancyClaim> claims, long tableId) {
     String metalake = spec.metalake();
     Map<String, String> jobConf;
     try {
@@ -142,7 +144,7 @@ public final class MaintenanceCommitSubmitPipeline {
               MaintenanceJobSpecFactory.jobConfForTable(
                   spec.getJobConf(), spec.getTables().get(0)));
     } catch (RuntimeException e) {
-      releaseClaimQuietly(claim);
+      actionMetaService.deleteClaims(claims);
       LOG.warn(
           "Skipping commit-job submit for table {}: invalid spec table target: {}",
           tableId,
@@ -154,24 +156,24 @@ public final class MaintenanceCommitSubmitPipeline {
       jobId =
           jobSubmitter.runJob(
               metalake, MaintenanceJobTemplates.TMS_ICEBERG_MAINTENANCE_TEMPLATE, jobConf);
-      actionMetaService.bindJobId(claim, jobId);
+      actionMetaService.bindJobIds(claims, jobId);
       LOG.info(
-          "Submitted commit-job for table {} as job {} (chain={}, firstPolicy={})",
+          "Submitted commit-job for table {} as job {} (chain={}, policies={})",
           tableId,
           jobId,
           spec.getOperations().stream()
               .map(Operation::getMaintenanceType)
               .collect(Collectors.toList()),
-          spec.getOperations().get(0).getPolicyId());
+          spec.getOperations().stream().map(Operation::getPolicyId).collect(Collectors.toList()));
     } catch (RuntimeException e) {
       if (jobId != null) {
         cancelJobQuietly(metalake, jobId);
       }
-      releaseClaimQuietly(claim);
+      actionMetaService.deleteClaims(claims);
       LOG.warn(
-          "Failed commit-job submit for table {} firstPolicy={}: {}",
+          "Failed commit-job submit for table {} policies={}: {}",
           tableId,
-          spec.getOperations().get(0).getPolicyId(),
+          spec.getOperations().stream().map(Operation::getPolicyId).collect(Collectors.toList()),
           e.toString());
     }
   }
@@ -185,17 +187,6 @@ public final class MaintenanceCommitSubmitPipeline {
           jobId,
           metalake,
           cancelError);
-    }
-  }
-
-  private void releaseClaimQuietly(OccupancyClaim claim) {
-    try {
-      actionMetaService.deleteById(claim.id());
-    } catch (RuntimeException releaseError) {
-      LOG.warn(
-          "Failed to release occupancy claim {} after commit submit failure",
-          claim.id(),
-          releaseError);
     }
   }
 }
