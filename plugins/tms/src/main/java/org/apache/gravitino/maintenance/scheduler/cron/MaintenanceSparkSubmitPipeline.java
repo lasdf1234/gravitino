@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
  * caller).
  *
  * <p>Does not sample metrics or evaluate trigger-expr (both run inside Spark from enqueue-time
- * {@code policy_rules_by_type} in jobConf). Policy / jobConf are not recomputed here.
+ * {@code rules} in jobConf). Policy / jobConf are not recomputed here.
  */
 public final class MaintenanceSparkSubmitPipeline {
 
