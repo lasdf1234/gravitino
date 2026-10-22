@@ -57,8 +57,8 @@ public final class MaintenanceJobSpecFactory {
 
   /**
    * Cron spec for one or more tables under a single policy. Shared {@code jobConf} omits per-table
-   * keys; pick overlays {@code catalog_name} / {@code table_identifier} / {@code tms_table_id} for
-   * each {@link TableTarget}.
+   * keys; pick overlays {@code catalog_name} / {@code table_identifier} for each {@link
+   * TableTarget}.
    *
    * <p>All tables must share the same Spark catalog name so catalog-scoped {@code spark_conf} keys
    * stay correct for every member of a batch.
@@ -88,7 +88,6 @@ public final class MaintenanceJobSpecFactory {
     // Per-table keys are applied at pick so one batch spec can cover many tables.
     jobConf.remove("catalog_name");
     jobConf.remove("table_identifier");
-    jobConf.remove(MaintenanceJobTemplates.TMS_TABLE_ID_KEY);
 
     List<TableTarget> targets = new ArrayList<>(tables.size());
     for (ResolvedTableRef ref : tables) {
@@ -99,7 +98,7 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * Copies {@code shared} and overlays catalog / table id keys for one target.
+   * Copies {@code shared} and overlays catalog / table identifier keys for one target.
    *
    * @param shared jobConf
    * @param target table to submit
@@ -118,7 +117,6 @@ public final class MaintenanceJobSpecFactory {
     Map<String, String> jobConf = new LinkedHashMap<>(shared);
     jobConf.put("catalog_name", catalogName);
     jobConf.put("table_identifier", tableIdentifier);
-    jobConf.put(MaintenanceJobTemplates.TMS_TABLE_ID_KEY, Long.toString(target.getTableId()));
     return jobConf;
   }
 
