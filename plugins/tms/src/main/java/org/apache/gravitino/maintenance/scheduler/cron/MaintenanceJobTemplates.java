@@ -50,6 +50,12 @@ public final class MaintenanceJobTemplates {
   /** JobConf key carrying the TMS policy entity id for in-job follow-ups. */
   public static final String TMS_POLICY_ID_KEY = "tms_policy_id";
 
+  /**
+   * JobConf key for enqueue-time policy {@code rules()} keyed by wire maintenance type. Consumed
+   * in-Spark for trigger-expr recommend (no Gravitino round-trip).
+   */
+  public static final String POLICY_RULES_BY_TYPE_KEY = "policy_rules_by_type";
+
   private MaintenanceJobTemplates() {}
 
   /**
