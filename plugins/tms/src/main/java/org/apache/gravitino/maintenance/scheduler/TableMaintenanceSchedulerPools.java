@@ -19,6 +19,7 @@
 package org.apache.gravitino.maintenance.scheduler;
 
 import com.github.kagkarlsson.scheduler.Scheduler;
+import com.github.kagkarlsson.scheduler.serializer.JacksonSerializer;
 import com.github.kagkarlsson.scheduler.task.Task;
 import com.github.kagkarlsson.scheduler.task.helper.Tasks;
 import com.google.common.base.Preconditions;
@@ -26,6 +27,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
+import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.TableMaintenanceConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,8 +39,8 @@ import org.slf4j.LoggerFactory;
  * <p>db-scheduler requires a dedicated {@code tableName} per Scheduler instance for multi-pool
  * isolation; sharing one physical table across pools is unsupported (see design §5.2).
  *
- * <p>Task handlers are intentionally minimal in this change; submit and occupancy logic land in
- * follow-up PRs.
+ * <p>Cron enqueue uses {@link #cronJobTask()} with Jackson {@code task_data}; pick submit lands in
+ * a follow-up.
  */
 public class TableMaintenanceSchedulerPools implements AutoCloseable {
 
@@ -86,7 +88,7 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
                 EXPAND_TASKS_TABLE,
                 noopTask(POLICY_EXPAND)),
             buildScheduler(
-                dataSource, config, config.cronThreads(), CRON_TASKS_TABLE, noopTask(CRON_JOB)),
+                dataSource, config, config.cronThreads(), CRON_TASKS_TABLE, cronJobTask()),
             buildScheduler(
                 dataSource,
                 config,
@@ -129,15 +131,29 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
       TableMaintenanceConfig config,
       int threads,
       String tableName,
-      Task<Void> task) {
+      Task<?> task) {
     return Scheduler.create(dataSource, task)
         .threads(threads)
         .pollingInterval(Duration.ofMillis(config.pollingIntervalMs()))
         .heartbeatInterval(Duration.ofMillis(config.heartbeatIntervalMs()))
         .missedHeartbeatsLimit(config.missedHeartbeatsLimit())
+        .serializer(new JacksonSerializer(JsonUtils.anyFieldMapper()))
         .tableName(tableName)
+        .commitWhenAutocommitDisabled(true)
         .registerShutdownHook()
         .build();
+  }
+
+  /**
+   * Cron-pool task stub: removes the one-shot row after dequeue. Real submit lands in a follow-up.
+   *
+   * @return the {@code cron-job} task
+   */
+  public static Task<MaintenanceJobSpec> cronJobTask() {
+    return Tasks.custom(CRON_JOB, MaintenanceJobSpec.class)
+        .execute(
+            (taskInstance, executionContext) ->
+                (executionComplete, executionOperations) -> executionOperations.remove());
   }
 
   private static Task<Void> noopTask(String taskName) {
