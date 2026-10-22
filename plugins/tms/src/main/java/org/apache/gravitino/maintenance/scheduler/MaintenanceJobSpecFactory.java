@@ -30,18 +30,18 @@ import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.gravitino.Config;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSnapshot.ChainStep;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSnapshot.TableTarget;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.ChainStep;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceTableRefs.ResolvedTableRef;
 import org.apache.gravitino.meta.PolicyEntity;
 
 /**
- * Builds enqueue-time {@link MaintenanceJobSnapshot} values for the cron path and shared jobConf
+ * Builds enqueue-time {@link MaintenanceJobSpec} values for the cron path and shared jobConf
  * helpers used by cron pick / commit merge.
  */
-public final class MaintenanceJobSnapshotFactory {
+public final class MaintenanceJobSpecFactory {
 
   private static final Pattern RESOURCE_NUMBER = Pattern.compile("^(\\d+)");
 
@@ -50,13 +50,13 @@ public final class MaintenanceJobSnapshotFactory {
   /**
    * @param gravitinoConfig server config for auth overlay and gravitino URI
    */
-  public MaintenanceJobSnapshotFactory(Config gravitinoConfig) {
+  public MaintenanceJobSpecFactory(Config gravitinoConfig) {
     this.jobConfBuilder =
         new MaintenanceJobConfBuilder(Preconditions.checkNotNull(gravitinoConfig));
   }
 
   /**
-   * Cron snapshot for one or more tables under a single policy. Shared {@code jobConf} omits
+   * Cron spec for one or more tables under a single policy. Shared {@code jobConf} omits
    * per-table keys; pick overlays {@code catalog_name} / {@code table_identifier} / {@code
    * tms_table_id} for each {@link TableTarget}.
    *
@@ -65,9 +65,9 @@ public final class MaintenanceJobSnapshotFactory {
    *
    * @param policy effective maintenance policy
    * @param tables resolved table refs (same order as enqueue)
-   * @return snapshot ready for {@code task_data}
+   * @return spec ready for {@code task_data}
    */
-  public MaintenanceJobSnapshot forCron(PolicyEntity policy, List<ResolvedTableRef> tables) {
+  public MaintenanceJobSpec forCron(PolicyEntity policy, List<ResolvedTableRef> tables) {
     Preconditions.checkNotNull(policy, "policy");
     Preconditions.checkArgument(tables != null && !tables.isEmpty(), "tables must not be empty");
     Optional<String> wire = MaintenanceJobTemplates.maintenanceType(policy.policyType());
@@ -85,7 +85,7 @@ public final class MaintenanceJobSnapshotFactory {
 
     String metalake = policy.namespace().level(0);
     Map<String, String> jobConf = jobConfBuilder.build(policy, catalogName);
-    // Per-table keys are applied at pick so one batch snapshot can cover many tables.
+    // Per-table keys are applied at pick so one batch spec can cover many tables.
     jobConf.remove("catalog_name");
     jobConf.remove("table_identifier");
     jobConf.remove(MaintenanceJobTemplates.TMS_TABLE_ID_KEY);
@@ -95,13 +95,13 @@ public final class MaintenanceJobSnapshotFactory {
       targets.add(toTarget(metalake, ref));
     }
     List<ChainStep> steps = List.of(new ChainStep(policy.id(), wire.get()));
-    return new MaintenanceJobSnapshot(metalake, targets, steps, jobConf);
+    return new MaintenanceJobSpec(metalake, targets, steps, jobConf);
   }
 
   /**
    * Copies {@code shared} and overlays catalog / table id keys for one target.
    *
-   * @param shared snapshot jobConf
+   * @param shared jobConf
    * @param target table to submit
    * @return mutable per-table jobConf
    */
@@ -154,7 +154,7 @@ public final class MaintenanceJobSnapshotFactory {
   /**
    * @param metalake metalake name
    * @param ref resolved Spark table ref
-   * @return snapshot table target with NameIdentifier levels
+   * @return table target with NameIdentifier levels
    */
   public static TableTarget toTarget(String metalake, ResolvedTableRef ref) {
     List<String> levels = new ArrayList<>();

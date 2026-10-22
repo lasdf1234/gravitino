@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
 /**
- * Enqueue-time snapshot stored as JSON in db-scheduler {@code task_data} for {@code cron-job} and
+ * Enqueue-time spec stored as JSON in db-scheduler {@code task_data} for {@code cron-job} and
  * {@code commit-job} rows.
  *
  * <p>Thin envelope only: {@link #jobConf} is the same {@code Map<String,String>} passed to {@code
@@ -39,9 +39,9 @@ import javax.annotation.Nullable;
  * NameIdentifier levels; steps carry {@code policyId} plus the wire maintenance type.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public final class MaintenanceJobSnapshot {
+public final class MaintenanceJobSpec {
 
-  /** Current snapshot schema version. */
+  /** Current spec schema version. */
   public static final int CURRENT_VERSION = 1;
 
   private int version = CURRENT_VERSION;
@@ -51,15 +51,15 @@ public final class MaintenanceJobSnapshot {
   private Map<String, String> jobConf = new LinkedHashMap<>();
 
   /** Jackson / empty constructor. */
-  public MaintenanceJobSnapshot() {}
+  public MaintenanceJobSpec() {}
 
   /**
    * @param metalake metalake name
    * @param tables table targets (order preserved)
    * @param steps chain / cron steps (order preserved)
-   * @param jobConf runJob configuration snapshot
+   * @param jobConf runJob configuration map
    */
-  public MaintenanceJobSnapshot(
+  public MaintenanceJobSpec(
       String metalake,
       List<TableTarget> tables,
       List<ChainStep> steps,
@@ -142,7 +142,7 @@ public final class MaintenanceJobSnapshot {
   }
 
   /**
-   * @return unmodifiable table entity ids in snapshot order
+   * @return unmodifiable table entity ids in spec order
    */
   @JsonIgnore
   public List<Long> tableIds() {
@@ -177,10 +177,10 @@ public final class MaintenanceJobSnapshot {
     if (this == o) {
       return true;
     }
-    if (!(o instanceof MaintenanceJobSnapshot)) {
+    if (!(o instanceof MaintenanceJobSpec)) {
       return false;
     }
-    MaintenanceJobSnapshot that = (MaintenanceJobSnapshot) o;
+    MaintenanceJobSpec that = (MaintenanceJobSpec) o;
     return version == that.version
         && Objects.equals(metalake, that.metalake)
         && Objects.equals(tables, that.tables)
@@ -195,7 +195,7 @@ public final class MaintenanceJobSnapshot {
 
   @Override
   public String toString() {
-    return "MaintenanceJobSnapshot{version="
+    return "MaintenanceJobSpec{version="
         + version
         + ", metalake='"
         + metalake
@@ -208,7 +208,7 @@ public final class MaintenanceJobSnapshot {
         + '}';
   }
 
-  /** One table covered by this snapshot. */
+  /** One table covered by this spec. */
   @JsonIgnoreProperties(ignoreUnknown = true)
   public static final class TableTarget {
 
