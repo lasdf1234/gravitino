@@ -271,7 +271,9 @@ class TestCronJobScheduler extends TestJDBCBackend {
   private static Config configWithUri() {
     Config config = new Config(false) {};
     config.loadFromMap(
-        Map.of(MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey(), GRAVITINO_URI),
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            GRAVITINO_URI),
         t -> true);
     return config;
   }
