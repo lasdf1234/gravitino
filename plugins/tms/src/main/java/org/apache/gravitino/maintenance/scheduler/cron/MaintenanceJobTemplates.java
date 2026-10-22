@@ -45,10 +45,10 @@ public final class MaintenanceJobTemplates {
   public static final String UPDATER_OPTIONS_JOB_CONF_KEY = "updater_options";
 
   /**
-   * JobConf key for enqueue-time policy {@code rules()} keyed by wire maintenance type. Consumed
-   * in-Spark for trigger-expr recommend (no Gravitino round-trip).
+   * JobConf key for enqueue-time policy {@code rules()}, JSON map of wire maintenance type → rules
+   * object. Consumed in-Spark for trigger-expr recommend (no Gravitino round-trip).
    */
-  public static final String POLICY_RULES_BY_TYPE_KEY = "policy_rules_by_type";
+  public static final String RULES_KEY = "rules";
 
   private MaintenanceJobTemplates() {}
 
