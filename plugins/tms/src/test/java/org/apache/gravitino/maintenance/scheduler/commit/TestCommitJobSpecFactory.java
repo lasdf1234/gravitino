@@ -65,7 +65,7 @@ class TestCommitJobSpecFactory {
     Assertions.assertEquals("7d", spec.getJobConf().get("older_than"));
     Assertions.assertEquals("10", spec.getJobConf().get("retain_last"));
     Assertions.assertEquals("4g", spec.getJobConf().get("spark_executor_memory"));
-    String rulesByType = spec.getJobConf().get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY);
+    String rulesByType = spec.getJobConf().get(MaintenanceJobTemplates.RULES_KEY);
     Assertions.assertNotNull(rulesByType);
     Assertions.assertTrue(rulesByType.contains("\"rewrite_data_files\""));
     Assertions.assertTrue(rulesByType.contains("\"expire_snapshots\""));
