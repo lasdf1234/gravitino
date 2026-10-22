@@ -90,7 +90,7 @@ class TestRelationalCommitJobScheduler extends TestJDBCBackend {
                 .getData();
     Assertions.assertTrue(spec.isValid());
     Assertions.assertEquals(List.of(TABLE_ID), spec.tableIds());
-    Assertions.assertEquals(POLICY_ID, spec.getSteps().get(0).getPolicyId());
+    Assertions.assertEquals(POLICY_ID, spec.getOperations().get(0).getPolicyId());
     Assertions.assertTrue(spec.getJobConf().containsKey("updater_options"));
     Assertions.assertEquals("iceberg", spec.getJobConf().get("catalog_name"));
   }
