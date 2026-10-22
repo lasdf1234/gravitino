@@ -30,12 +30,12 @@ import static org.mockito.Mockito.when;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.maintenance.policy.MaintenanceMinIntervalConfigs;
 import org.apache.gravitino.maintenance.scheduler.ExpandOccupancyGate;
-import org.apache.gravitino.maintenance.scheduler.PolicyLookup;
 import org.apache.gravitino.maintenance.scheduler.cron.CronJobScheduler;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
@@ -54,7 +54,7 @@ class TestPolicyExpandPipeline {
   void testMissingPolicyRemovesExpandRow() {
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     PolicyExpandPipeline pipeline =
-        pipeline(mockLookupEmpty(1L), mock(PolicyTableEnumerator.class), cronJobs, allowAll());
+        pipeline(id -> Optional.empty(), mock(PolicyTableEnumerator.class), cronJobs, allowAll());
 
     Assertions.assertTrue(pipeline.expand(1L).isEmpty());
     verify(cronJobs, never()).enqueueDueNow(any(), any(), anyInt());
@@ -65,7 +65,7 @@ class TestPolicyExpandPipeline {
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     PolicyExpandPipeline pipeline =
         pipeline(
-            mockLookup(2L, policy(false, CRON, null)),
+            lookup(2L, policy(false, CRON, null)),
             mock(PolicyTableEnumerator.class),
             cronJobs,
             allowAll());
@@ -79,7 +79,7 @@ class TestPolicyExpandPipeline {
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     PolicyExpandPipeline pipeline =
         pipeline(
-            mockLookup(3L, policy(true, "  ", null)),
+            lookup(3L, policy(true, "  ", null)),
             mock(PolicyTableEnumerator.class),
             cronJobs,
             allowAll());
@@ -93,7 +93,7 @@ class TestPolicyExpandPipeline {
     PolicyTableEnumerator tables = mock(PolicyTableEnumerator.class);
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     PolicyExpandPipeline pipeline =
-        pipeline(mockLookup(4L, policy(true, "not-a-cron", null)), tables, cronJobs, allowAll());
+        pipeline(lookup(4L, policy(true, "not-a-cron", null)), tables, cronJobs, allowAll());
 
     Assertions.assertTrue(pipeline.expand(4L).isEmpty());
     verify(tables, never()).listTableIds(any(), anyInt(), any(), anyLong());
@@ -113,8 +113,7 @@ class TestPolicyExpandPipeline {
         .thenReturn(List.of(c(10L), c(11L)));
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     when(cronJobs.enqueueDueNow(eq(policy), eq(List.of(c(10L), c(11L))), eq(2))).thenReturn(2);
-    PolicyExpandPipeline expandPipeline =
-        pipeline(mockLookup(42L, policy), tables, cronJobs, gate, 2);
+    PolicyExpandPipeline expandPipeline = pipeline(lookup(42L, policy), tables, cronJobs, gate, 2);
 
     Optional<Instant> next = expandPipeline.expand(42L);
     Assertions.assertTrue(next.isPresent());
@@ -132,8 +131,7 @@ class TestPolicyExpandPipeline {
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     when(cronJobs.enqueueDueNow(eq(policy), eq(List.of(c(11L))), eq(10))).thenReturn(1);
 
-    PolicyExpandPipeline expandPipeline =
-        pipeline(mockLookup(42L, policy), tables, cronJobs, gate, 10);
+    PolicyExpandPipeline expandPipeline = pipeline(lookup(42L, policy), tables, cronJobs, gate, 10);
     Assertions.assertTrue(expandPipeline.expand(42L).isPresent());
     verify(tables).listTableIds(eq(policy), eq(10), eq(gate), eq(60_000L));
     verify(cronJobs).enqueueDueNow(policy, List.of(c(11L)), 10);
@@ -153,8 +151,7 @@ class TestPolicyExpandPipeline {
     CronJobScheduler cronJobs = mock(CronJobScheduler.class);
     when(cronJobs.enqueueDueNow(eq(policy), eq(List.of(c(10L))), eq(10))).thenReturn(1);
 
-    PolicyExpandPipeline expandPipeline =
-        pipeline(mockLookup(42L, policy), tables, cronJobs, gate, 10);
+    PolicyExpandPipeline expandPipeline = pipeline(lookup(42L, policy), tables, cronJobs, gate, 10);
     Assertions.assertTrue(expandPipeline.expand(42L).isPresent());
     verify(tables)
         .listTableIds(
@@ -165,21 +162,21 @@ class TestPolicyExpandPipeline {
   }
 
   private static PolicyExpandPipeline pipeline(
-      PolicyLookup lookup,
+      Function<Long, Optional<PolicyEntity>> policyLoader,
       PolicyTableEnumerator tables,
       CronJobScheduler cronJobs,
       ExpandOccupancyGate gate) {
-    return pipeline(lookup, tables, cronJobs, gate, 100);
+    return pipeline(policyLoader, tables, cronJobs, gate, 100);
   }
 
   private static PolicyExpandPipeline pipeline(
-      PolicyLookup lookup,
+      Function<Long, Optional<PolicyEntity>> policyLoader,
       PolicyTableEnumerator tables,
       CronJobScheduler cronJobs,
       ExpandOccupancyGate gate,
       int batchSize) {
     return new PolicyExpandPipeline(
-        lookup, tables, cronJobs, gate, new Config(false) {}, batchSize);
+        policyLoader, tables, cronJobs, gate, new Config(false) {}, batchSize);
   }
 
   private static ExpandTableCandidate c(long tableId) {
@@ -190,16 +187,8 @@ class TestPolicyExpandPipeline {
     return (tableId, policyId, minIntervalMs, nowMs) -> false;
   }
 
-  private static PolicyLookup mockLookupEmpty(long policyId) {
-    PolicyLookup lookup = mock(PolicyLookup.class);
-    when(lookup.findById(policyId)).thenReturn(Optional.empty());
-    return lookup;
-  }
-
-  private static PolicyLookup mockLookup(long policyId, PolicyEntity policy) {
-    PolicyLookup lookup = mock(PolicyLookup.class);
-    when(lookup.findById(policyId)).thenReturn(Optional.of(policy));
-    return lookup;
+  private static Function<Long, Optional<PolicyEntity>> lookup(long policyId, PolicyEntity policy) {
+    return id -> id == policyId ? Optional.of(policy) : Optional.empty();
   }
 
   private static PolicyEntity policy(boolean enabled, String timeTrigger, Long minIntervalMs) {

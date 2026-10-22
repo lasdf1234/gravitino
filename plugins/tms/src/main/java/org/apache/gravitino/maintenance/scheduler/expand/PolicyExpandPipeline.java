@@ -18,20 +18,22 @@
  */
 package org.apache.gravitino.maintenance.scheduler.expand;
 
+import com.google.common.base.Preconditions;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.maintenance.policy.MaintenanceMinIntervalConfigs;
 import org.apache.gravitino.maintenance.policy.MaintenancePolicyDefinitions;
 import org.apache.gravitino.maintenance.scheduler.ExpandOccupancyGate;
-import org.apache.gravitino.maintenance.scheduler.PolicyLookup;
 import org.apache.gravitino.maintenance.scheduler.cron.CronJobScheduler;
 import org.apache.gravitino.meta.PolicyEntity;
 import org.apache.gravitino.policy.ExecutablePolicyContent;
 import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContent;
+import org.apache.gravitino.storage.relational.service.PolicyMetaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,8 +49,9 @@ import org.slf4j.LoggerFactory;
 public final class PolicyExpandPipeline {
 
   private static final Logger LOG = LoggerFactory.getLogger(PolicyExpandPipeline.class);
+  private static final PolicyMetaService POLICY_SERVICE = PolicyMetaService.getInstance();
 
-  private final PolicyLookup policyLookup;
+  private final Function<Long, Optional<PolicyEntity>> policyLoader;
   private final PolicyTableEnumerator tableEnumerator;
   private final CronJobScheduler cronJobScheduler;
   private final ExpandOccupancyGate occupancyGate;
@@ -56,7 +59,8 @@ public final class PolicyExpandPipeline {
   private final int enqueueBatchSize;
 
   /**
-   * @param policyLookup loads the policy for the expand instance id
+   * Loads policies through {@link PolicyMetaService}.
+   *
    * @param tableEnumerator lists attached table ids
    * @param cronJobScheduler writes cron-job rows
    * @param occupancyGate in-flight / minInterval gate
@@ -64,13 +68,36 @@ public final class PolicyExpandPipeline {
    * @param enqueueBatchSize max cron-jobs per expand pick
    */
   public PolicyExpandPipeline(
-      PolicyLookup policyLookup,
       PolicyTableEnumerator tableEnumerator,
       CronJobScheduler cronJobScheduler,
       ExpandOccupancyGate occupancyGate,
       Config config,
       int enqueueBatchSize) {
-    this.policyLookup = policyLookup;
+    this(
+        PolicyExpandPipeline::loadPolicy,
+        tableEnumerator,
+        cronJobScheduler,
+        occupancyGate,
+        config,
+        enqueueBatchSize);
+  }
+
+  /**
+   * @param policyLoader loads the policy for the expand instance id
+   * @param tableEnumerator lists attached table ids
+   * @param cronJobScheduler writes cron-job rows
+   * @param occupancyGate in-flight / minInterval gate
+   * @param config gravitino server config for per-type minInterval fallbacks
+   * @param enqueueBatchSize max cron-jobs per expand pick
+   */
+  PolicyExpandPipeline(
+      Function<Long, Optional<PolicyEntity>> policyLoader,
+      PolicyTableEnumerator tableEnumerator,
+      CronJobScheduler cronJobScheduler,
+      ExpandOccupancyGate occupancyGate,
+      Config config,
+      int enqueueBatchSize) {
+    this.policyLoader = Preconditions.checkNotNull(policyLoader);
     this.tableEnumerator = tableEnumerator;
     this.cronJobScheduler = cronJobScheduler;
     this.occupancyGate = occupancyGate;
@@ -85,7 +112,7 @@ public final class PolicyExpandPipeline {
    * @return next due time when the expand row should stay, or empty to delete the row
    */
   public Optional<Instant> expand(long policyId) {
-    Optional<PolicyEntity> loaded = policyLookup.findById(policyId);
+    Optional<PolicyEntity> loaded = policyLoader.apply(policyId);
     if (loaded.isEmpty()) {
       LOG.info("Removing expand row for missing policy {}", policyId);
       return Optional.empty();
@@ -133,6 +160,10 @@ public final class PolicyExpandPipeline {
         minIntervalMs,
         nextDue);
     return Optional.of(nextDue);
+  }
+
+  private static Optional<PolicyEntity> loadPolicy(long policyId) {
+    return Optional.ofNullable(POLICY_SERVICE.getPolicyById(policyId));
   }
 
   private static boolean isMaintenance(@Nullable PolicyContent content) {
