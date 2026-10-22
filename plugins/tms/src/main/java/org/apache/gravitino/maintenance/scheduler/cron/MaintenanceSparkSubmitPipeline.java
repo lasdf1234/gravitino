@@ -50,22 +50,26 @@ public final class MaintenanceSparkSubmitPipeline {
   private final CronSubmitGate occupancyGate;
   private final TableMaintenanceActionMetaService actionMetaService;
   private final MaintenanceJobSubmitter jobSubmitter;
+  private final MaintenanceJobConfBuilder jobConfBuilder;
   private final long claimTimeoutMs;
 
   /**
    * @param occupancyGate in-flight gate (minInterval already applied at enqueue)
    * @param actionMetaService soft-slot claim / bind
    * @param jobSubmitter Gravitino Job submitter
+   * @param jobConfBuilder resolves enqueue-time conf-key refs before {@code runJob}
    * @param claimTimeoutMs unbound claim TTL
    */
   public MaintenanceSparkSubmitPipeline(
       CronSubmitGate occupancyGate,
       TableMaintenanceActionMetaService actionMetaService,
       MaintenanceJobSubmitter jobSubmitter,
+      MaintenanceJobConfBuilder jobConfBuilder,
       long claimTimeoutMs) {
     this.occupancyGate = Preconditions.checkNotNull(occupancyGate);
     this.actionMetaService = Preconditions.checkNotNull(actionMetaService);
     this.jobSubmitter = Preconditions.checkNotNull(jobSubmitter);
+    this.jobConfBuilder = Preconditions.checkNotNull(jobConfBuilder);
     Preconditions.checkArgument(claimTimeoutMs > 0, "claimTimeoutMs must be positive");
     this.claimTimeoutMs = claimTimeoutMs;
   }
@@ -143,7 +147,9 @@ public final class MaintenanceSparkSubmitPipeline {
 
     Map<String, String> jobConf;
     try {
-      jobConf = MaintenanceJobSpecFactory.jobConfForTable(spec.getJobConf(), target);
+      jobConf =
+          jobConfBuilder.resolveForSubmit(
+              MaintenanceJobSpecFactory.jobConfForTable(spec.getJobConf(), target));
     } catch (RuntimeException e) {
       releaseClaimQuietly(claim.get());
       LOG.warn(

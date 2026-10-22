@@ -34,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.apache.gravitino.Config;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
@@ -86,7 +87,8 @@ class TestMaintenanceSparkSubmitPipeline {
     shared.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "expire_snapshots");
     shared.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
     MaintenanceJobSpec batch =
-        new MaintenanceJobSpec(List.of(
+        new MaintenanceJobSpec(
+            List.of(
                 new TableTarget(10L, List.of("metalake", "iceberg", "db", "t1")),
                 new TableTarget(11L, List.of("metalake", "iceberg", "db", "t2"))),
             List.of(new Operation(POLICY_ID, "expire_snapshots")),
@@ -183,7 +185,8 @@ class TestMaintenanceSparkSubmitPipeline {
     shared.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
 
     MaintenanceJobSpec batch =
-        new MaintenanceJobSpec(List.of(
+        new MaintenanceJobSpec(
+            List.of(
                 new TableTarget(10L, List.of("metalake", "iceberg", "db", "t1")),
                 new TableTarget(11L, List.of("metalake", "iceberg", "db", "t2"))),
             List.of(new Operation(POLICY_ID, "expire_snapshots")),
@@ -260,7 +263,12 @@ class TestMaintenanceSparkSubmitPipeline {
       CronSubmitGate gate,
       TableMaintenanceActionMetaService actions,
       MaintenanceJobSubmitter submitter) {
-    return new MaintenanceSparkSubmitPipeline(gate, actions, submitter, CLAIM_TIMEOUT_MS);
+    return new MaintenanceSparkSubmitPipeline(
+        gate,
+        actions,
+        submitter,
+        new MaintenanceJobConfBuilder(new Config(false) {}),
+        CLAIM_TIMEOUT_MS);
   }
 
   private static CronSubmitGate mockGate(boolean inFlight) {
@@ -275,7 +283,8 @@ class TestMaintenanceSparkSubmitPipeline {
   }
 
   private static MaintenanceJobSpec spec(Map<String, String> jobConf) {
-    return new MaintenanceJobSpec(List.of(new TableTarget(TABLE_ID, List.of("metalake", "iceberg", "db", "t"))),
+    return new MaintenanceJobSpec(
+        List.of(new TableTarget(TABLE_ID, List.of("metalake", "iceberg", "db", "t"))),
         List.of(new Operation(POLICY_ID, "rewrite_data_files")),
         jobConf);
   }
