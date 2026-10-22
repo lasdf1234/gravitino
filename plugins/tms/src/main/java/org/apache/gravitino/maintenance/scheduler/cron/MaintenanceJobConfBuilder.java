@@ -172,7 +172,10 @@ public final class MaintenanceJobConfBuilder {
 
     Optional<String> maintenanceType = MaintenanceJobTemplates.maintenanceType(policy.policyType());
     maintenanceType.ifPresent(
-        type -> jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type));
+        type -> {
+          jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type);
+          jobConf.put(MaintenanceJobTemplates.POLICY_IDS_KEY, Long.toString(policy.id()));
+        });
     if (content != null && maintenanceType.isPresent()) {
       Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
       rulesByType.put(maintenanceType.get(), new LinkedHashMap<>(content.rules()));

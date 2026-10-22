@@ -86,6 +86,7 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertNull(conf.get("where_clause"));
     Assertions.assertEquals("rest", conf.get("catalog_type"));
     Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
+    Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
     Assertions.assertTrue(
         conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"rewrite_data_files\""));
     Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
@@ -178,6 +179,7 @@ class TestMaintenanceJobConfBuilder {
             .build(policy, "iceberg");
 
     Assertions.assertEquals("remove_orphan_files", conf.get("maintenance_types"));
+    Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
     Assertions.assertEquals("false", conf.get("dry_run"));
     Assertions.assertEquals("2024-06-08 12:00:00Z", conf.get("older_than"));
   }

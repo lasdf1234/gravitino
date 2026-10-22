@@ -44,6 +44,12 @@ public final class MaintenanceJobTemplates {
    */
   public static final String MAINTENANCE_TYPES_KEY = "maintenance_types";
 
+  /**
+   * JobConf key for policy entity ids parallel to {@link #MAINTENANCE_TYPES_KEY} (comma-separated).
+   * Required so Spark callbacks can attribute soft slots by {@code policyId}.
+   */
+  public static final String POLICY_IDS_KEY = "policy_ids";
+
   /** JobConf key for overlaid updater options (JSON object string). */
   public static final String UPDATER_OPTIONS_JOB_CONF_KEY = "updater_options";
 
