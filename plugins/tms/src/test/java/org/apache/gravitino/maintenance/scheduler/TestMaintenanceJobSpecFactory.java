@@ -63,7 +63,11 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertNull(spec.getJobConf().get("table_identifier"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_policy_id"));
-    Assertions.assertTrue(spec.getJobConf().get("updater_options").contains(GRAVITINO_URI));
+    Assertions.assertTrue(
+        spec.getJobConf()
+            .get("updater_options")
+            .contains("gravitino.maintenance.gravitinoAuth.uri"));
+    Assertions.assertFalse(spec.getJobConf().get("updater_options").contains(GRAVITINO_URI));
 
     TableTarget first = spec.getTables().get(0);
     Assertions.assertEquals(List.of("ml", "iceberg", "db", "t1"), first.getIdentifier());
@@ -121,10 +125,28 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertEquals("http://a", into.get("catalog_uri"));
   }
 
+  @Test
+  void testMergeResourceKeysComparesMemoryUnits() {
+    Map<String, String> into =
+        MaintenanceJobSpecFactory.newLinkedMap("spark_executor_memory", "1g");
+    Map<String, String> from =
+        MaintenanceJobSpecFactory.newLinkedMap("spark_executor_memory", "512m");
+    MaintenanceJobSpecFactory.mergeResourceKeys(into, from);
+    Assertions.assertEquals("1g", into.get("spark_executor_memory"));
+
+    Map<String, String> mixed =
+        MaintenanceJobSpecFactory.newLinkedMap("spark_executor_memory", "512m");
+    MaintenanceJobSpecFactory.mergeResourceKeys(
+        mixed, MaintenanceJobSpecFactory.newLinkedMap("spark_executor_memory", "1500m"));
+    Assertions.assertEquals("1500m", mixed.get("spark_executor_memory"));
+  }
+
   private static Config configWithUri() {
     Config config = new Config(false) {};
     config.loadFromMap(
-        Map.of(MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey(), GRAVITINO_URI),
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            GRAVITINO_URI),
         t -> true);
     return config;
   }

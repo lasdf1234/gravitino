@@ -53,6 +53,10 @@ import org.apache.gravitino.policy.PolicyExecutionSpec;
  * those are expanded to {@code spark.sql.catalog.<catalog>.*} only when writing {@code spark_conf}.
  * Dot-form Spark resource keys ({@code spark.executor.memory}) become the matching underscore
  * placeholders ({@code spark_executor_memory}) instead of catalog properties.
+ *
+ * <p>{@link #build} is for enqueue {@code task_data}: cluster {@code gravitinoAuth} / {@code
+ * ircAuth} are stored as conf <em>keys</em> (not secret values). Call {@link #resolveForSubmit}
+ * immediately before {@code runJob} to expand those keys from the live {@code gravitino.conf}.
  */
 public final class MaintenanceJobConfBuilder {
 
@@ -121,6 +125,9 @@ public final class MaintenanceJobConfBuilder {
   }
 
   /**
+   * Enqueue-time jobConf for db-scheduler {@code task_data}. Cluster auth overlays store conf keys
+   * (for example {@code gravitino.maintenance.gravitinoAuth.uri}), not secret values.
+   *
    * @param policy effective maintenance policy
    * @param catalogName Spark catalog alias for IRC property scoping
    * @return mutable jobConf (per-table keys applied later by {@code jobConfForTable})
@@ -128,13 +135,16 @@ public final class MaintenanceJobConfBuilder {
   public Map<String, String> build(PolicyEntity policy, String catalogName) {
     PolicyContent content = policy.content();
     PolicyExecutionSpec spec = executionSpec(content);
-    // ircAuth suffixes stay short-named in jobOptions (e.g. rest.auth.type).
+    // ircAuth suffixes stay short-named; values are conf keys until resolveForSubmit.
     Map<String, String> jobOptions =
-        MaintenanceAuthConfigs.overlayJobOptions(gravitinoConfig, spec.jobOptions());
+        MaintenanceAuthConfigs.overlayJobOptions(
+            spec.jobOptions(), MaintenanceAuthConfigs.loadIrcAuthAsConfigKeys(gravitinoConfig));
     Map<String, String> updaterOptions =
         ensureUpdaterCallbackOptions(
             policy,
-            MaintenanceAuthConfigs.overlayUpdaterOptions(gravitinoConfig, spec.updaterOptions()));
+            MaintenanceAuthConfigs.overlayUpdaterOptions(
+                spec.updaterOptions(),
+                MaintenanceAuthConfigs.loadGravitinoAuthAsConfigKeys(gravitinoConfig)));
 
     Map<String, String> jobConf = new LinkedHashMap<>();
     Map<String, String> sparkConf = new LinkedHashMap<>();
@@ -178,6 +188,42 @@ public final class MaintenanceJobConfBuilder {
       jobConf.put("spark_conf", writeJson(new TreeMap<>(sparkConf), "spark_conf"));
     }
     return jobConf;
+  }
+
+  /**
+   * Expands {@code gravitino.maintenance.*} conf-key references in an enqueue snapshot into live
+   * values from {@code gravitino.conf}. Call immediately before {@code runJob}.
+   *
+   * @param enqueueJobConf jobConf from {@link #build} / {@code task_data}
+   * @return new map with secrets and URIs resolved
+   */
+  public Map<String, String> resolveForSubmit(Map<String, String> enqueueJobConf) {
+    Map<String, String> resolved = new LinkedHashMap<>();
+    for (Map.Entry<String, String> entry : enqueueJobConf.entrySet()) {
+      String key = entry.getKey();
+      String value = entry.getValue();
+      if (key == null || value == null) {
+        continue;
+      }
+      if (MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY.equals(key)
+          || "spark_conf".equals(key)) {
+        resolved.put(key, resolveJsonMapValues(value, key));
+      } else {
+        resolved.put(key, MaintenanceAuthConfigs.resolveConfigReference(gravitinoConfig, value));
+      }
+    }
+    return resolved;
+  }
+
+  private String resolveJsonMapValues(String json, String field) {
+    Map<String, String> parsed = IcebergSparkConfigUtils.parseFlatJsonMap(json, field);
+    Map<String, String> out = new TreeMap<>();
+    for (Map.Entry<String, String> entry : parsed.entrySet()) {
+      out.put(
+          entry.getKey(),
+          MaintenanceAuthConfigs.resolveConfigReference(gravitinoConfig, entry.getValue()));
+    }
+    return writeJson(out, field);
   }
 
   private static void routeJobOption(
@@ -236,7 +282,8 @@ public final class MaintenanceJobConfBuilder {
 
   /**
    * Ensures Spark → Gravitino sample/finish callbacks have {@code metalake} (from the policy
-   * namespace) and {@code gravitino_uri} (cluster config, overridable by policy updaterOptions).
+   * namespace) and {@code gravitino_uri} (from {@code gravitino.maintenance.gravitinoAuth.uri} via
+   * auth overlay, overridable by policy updaterOptions).
    */
   private Map<String, String> ensureUpdaterCallbackOptions(
       PolicyEntity policy, Map<String, String> overlaid) {
@@ -247,20 +294,11 @@ public final class MaintenanceJobConfBuilder {
     String metalake = policy.namespace().level(0);
     updaterOptions.put("metalake", metalake);
 
-    Optional<String> configuredUri =
-        gravitinoConfig.get(MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI);
-    if (configuredUri.isPresent()) {
-      String uri = configuredUri.get().trim();
-      if (!uri.isEmpty()) {
-        updaterOptions.putIfAbsent("gravitino_uri", uri);
-      }
-    }
-
     String gravitinoUri = updaterOptions.get("gravitino_uri");
     if (gravitinoUri == null || gravitinoUri.trim().isEmpty()) {
       throw new IllegalArgumentException(
           "updater_options.gravitino_uri is required for TMS Spark submit; set policy "
-              + "updaterOptions.gravitino_uri or gravitino.maintenance.gravitinoUri");
+              + "updaterOptions.gravitino_uri or gravitino.maintenance.gravitinoAuth.uri");
     }
     return updaterOptions;
   }
