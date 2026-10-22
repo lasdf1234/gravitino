@@ -84,7 +84,6 @@ class TestMaintenanceSparkSubmitPipeline {
 
     Map<String, String> shared = new LinkedHashMap<>();
     shared.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "expire_snapshots");
-    shared.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(POLICY_ID));
     shared.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
     MaintenanceJobSpec batch =
         new MaintenanceJobSpec(
@@ -183,7 +182,6 @@ class TestMaintenanceSparkSubmitPipeline {
 
     Map<String, String> shared = new LinkedHashMap<>();
     shared.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "expire_snapshots");
-    shared.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(POLICY_ID));
     shared.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
 
     MaintenanceJobSpec batch =
@@ -207,12 +205,12 @@ class TestMaintenanceSparkSubmitPipeline {
     List<Map<String, String>> confs = confCaptor.getAllValues();
     Assertions.assertEquals("iceberg", confs.get(0).get("catalog_name"));
     Assertions.assertEquals("db.t1", confs.get(0).get("table_identifier"));
-    Assertions.assertEquals("10", confs.get(0).get("tms_table_id"));
+    Assertions.assertFalse(confs.get(0).containsKey("tms_table_id"));
     Assertions.assertEquals("expire_snapshots", confs.get(0).get("maintenance_types"));
     Assertions.assertEquals("iceberg", confs.get(1).get("catalog_name"));
     Assertions.assertEquals("db.t2", confs.get(1).get("table_identifier"));
-    Assertions.assertEquals("11", confs.get(1).get("tms_table_id"));
-    Assertions.assertEquals(Long.toString(POLICY_ID), confs.get(0).get("tms_policy_id"));
+    Assertions.assertFalse(confs.get(1).containsKey("tms_table_id"));
+    Assertions.assertFalse(confs.get(0).containsKey("tms_policy_id"));
     verify(actions).bindJobId(claimA, 555L);
     verify(actions).bindJobId(claimB, 556L);
   }
@@ -227,7 +225,6 @@ class TestMaintenanceSparkSubmitPipeline {
 
     Map<String, String> jobConf = new LinkedHashMap<>();
     jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "rewrite_data_files");
-    jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(POLICY_ID));
     jobConf.put("strategy", "binpack");
     jobConf.put(
         "updater_options",
@@ -246,9 +243,9 @@ class TestMaintenanceSparkSubmitPipeline {
     Map<String, String> conf = confCaptor.getValue();
     Assertions.assertEquals("iceberg", conf.get("catalog_name"));
     Assertions.assertEquals("db.t", conf.get("table_identifier"));
-    Assertions.assertEquals(Long.toString(TABLE_ID), conf.get("tms_table_id"));
+    Assertions.assertFalse(conf.containsKey("tms_table_id"));
     Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
-    Assertions.assertEquals(Long.toString(POLICY_ID), conf.get("tms_policy_id"));
+    Assertions.assertFalse(conf.containsKey("tms_policy_id"));
     Assertions.assertEquals("binpack", conf.get("strategy"));
     Assertions.assertTrue(conf.get("updater_options").contains("gravitino_uri"));
     Assertions.assertTrue(conf.get("spark_conf").contains("basic"));
@@ -277,7 +274,6 @@ class TestMaintenanceSparkSubmitPipeline {
   private static MaintenanceJobSpec spec() {
     Map<String, String> jobConf = new LinkedHashMap<>();
     jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "rewrite_data_files");
-    jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(POLICY_ID));
     jobConf.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
     return spec(jobConf);
   }

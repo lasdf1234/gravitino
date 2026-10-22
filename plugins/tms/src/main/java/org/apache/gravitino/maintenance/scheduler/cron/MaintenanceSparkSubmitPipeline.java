@@ -153,7 +153,6 @@ public final class MaintenanceSparkSubmitPipeline {
           e.toString());
       return;
     }
-    jobConf.putIfAbsent(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(policyId));
     runAndBind(spec.getMetalake(), jobConf, claim.get(), target.getTableId(), policyId);
   }
 
