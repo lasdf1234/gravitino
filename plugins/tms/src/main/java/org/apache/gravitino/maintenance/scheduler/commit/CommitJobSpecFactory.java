@@ -1,0 +1,168 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.gravitino.maintenance.scheduler.commit;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.base.Preconditions;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.apache.gravitino.Config;
+import org.apache.gravitino.json.JsonUtils;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.ChainStep;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory;
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceTableRefs.ResolvedTableRef;
+
+/**
+ * Builds enqueue-time {@link MaintenanceJobSpec} values for the commit-job path (keeps commit →
+ * scheduler dependency one-way; no scheduler → commit package cycle).
+ *
+ * <p>Chain {@code jobConf} starts from the first policy, takes the max of resource-shaped keys from
+ * later members, and {@code putIfAbsent}s remaining keys so later types keep their procedure params
+ * (e.g. expire {@code older_than}) when auth bags already agree. {@code policy_rules_by_type} is
+ * unioned across members so each type keeps its enqueue-time rules for in-Spark recommend.
+ */
+final class CommitJobSpecFactory {
+
+  private static final Set<String> CHAIN_OWNED_KEYS =
+      Set.of(
+          MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
+          "catalog_name",
+          "table_identifier",
+          MaintenanceJobTemplates.TMS_TABLE_ID_KEY,
+          MaintenanceJobTemplates.TMS_POLICY_ID_KEY,
+          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY);
+
+  private final MaintenanceJobConfBuilder jobConfBuilder;
+
+  /**
+   * @param gravitinoConfig server config for auth overlay and gravitino URI
+   */
+  CommitJobSpecFactory(Config gravitinoConfig) {
+    this.jobConfBuilder =
+        new MaintenanceJobConfBuilder(Preconditions.checkNotNull(gravitinoConfig));
+  }
+
+  /**
+   * Commit-chain spec for one table. Caller must already have filtered cooldown and verified auth
+   * consistency.
+   *
+   * @param chain non-empty onCommit members in order
+   * @param ref resolved Spark table ref
+   * @return spec with merged {@code jobConf} including {@code maintenance_types}
+   */
+  MaintenanceJobSpec forCommit(List<CommitChainMember> chain, ResolvedTableRef ref) {
+    Preconditions.checkArgument(chain != null && !chain.isEmpty(), "chain must not be empty");
+    Preconditions.checkNotNull(ref, "ref");
+
+    CommitChainMember first = chain.get(0);
+    String metalake = first.policy().namespace().level(0);
+    Map<String, String> jobConf = buildChainJobConf(chain, ref);
+    List<TableTarget> targets = List.of(MaintenanceJobSpecFactory.toTarget(metalake, ref));
+    List<ChainStep> steps =
+        chain.stream()
+            .map(m -> new ChainStep(m.policy().id(), m.maintenanceType()))
+            .collect(Collectors.toList());
+    return new MaintenanceJobSpec(metalake, targets, steps, jobConf);
+  }
+
+  private Map<String, String> buildChainJobConf(
+      List<CommitChainMember> chain, ResolvedTableRef ref) {
+    CommitChainMember first = chain.get(0);
+    Map<String, String> jobConf = jobConfBuilder.build(first.policy(), ref.catalogName());
+    for (int i = 1; i < chain.size(); i++) {
+      Map<String, String> other = jobConfBuilder.build(chain.get(i).policy(), ref.catalogName());
+      mergeLaterMemberJobConf(jobConf, other);
+    }
+    List<String> types =
+        chain.stream().map(CommitChainMember::maintenanceType).collect(Collectors.toList());
+    jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, String.join(",", types));
+    jobConf.put("catalog_name", ref.catalogName());
+    jobConf.put("table_identifier", ref.tableIdentifier());
+    jobConf.put(MaintenanceJobTemplates.TMS_TABLE_ID_KEY, Long.toString(ref.tableId()));
+    jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(first.policy().id()));
+    return jobConf;
+  }
+
+  /**
+   * Max-merge resource keys; fill missing non-owned keys from a later chain member (procedure
+   * params). First-policy auth / {@code spark_conf} / {@code updater_options} win. Policy rules by
+   * type are unioned.
+   */
+  static void mergeLaterMemberJobConf(Map<String, String> into, Map<String, String> from) {
+    MaintenanceJobSpecFactory.mergeResourceKeys(into, from);
+    mergePolicyRulesByType(into, from);
+    for (Map.Entry<String, String> entry : from.entrySet()) {
+      String key = entry.getKey();
+      String value = entry.getValue();
+      if (key == null || value == null || CHAIN_OWNED_KEYS.contains(key)) {
+        continue;
+      }
+      into.putIfAbsent(key, value);
+    }
+  }
+
+  /**
+   * Union {@link MaintenanceJobTemplates#POLICY_RULES_BY_TYPE_KEY} maps so each chain type keeps
+   * its own enqueue-time rules for in-Spark recommend.
+   */
+  static void mergePolicyRulesByType(Map<String, String> into, Map<String, String> from) {
+    String fromJson = from.get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY);
+    if (fromJson == null || fromJson.trim().isEmpty()) {
+      return;
+    }
+    Map<String, Map<String, Object>> merged =
+        new LinkedHashMap<>(
+            parseRulesByType(into.get(MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY)));
+    Map<String, Map<String, Object>> later = parseRulesByType(fromJson);
+    for (Map.Entry<String, Map<String, Object>> entry : later.entrySet()) {
+      merged.putIfAbsent(entry.getKey(), entry.getValue());
+    }
+    try {
+      into.put(
+          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
+          JsonUtils.anyFieldMapper().writeValueAsString(merged));
+    } catch (JsonProcessingException e) {
+      throw new IllegalStateException(
+          "Failed to serialize " + MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY, e);
+    }
+  }
+
+  private static Map<String, Map<String, Object>> parseRulesByType(String json) {
+    if (json == null || json.trim().isEmpty()) {
+      return Map.of();
+    }
+    try {
+      Map<String, Map<String, Object>> parsed =
+          JsonUtils.anyFieldMapper()
+              .readValue(json, new TypeReference<Map<String, Map<String, Object>>>() {});
+      return parsed == null ? Map.of() : parsed;
+    } catch (JsonProcessingException e) {
+      throw new IllegalStateException(
+          "Failed to parse " + MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY, e);
+    }
+  }
+}
