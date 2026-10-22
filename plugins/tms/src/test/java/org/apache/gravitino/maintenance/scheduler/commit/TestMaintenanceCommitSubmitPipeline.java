@@ -33,9 +33,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import org.apache.gravitino.Config;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobSubmitter;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.storage.service.OccupancyClaim;
@@ -89,12 +91,11 @@ class TestMaintenanceCommitSubmitPipeline {
     Map<String, String> jobConf = new LinkedHashMap<>();
     jobConf.put(
         MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "rewrite_data_files,expire_snapshots");
-    jobConf.put("catalog_name", "iceberg");
-    jobConf.put("table_identifier", "db.t");
     jobConf.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
 
     MaintenanceJobSpec spec =
-        new MaintenanceJobSpec(List.of(new TableTarget(TABLE_ID, List.of("ml", "iceberg", "db", "t"))),
+        new MaintenanceJobSpec(
+            List.of(new TableTarget(TABLE_ID, List.of("ml", "iceberg", "db", "t"))),
             List.of(
                 new Operation(POLICY_ID, "rewrite_data_files"),
                 new Operation(EXPIRE_POLICY_ID, "expire_snapshots")),
@@ -118,14 +119,21 @@ class TestMaintenanceCommitSubmitPipeline {
     Assertions.assertFalse(conf.containsKey("tms_table_id"));
     Assertions.assertFalse(conf.containsKey("tms_policy_id"));
     Assertions.assertEquals("iceberg", conf.get("catalog_name"));
-    Assertions.assertEquals("db.t", conf.get("table_identifier"));
+    Assertions.assertNull(conf.get("table_identifier"));
+    Assertions.assertTrue(conf.get("tables").contains("\"table_identifier\":\"db.t\""));
+    Assertions.assertTrue(conf.get("tables").contains("\"table_id\":" + TABLE_ID));
   }
 
   private static MaintenanceCommitSubmitPipeline pipeline(
       CommitOccupancyGate gate,
       TableMaintenanceActionMetaService actions,
       MaintenanceJobSubmitter submitter) {
-    return new MaintenanceCommitSubmitPipeline(gate, actions, submitter, CLAIM_TIMEOUT_MS);
+    return new MaintenanceCommitSubmitPipeline(
+        gate,
+        actions,
+        submitter,
+        new MaintenanceJobConfBuilder(new Config(false) {}),
+        CLAIM_TIMEOUT_MS);
   }
 
   private static CommitOccupancyGate allowAllGate() {
@@ -165,10 +173,9 @@ class TestMaintenanceCommitSubmitPipeline {
   private static MaintenanceJobSpec spec() {
     Map<String, String> jobConf = new LinkedHashMap<>();
     jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, "rewrite_data_files");
-    jobConf.put("catalog_name", "iceberg");
-    jobConf.put("table_identifier", "db.t");
     jobConf.put("updater_options", "{\"gravitino_uri\":\"http://localhost:8090\"}");
-    return new MaintenanceJobSpec(List.of(new TableTarget(TABLE_ID, List.of("ml", "iceberg", "db", "t"))),
+    return new MaintenanceJobSpec(
+        List.of(new TableTarget(TABLE_ID, List.of("ml", "iceberg", "db", "t"))),
         List.of(new Operation(POLICY_ID, "rewrite_data_files")),
         jobConf);
   }

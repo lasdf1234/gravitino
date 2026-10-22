@@ -92,7 +92,9 @@ class TestRelationalCommitJobScheduler extends TestJDBCBackend {
     Assertions.assertEquals(List.of(TABLE_ID), spec.tableIds());
     Assertions.assertEquals(POLICY_ID, spec.getOperations().get(0).getPolicyId());
     Assertions.assertTrue(spec.getJobConf().containsKey("updater_options"));
-    Assertions.assertEquals("iceberg", spec.getJobConf().get("catalog_name"));
+    Assertions.assertNull(spec.getJobConf().get("catalog_name"));
+    Assertions.assertNull(spec.getJobConf().get("table_identifier"));
+    Assertions.assertEquals("iceberg", spec.getTables().get(0).catalogName());
   }
 
   private static Function<Long, Optional<CollectedCommitChain>> fixedCollector(
@@ -152,7 +154,9 @@ class TestRelationalCommitJobScheduler extends TestJDBCBackend {
   private static Config configWithUri() {
     Config config = new Config(false) {};
     config.loadFromMap(
-        Map.of(MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey(), GRAVITINO_URI),
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            GRAVITINO_URI),
         t -> true);
     return config;
   }

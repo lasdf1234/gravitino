@@ -59,6 +59,9 @@ class TestCommitJobSpecFactory {
         spec.getJobConf().get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_policy_id"));
+    Assertions.assertNull(spec.getJobConf().get("catalog_name"));
+    Assertions.assertNull(spec.getJobConf().get("table_identifier"));
+    Assertions.assertNull(spec.getJobConf().get("tables"));
     Assertions.assertEquals(101L, spec.getTables().get(0).getTableId());
     Assertions.assertEquals(202L, spec.getOperations().get(0).getPolicyId());
     // Later chain members contribute procedure params the first policy does not set.
@@ -75,7 +78,9 @@ class TestCommitJobSpecFactory {
   private static Config configWithUri() {
     Config config = new Config(false) {};
     config.loadFromMap(
-        Map.of(MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey(), GRAVITINO_URI),
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            GRAVITINO_URI),
         t -> true);
     return config;
   }
