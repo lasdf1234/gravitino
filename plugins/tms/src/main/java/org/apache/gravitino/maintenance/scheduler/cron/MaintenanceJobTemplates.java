@@ -44,12 +44,6 @@ public final class MaintenanceJobTemplates {
   /** JobConf key for overlaid updater options (JSON object string). */
   public static final String UPDATER_OPTIONS_JOB_CONF_KEY = "updater_options";
 
-  /** JobConf key carrying the TMS table entity id for in-job follow-ups. */
-  public static final String TMS_TABLE_ID_KEY = "tms_table_id";
-
-  /** JobConf key carrying the TMS policy entity id for in-job follow-ups. */
-  public static final String TMS_POLICY_ID_KEY = "tms_policy_id";
-
   /**
    * JobConf key for enqueue-time policy {@code rules()} keyed by wire maintenance type. Consumed
    * in-Spark for trigger-expr recommend (no Gravitino round-trip).

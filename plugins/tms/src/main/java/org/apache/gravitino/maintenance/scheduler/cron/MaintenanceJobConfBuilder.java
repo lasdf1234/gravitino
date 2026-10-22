@@ -88,8 +88,6 @@ public final class MaintenanceJobConfBuilder {
           "dry_run",
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
           MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
-          MaintenanceJobTemplates.TMS_TABLE_ID_KEY,
-          MaintenanceJobTemplates.TMS_POLICY_ID_KEY,
           MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
           "gravitino_job_id");
 
@@ -111,7 +109,7 @@ public final class MaintenanceJobConfBuilder {
   /**
    * @param policy effective maintenance policy
    * @param catalogName Spark catalog alias for IRC property scoping
-   * @return mutable jobConf ready for table / policy id overlays
+   * @return mutable jobConf (table/policy ids live on {@code MaintenanceJobSpec}, not here)
    */
   public Map<String, String> build(PolicyEntity policy, String catalogName) {
     PolicyContent content = policy.content();
@@ -150,7 +148,6 @@ public final class MaintenanceJobConfBuilder {
 
     putTypedProcedureParams(jobConf, content);
 
-    jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(policy.id()));
     Optional<String> maintenanceType = MaintenanceJobTemplates.maintenanceType(policy.policyType());
     maintenanceType.ifPresent(
         type -> jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type));

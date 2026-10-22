@@ -28,7 +28,6 @@ import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
-import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceTableRefs.ResolvedTableRef;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
@@ -62,9 +61,8 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertEquals("rewrite_data_files", spec.getSteps().get(0).getMaintenanceType());
     Assertions.assertNull(spec.getJobConf().get("catalog_name"));
     Assertions.assertNull(spec.getJobConf().get("table_identifier"));
-    Assertions.assertNull(spec.getJobConf().get(MaintenanceJobTemplates.TMS_TABLE_ID_KEY));
-    Assertions.assertEquals(
-        Long.toString(202L), spec.getJobConf().get(MaintenanceJobTemplates.TMS_POLICY_ID_KEY));
+    Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
+    Assertions.assertFalse(spec.getJobConf().containsKey("tms_policy_id"));
     Assertions.assertTrue(spec.getJobConf().get("updater_options").contains(GRAVITINO_URI));
 
     TableTarget first = spec.getTables().get(0);
@@ -73,7 +71,7 @@ class TestMaintenanceJobSpecFactory {
         MaintenanceJobSpecFactory.jobConfForTable(spec.getJobConf(), first);
     Assertions.assertEquals("iceberg", perTable.get("catalog_name"));
     Assertions.assertEquals("db.t1", perTable.get("table_identifier"));
-    Assertions.assertEquals("10", perTable.get("tms_table_id"));
+    Assertions.assertFalse(perTable.containsKey("tms_table_id"));
   }
 
   @Test
