@@ -27,7 +27,7 @@ import java.util.Map;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSnapshot.TableTarget;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceTableRefs.ResolvedTableRef;
 import org.apache.gravitino.meta.AuditInfo;
@@ -39,38 +39,38 @@ import org.apache.gravitino.utils.NamespaceUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
-class TestMaintenanceJobSnapshotFactory {
+class TestMaintenanceJobSpecFactory {
 
   private static final String GRAVITINO_URI = "http://localhost:8090";
 
   @Test
   void testForCronBuildsSharedJobConfAndIdentifierLevels() {
-    MaintenanceJobSnapshotFactory factory = new MaintenanceJobSnapshotFactory(configWithUri());
+    MaintenanceJobSpecFactory factory = new MaintenanceJobSpecFactory(configWithUri());
     PolicyEntity policy = compaction(202L);
-    MaintenanceJobSnapshot snap =
+    MaintenanceJobSpec spec =
         factory.forCron(
             policy,
             List.of(
                 new ResolvedTableRef(10L, "iceberg", "db.t1"),
                 new ResolvedTableRef(11L, "iceberg", "db.t2")));
 
-    Assertions.assertTrue(snap.isValid());
-    Assertions.assertEquals("ml", snap.getMetalake());
-    Assertions.assertEquals(List.of(10L, 11L), snap.tableIds());
-    Assertions.assertEquals(1, snap.getSteps().size());
-    Assertions.assertEquals(202L, snap.getSteps().get(0).getPolicyId());
-    Assertions.assertEquals("rewrite_data_files", snap.getSteps().get(0).getMaintenanceType());
-    Assertions.assertNull(snap.getJobConf().get("catalog_name"));
-    Assertions.assertNull(snap.getJobConf().get("table_identifier"));
-    Assertions.assertNull(snap.getJobConf().get(MaintenanceJobTemplates.TMS_TABLE_ID_KEY));
+    Assertions.assertTrue(spec.isValid());
+    Assertions.assertEquals("ml", spec.getMetalake());
+    Assertions.assertEquals(List.of(10L, 11L), spec.tableIds());
+    Assertions.assertEquals(1, spec.getSteps().size());
+    Assertions.assertEquals(202L, spec.getSteps().get(0).getPolicyId());
+    Assertions.assertEquals("rewrite_data_files", spec.getSteps().get(0).getMaintenanceType());
+    Assertions.assertNull(spec.getJobConf().get("catalog_name"));
+    Assertions.assertNull(spec.getJobConf().get("table_identifier"));
+    Assertions.assertNull(spec.getJobConf().get(MaintenanceJobTemplates.TMS_TABLE_ID_KEY));
     Assertions.assertEquals(
-        Long.toString(202L), snap.getJobConf().get(MaintenanceJobTemplates.TMS_POLICY_ID_KEY));
-    Assertions.assertTrue(snap.getJobConf().get("updater_options").contains(GRAVITINO_URI));
+        Long.toString(202L), spec.getJobConf().get(MaintenanceJobTemplates.TMS_POLICY_ID_KEY));
+    Assertions.assertTrue(spec.getJobConf().get("updater_options").contains(GRAVITINO_URI));
 
-    TableTarget first = snap.getTables().get(0);
+    TableTarget first = spec.getTables().get(0);
     Assertions.assertEquals(List.of("ml", "iceberg", "db", "t1"), first.getIdentifier());
     Map<String, String> perTable =
-        MaintenanceJobSnapshotFactory.jobConfForTable(snap.getJobConf(), first);
+        MaintenanceJobSpecFactory.jobConfForTable(spec.getJobConf(), first);
     Assertions.assertEquals("iceberg", perTable.get("catalog_name"));
     Assertions.assertEquals("db.t1", perTable.get("table_identifier"));
     Assertions.assertEquals("10", perTable.get("tms_table_id"));
@@ -78,7 +78,7 @@ class TestMaintenanceJobSnapshotFactory {
 
   @Test
   void testForCronRejectsMixedCatalogs() {
-    MaintenanceJobSnapshotFactory factory = new MaintenanceJobSnapshotFactory(configWithUri());
+    MaintenanceJobSpecFactory factory = new MaintenanceJobSpecFactory(configWithUri());
     Assertions.assertThrows(
         IllegalArgumentException.class,
         () ->
@@ -91,13 +91,13 @@ class TestMaintenanceJobSnapshotFactory {
 
   @Test
   void testJacksonRoundTrip() {
-    MaintenanceJobSnapshotFactory factory = new MaintenanceJobSnapshotFactory(configWithUri());
-    MaintenanceJobSnapshot original =
+    MaintenanceJobSpecFactory factory = new MaintenanceJobSpecFactory(configWithUri());
+    MaintenanceJobSpec original =
         factory.forCron(
             compaction(1L), List.of(new ResolvedTableRef(9L, "iceberg", "schema.table")));
     Serializer serializer = new JacksonSerializer(JsonUtils.anyFieldMapper());
     byte[] bytes = serializer.serialize(original);
-    MaintenanceJobSnapshot restored = serializer.deserialize(MaintenanceJobSnapshot.class, bytes);
+    MaintenanceJobSpec restored = serializer.deserialize(MaintenanceJobSpec.class, bytes);
     Assertions.assertEquals(original, restored);
     String json = new String(bytes, StandardCharsets.UTF_8);
     Assertions.assertTrue(json.contains("\"version\":1"));
@@ -107,12 +107,12 @@ class TestMaintenanceJobSnapshotFactory {
   @Test
   void testMergeResourceKeysTakesMax() {
     Map<String, String> into =
-        MaintenanceJobSnapshotFactory.newLinkedMap(
+        MaintenanceJobSpecFactory.newLinkedMap(
             "spark_executor_memory", "4g", "spark_executor_cores", "2", "catalog_uri", "http://a");
     Map<String, String> from =
-        MaintenanceJobSnapshotFactory.newLinkedMap(
+        MaintenanceJobSpecFactory.newLinkedMap(
             "spark_executor_memory", "7g", "spark_executor_cores", "1", "catalog_uri", "http://b");
-    MaintenanceJobSnapshotFactory.mergeResourceKeys(into, from);
+    MaintenanceJobSpecFactory.mergeResourceKeys(into, from);
     Assertions.assertEquals("7g", into.get("spark_executor_memory"));
     Assertions.assertEquals("2", into.get("spark_executor_cores"));
     Assertions.assertEquals("http://a", into.get("catalog_uri"));
