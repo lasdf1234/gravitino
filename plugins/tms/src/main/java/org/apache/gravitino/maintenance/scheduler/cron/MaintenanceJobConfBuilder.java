@@ -66,7 +66,6 @@ public final class MaintenanceJobConfBuilder {
       ImmutableSet.of(
           "catalog_name",
           "table_identifier",
-          "table_id",
           "catalog_type",
           "catalog_uri",
           "warehouse_location",
