@@ -19,7 +19,6 @@
 package org.apache.gravitino.maintenance.scheduler.commit;
 
 import com.google.common.base.Preconditions;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -27,6 +26,8 @@ import javax.annotation.Nullable;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory;
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobSubmitter;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.storage.service.OccupancyClaim;
@@ -50,22 +51,26 @@ public final class MaintenanceCommitSubmitPipeline {
   private final CommitOccupancyGate occupancyGate;
   private final TableMaintenanceActionMetaService actionMetaService;
   private final MaintenanceJobSubmitter jobSubmitter;
+  private final MaintenanceJobConfBuilder jobConfBuilder;
   private final long claimTimeoutMs;
 
   /**
    * @param occupancyGate in-flight checks
    * @param actionMetaService soft-slot claim / bind
    * @param jobSubmitter Gravitino Job submitter
+   * @param jobConfBuilder resolves enqueue-time conf-key refs before {@code runJob}
    * @param claimTimeoutMs unbound claim TTL
    */
   public MaintenanceCommitSubmitPipeline(
       CommitOccupancyGate occupancyGate,
       TableMaintenanceActionMetaService actionMetaService,
       MaintenanceJobSubmitter jobSubmitter,
+      MaintenanceJobConfBuilder jobConfBuilder,
       long claimTimeoutMs) {
     this.occupancyGate = Preconditions.checkNotNull(occupancyGate);
     this.actionMetaService = Preconditions.checkNotNull(actionMetaService);
     this.jobSubmitter = Preconditions.checkNotNull(jobSubmitter);
+    this.jobConfBuilder = Preconditions.checkNotNull(jobConfBuilder);
     Preconditions.checkArgument(claimTimeoutMs > 0, "claimTimeoutMs must be positive");
     this.claimTimeoutMs = claimTimeoutMs;
   }
@@ -130,7 +135,20 @@ public final class MaintenanceCommitSubmitPipeline {
 
   private void runAndBind(MaintenanceJobSpec spec, OccupancyClaim claim, long tableId) {
     String metalake = spec.metalake();
-    Map<String, String> jobConf = new LinkedHashMap<>(spec.getJobConf());
+    Map<String, String> jobConf;
+    try {
+      jobConf =
+          jobConfBuilder.resolveForSubmit(
+              MaintenanceJobSpecFactory.jobConfForTable(
+                  spec.getJobConf(), spec.getTables().get(0)));
+    } catch (RuntimeException e) {
+      releaseClaimQuietly(claim);
+      LOG.warn(
+          "Skipping commit-job submit for table {}: invalid spec table target: {}",
+          tableId,
+          e.toString());
+      return;
+    }
     Long jobId = null;
     try {
       jobId =

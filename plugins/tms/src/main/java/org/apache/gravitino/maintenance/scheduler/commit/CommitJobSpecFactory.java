@@ -42,8 +42,8 @@ import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceTableRefs.Reso
  *
  * <p>Chain {@code jobConf} starts from the first policy, takes the max of resource-shaped keys from
  * later members, and {@code putIfAbsent}s remaining keys so later types keep their procedure params
- * (e.g. expire {@code older_than}) when auth bags already agree. {@code rules} is
- * unioned across members so each type keeps its enqueue-time rules for in-Spark recommend.
+ * (e.g. expire {@code older_than}) when auth bags already agree. {@code rules} is unioned across
+ * members so each type keeps its enqueue-time rules for in-Spark recommend.
  */
 final class CommitJobSpecFactory {
 
@@ -52,6 +52,7 @@ final class CommitJobSpecFactory {
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
           "catalog_name",
           "table_identifier",
+          "tables",
           MaintenanceJobTemplates.RULES_KEY);
 
   private final MaintenanceJobConfBuilder jobConfBuilder;
@@ -98,15 +99,17 @@ final class CommitJobSpecFactory {
     List<String> types =
         chain.stream().map(CommitChainMember::maintenanceType).collect(Collectors.toList());
     jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, String.join(",", types));
-    jobConf.put("catalog_name", ref.catalogName());
-    jobConf.put("table_identifier", ref.tableIdentifier());
+    // Per-table keys (catalog_name / tables JSON) are applied at pick via jobConfForTable.
+    jobConf.remove("catalog_name");
+    jobConf.remove("table_identifier");
+    jobConf.remove("tables");
     return jobConf;
   }
 
   /**
    * Max-merge resource keys; fill missing non-owned keys from a later chain member (procedure
-   * params). First-policy auth / {@code spark_conf} / {@code updater_options} win. {@code rules} are
-   * unioned by maintenance type.
+   * params). First-policy auth / {@code spark_conf} / {@code updater_options} win. {@code rules}
+   * are unioned by maintenance type.
    */
   static void mergeLaterMemberJobConf(Map<String, String> into, Map<String, String> from) {
     MaintenanceJobSpecFactory.mergeResourceKeys(into, from);
@@ -122,8 +125,8 @@ final class CommitJobSpecFactory {
   }
 
   /**
-   * Union {@link MaintenanceJobTemplates#RULES_KEY} maps so each chain type keeps
-   * its own enqueue-time rules for in-Spark recommend.
+   * Union {@link MaintenanceJobTemplates#RULES_KEY} maps so each chain type keeps its own
+   * enqueue-time rules for in-Spark recommend.
    */
   static void mergePolicyRulesByType(Map<String, String> into, Map<String, String> from) {
     String fromJson = from.get(MaintenanceJobTemplates.RULES_KEY);
@@ -131,16 +134,14 @@ final class CommitJobSpecFactory {
       return;
     }
     Map<String, Map<String, Object>> merged =
-        new LinkedHashMap<>(
-            parseRulesByType(into.get(MaintenanceJobTemplates.RULES_KEY)));
+        new LinkedHashMap<>(parseRulesByType(into.get(MaintenanceJobTemplates.RULES_KEY)));
     Map<String, Map<String, Object>> later = parseRulesByType(fromJson);
     for (Map.Entry<String, Map<String, Object>> entry : later.entrySet()) {
       merged.putIfAbsent(entry.getKey(), entry.getValue());
     }
     try {
       into.put(
-          MaintenanceJobTemplates.RULES_KEY,
-          JsonUtils.anyFieldMapper().writeValueAsString(merged));
+          MaintenanceJobTemplates.RULES_KEY, JsonUtils.anyFieldMapper().writeValueAsString(merged));
     } catch (JsonProcessingException e) {
       throw new IllegalStateException(
           "Failed to serialize " + MaintenanceJobTemplates.RULES_KEY, e);
@@ -157,8 +158,7 @@ final class CommitJobSpecFactory {
               .readValue(json, new TypeReference<Map<String, Map<String, Object>>>() {});
       return parsed == null ? Map.of() : parsed;
     } catch (JsonProcessingException e) {
-      throw new IllegalStateException(
-          "Failed to parse " + MaintenanceJobTemplates.RULES_KEY, e);
+      throw new IllegalStateException("Failed to parse " + MaintenanceJobTemplates.RULES_KEY, e);
     }
   }
 }

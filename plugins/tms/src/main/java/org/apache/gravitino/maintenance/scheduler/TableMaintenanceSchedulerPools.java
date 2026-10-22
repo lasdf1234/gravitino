@@ -35,12 +35,9 @@ import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.TableMaintenanceConfig;
 import org.apache.gravitino.maintenance.occupancy.OccupancyGate;
-<<<<<<< HEAD
-import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
-=======
 import org.apache.gravitino.maintenance.scheduler.commit.CommitOccupancyGate;
 import org.apache.gravitino.maintenance.scheduler.commit.MaintenanceCommitSubmitPipeline;
->>>>>>> 9673985d6 ([#14020] feat(tms): Add commit-pool submit pipeline)
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobSubmitter;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceSparkSubmitPipeline;
 import org.apache.gravitino.maintenance.scheduler.cron.PendingCronExpandOccupancyGate;
@@ -158,6 +155,7 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
             CommitOccupancyGate.of(occupancyGate),
             TableMaintenanceActionMetaService.getInstance(),
             MaintenanceJobSubmitter.fromEnv(),
+            new MaintenanceJobConfBuilder(gravitinoConfig),
             config.claimTimeoutMs());
     COMMIT_SUBMIT.set(() -> commitSubmit);
 
