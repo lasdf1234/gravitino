@@ -36,67 +36,29 @@ import javax.annotation.Nullable;
  *
  * <p>Thin envelope only: {@link #jobConf} is the same {@code Map<String,String>} passed to {@code
  * runJob} (including {@code updater_options} as a JSON string). Tables carry {@code tableId} plus
- * NameIdentifier levels; steps carry {@code policyId} plus the wire maintenance type.
+ * NameIdentifier levels (metalake first); operations carry {@code policyId} plus the wire
+ * maintenance type. Metalake for {@code runJob} is derived from {@link #tables}.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public final class MaintenanceJobSpec {
 
-  /** Current spec schema version. */
-  public static final int CURRENT_VERSION = 1;
-
-  private int version = CURRENT_VERSION;
-  private String metalake;
   private List<TableTarget> tables = new ArrayList<>();
-  private List<ChainStep> steps = new ArrayList<>();
+  private List<Operation> operations = new ArrayList<>();
   private Map<String, String> jobConf = new LinkedHashMap<>();
 
   /** Jackson / empty constructor. */
   public MaintenanceJobSpec() {}
 
   /**
-   * @param metalake metalake name
    * @param tables table targets (order preserved)
-   * @param steps chain / cron steps (order preserved)
+   * @param operations maintenance operations (order preserved; cron: one; commit: chain)
    * @param jobConf runJob configuration map
    */
   public MaintenanceJobSpec(
-      String metalake,
-      List<TableTarget> tables,
-      List<ChainStep> steps,
-      Map<String, String> jobConf) {
-    this.version = CURRENT_VERSION;
-    this.metalake = Preconditions.checkNotNull(metalake, "metalake");
+      List<TableTarget> tables, List<Operation> operations, Map<String, String> jobConf) {
     this.tables = new ArrayList<>(Preconditions.checkNotNull(tables, "tables"));
-    this.steps = new ArrayList<>(Preconditions.checkNotNull(steps, "steps"));
+    this.operations = new ArrayList<>(Preconditions.checkNotNull(operations, "operations"));
     this.jobConf = new LinkedHashMap<>(Preconditions.checkNotNull(jobConf, "jobConf"));
-  }
-
-  /**
-   * @return schema version
-   */
-  public int getVersion() {
-    return version;
-  }
-
-  /**
-   * @param version schema version
-   */
-  public void setVersion(int version) {
-    this.version = version;
-  }
-
-  /**
-   * @return metalake name
-   */
-  public String getMetalake() {
-    return metalake;
-  }
-
-  /**
-   * @param metalake metalake name
-   */
-  public void setMetalake(String metalake) {
-    this.metalake = metalake;
   }
 
   /**
@@ -114,17 +76,17 @@ public final class MaintenanceJobSpec {
   }
 
   /**
-   * @return maintenance steps
+   * @return maintenance operations
    */
-  public List<ChainStep> getSteps() {
-    return steps;
+  public List<Operation> getOperations() {
+    return operations;
   }
 
   /**
-   * @param steps maintenance steps
+   * @param operations maintenance operations
    */
-  public void setSteps(List<ChainStep> steps) {
-    this.steps = steps == null ? new ArrayList<>() : new ArrayList<>(steps);
+  public void setOperations(List<Operation> operations) {
+    this.operations = operations == null ? new ArrayList<>() : new ArrayList<>(operations);
   }
 
   /**
@@ -154,22 +116,39 @@ public final class MaintenanceJobSpec {
   }
 
   /**
-   * @return true when version, metalake, tables, steps, and jobConf look usable for submit
+   * Metalake for {@code runJob} / cancel, taken from the first table's NameIdentifier.
+   *
+   * @return metalake name, or {@code null} when tables are missing / incomplete
+   */
+  @JsonIgnore
+  @Nullable
+  public String metalake() {
+    if (tables == null || tables.isEmpty()) {
+      return null;
+    }
+    List<String> identifier = tables.get(0).getIdentifier();
+    if (identifier == null || identifier.isEmpty()) {
+      return null;
+    }
+    String name = identifier.get(0);
+    return name == null || name.isBlank() ? null : name;
+  }
+
+  /**
+   * @return true when tables, operations, and jobConf look usable for submit
    */
   @JsonIgnore
   public boolean isValid() {
-    return version == CURRENT_VERSION
-        && metalake != null
-        && !metalake.isBlank()
+    return metalake() != null
         && tables != null
         && !tables.isEmpty()
-        && steps != null
-        && !steps.isEmpty()
+        && operations != null
+        && !operations.isEmpty()
         && jobConf != null
         && !jobConf.isEmpty()
-        && steps.get(0).getPolicyId() > 0
+        && operations.get(0).getPolicyId() > 0
         && tables.stream().allMatch(TableTarget::isValid)
-        && steps.stream().allMatch(ChainStep::isValid);
+        && operations.stream().allMatch(Operation::isValid);
   }
 
   @Override
@@ -181,28 +160,22 @@ public final class MaintenanceJobSpec {
       return false;
     }
     MaintenanceJobSpec that = (MaintenanceJobSpec) o;
-    return version == that.version
-        && Objects.equals(metalake, that.metalake)
-        && Objects.equals(tables, that.tables)
-        && Objects.equals(steps, that.steps)
+    return Objects.equals(tables, that.tables)
+        && Objects.equals(operations, that.operations)
         && Objects.equals(jobConf, that.jobConf);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(version, metalake, tables, steps, jobConf);
+    return Objects.hash(tables, operations, jobConf);
   }
 
   @Override
   public String toString() {
-    return "MaintenanceJobSpec{version="
-        + version
-        + ", metalake='"
-        + metalake
-        + "', tables="
+    return "MaintenanceJobSpec{tables="
         + tableIds()
-        + ", steps="
-        + (steps == null ? 0 : steps.size())
+        + ", operations="
+        + (operations == null ? 0 : operations.size())
         + ", jobConfKeys="
         + (jobConf == null ? 0 : jobConf.size())
         + '}';
@@ -303,21 +276,21 @@ public final class MaintenanceJobSpec {
     }
   }
 
-  /** One maintenance step (cron: single type; commit: chain member). */
+  /** One maintenance operation (cron: single type; commit: chain member). */
   @JsonIgnoreProperties(ignoreUnknown = true)
-  public static final class ChainStep {
+  public static final class Operation {
 
     private long policyId;
     private String maintenanceType;
 
     /** Jackson constructor. */
-    public ChainStep() {}
+    public Operation() {}
 
     /**
      * @param policyId policy entity id
      * @param maintenanceType Spark wire name
      */
-    public ChainStep(long policyId, String maintenanceType) {
+    public Operation(long policyId, String maintenanceType) {
       Preconditions.checkArgument(policyId > 0, "policyId must be positive");
       this.policyId = policyId;
       this.maintenanceType = Preconditions.checkNotNull(maintenanceType, "maintenanceType");
@@ -361,10 +334,10 @@ public final class MaintenanceJobSpec {
       if (this == o) {
         return true;
       }
-      if (!(o instanceof ChainStep)) {
+      if (!(o instanceof Operation)) {
         return false;
       }
-      ChainStep that = (ChainStep) o;
+      Operation that = (Operation) o;
       return policyId == that.policyId && Objects.equals(maintenanceType, that.maintenanceType);
     }
 

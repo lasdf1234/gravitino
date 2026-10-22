@@ -54,11 +54,12 @@ class TestMaintenanceJobSpecFactory {
                 new ResolvedTableRef(11L, "iceberg", "db.t2")));
 
     Assertions.assertTrue(spec.isValid());
-    Assertions.assertEquals("ml", spec.getMetalake());
+    Assertions.assertEquals("ml", spec.metalake());
     Assertions.assertEquals(List.of(10L, 11L), spec.tableIds());
-    Assertions.assertEquals(1, spec.getSteps().size());
-    Assertions.assertEquals(202L, spec.getSteps().get(0).getPolicyId());
-    Assertions.assertEquals("rewrite_data_files", spec.getSteps().get(0).getMaintenanceType());
+    Assertions.assertEquals(1, spec.getOperations().size());
+    Assertions.assertEquals(202L, spec.getOperations().get(0).getPolicyId());
+    Assertions.assertEquals(
+        "rewrite_data_files", spec.getOperations().get(0).getMaintenanceType());
     Assertions.assertNull(spec.getJobConf().get("catalog_name"));
     Assertions.assertNull(spec.getJobConf().get("table_identifier"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
@@ -98,7 +99,9 @@ class TestMaintenanceJobSpecFactory {
     MaintenanceJobSpec restored = serializer.deserialize(MaintenanceJobSpec.class, bytes);
     Assertions.assertEquals(original, restored);
     String json = new String(bytes, StandardCharsets.UTF_8);
-    Assertions.assertTrue(json.contains("\"version\":1"));
+    Assertions.assertFalse(json.contains("\"version\""));
+    Assertions.assertFalse(json.contains("\"metalake\""));
+    Assertions.assertTrue(json.contains("\"operations\""));
     Assertions.assertTrue(json.contains("updater_options"));
   }
 

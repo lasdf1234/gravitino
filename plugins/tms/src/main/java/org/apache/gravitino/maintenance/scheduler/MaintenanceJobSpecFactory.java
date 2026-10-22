@@ -30,7 +30,7 @@ import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.gravitino.Config;
-import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.ChainStep;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
@@ -93,8 +93,8 @@ public final class MaintenanceJobSpecFactory {
     for (ResolvedTableRef ref : tables) {
       targets.add(toTarget(metalake, ref));
     }
-    List<ChainStep> steps = List.of(new ChainStep(policy.id(), wire.get()));
-    return new MaintenanceJobSpec(metalake, targets, steps, jobConf);
+    List<Operation> operations = List.of(new Operation(policy.id(), wire.get()));
+    return new MaintenanceJobSpec(targets, operations, jobConf);
   }
 
   /**
