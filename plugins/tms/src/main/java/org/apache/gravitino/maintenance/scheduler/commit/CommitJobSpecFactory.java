@@ -52,8 +52,6 @@ final class CommitJobSpecFactory {
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
           "catalog_name",
           "table_identifier",
-          MaintenanceJobTemplates.TMS_TABLE_ID_KEY,
-          MaintenanceJobTemplates.TMS_POLICY_ID_KEY,
           MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY);
 
   private final MaintenanceJobConfBuilder jobConfBuilder;
@@ -102,8 +100,6 @@ final class CommitJobSpecFactory {
     jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, String.join(",", types));
     jobConf.put("catalog_name", ref.catalogName());
     jobConf.put("table_identifier", ref.tableIdentifier());
-    jobConf.put(MaintenanceJobTemplates.TMS_TABLE_ID_KEY, Long.toString(ref.tableId()));
-    jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(first.policy().id()));
     return jobConf;
   }
 
