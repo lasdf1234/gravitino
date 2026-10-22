@@ -35,12 +35,9 @@ public final class MaintenanceJobTemplates {
   public static final String TMS_ICEBERG_MAINTENANCE_TEMPLATE =
       JobTemplateProvider.BUILTIN_NAME_PREFIX + "tms-iceberg-maintenance";
 
-  /** JobConf key for procedure dispatch inside the TMS template. */
-  public static final String MAINTENANCE_TYPE_KEY = "maintenance_type";
-
   /**
-   * JobConf key for a comma-separated commit-chain of wire types (§5.2.3). When set, Spark runs
-   * each type in order inside one Job.
+   * JobConf key for procedure dispatch inside the TMS template. One wire name, or a comma-separated
+   * commit chain. Required by {@code builtin-iceberg-maintenance-task}.
    */
   public static final String MAINTENANCE_TYPES_KEY = "maintenance_types";
 
@@ -68,7 +65,7 @@ public final class MaintenanceJobTemplates {
 
   /**
    * @param builtInType maintenance policy type
-   * @return wire value for {@link #MAINTENANCE_TYPE_KEY}
+   * @return wire value for {@link #MAINTENANCE_TYPES_KEY}
    */
   public static Optional<String> maintenanceType(Policy.BuiltInType builtInType) {
     if (builtInType == null) {

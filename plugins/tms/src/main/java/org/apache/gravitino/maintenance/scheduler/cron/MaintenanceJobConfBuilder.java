@@ -86,7 +86,6 @@ public final class MaintenanceJobConfBuilder {
           "stream_results",
           "location",
           "dry_run",
-          MaintenanceJobTemplates.MAINTENANCE_TYPE_KEY,
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
           MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
           MaintenanceJobTemplates.TMS_TABLE_ID_KEY,
@@ -152,7 +151,7 @@ public final class MaintenanceJobConfBuilder {
 
     jobConf.put(MaintenanceJobTemplates.TMS_POLICY_ID_KEY, Long.toString(policy.id()));
     MaintenanceJobTemplates.maintenanceType(policy.policyType())
-        .ifPresent(type -> jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPE_KEY, type));
+        .ifPresent(type -> jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type));
 
     jobConf.put(
         MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,

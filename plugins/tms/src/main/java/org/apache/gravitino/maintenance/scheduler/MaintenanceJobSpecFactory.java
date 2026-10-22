@@ -56,9 +56,9 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * Cron spec for one or more tables under a single policy. Shared {@code jobConf} omits
-   * per-table keys; pick overlays {@code catalog_name} / {@code table_identifier} / {@code
-   * tms_table_id} for each {@link TableTarget}.
+   * Cron spec for one or more tables under a single policy. Shared {@code jobConf} omits per-table
+   * keys; pick overlays {@code catalog_name} / {@code table_identifier} / {@code tms_table_id} for
+   * each {@link TableTarget}.
    *
    * <p>All tables must share the same Spark catalog name so catalog-scoped {@code spark_conf} keys
    * stay correct for every member of a batch.
