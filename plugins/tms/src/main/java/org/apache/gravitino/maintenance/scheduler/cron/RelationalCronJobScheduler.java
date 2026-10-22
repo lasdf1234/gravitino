@@ -283,7 +283,13 @@ public final class RelationalCronJobScheduler implements CronJobScheduler {
           extraTableIds);
       return false;
     }
-    String metalake = open.spec.getMetalake();
+    String metalake = open.spec.metalake();
+    if (metalake == null) {
+      LOG.warn(
+          "Could not merge tables into cron-job {}: missing metalake on open spec",
+          open.instanceId.getId());
+      return false;
+    }
     boolean added = false;
     for (ResolvedTableRef ref : resolved) {
       if (!openCatalog.equals(ref.catalogName())) {
@@ -305,7 +311,9 @@ public final class RelationalCronJobScheduler implements CronJobScheduler {
     }
     MaintenanceJobSpec merged =
         new MaintenanceJobSpec(
-            metalake, new ArrayList<>(byId.values()), open.spec.getSteps(), open.spec.getJobConf());
+            new ArrayList<>(byId.values()),
+            open.spec.getOperations(),
+            open.spec.getJobConf());
     try {
       return client.reschedule(open.instanceId, open.executionTime, merged);
     } catch (RuntimeException e) {
