@@ -44,7 +44,7 @@ class TestMaintenanceJobConfBuilder {
     Config config = configWithUri();
     config.loadFromMap(
         Map.of(
-            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey(),
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
             GRAVITINO_URI,
             "gravitino.maintenance.ircAuth.rest.auth.type",
             "basic"),
@@ -90,12 +90,27 @@ class TestMaintenanceJobConfBuilder {
         conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"rewrite_data_files\""));
     Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
     Assertions.assertTrue(
-        conf.get("spark_conf").contains("\"spark.sql.catalog.iceberg.rest.auth.type\":\"basic\""));
+        conf.get("spark_conf")
+            .contains(
+                "\"spark.sql.catalog.iceberg.rest.auth.type\":\"gravitino.maintenance.ircAuth.rest.auth.type\""));
+    Assertions.assertFalse(conf.get("spark_conf").contains("\"basic\""));
     Assertions.assertNull(conf.get("rest.auth.type"));
     Assertions.assertFalse(conf.get("spark_conf").contains("\"rest.auth.type\""));
     Assertions.assertTrue(conf.get("updater_options").contains("\"metalake\":\"ml\""));
     Assertions.assertTrue(
-        conf.get("updater_options").contains("\"gravitino_uri\":\"" + GRAVITINO_URI + "\""));
+        conf.get("updater_options")
+            .contains("\"gravitino_uri\":\"gravitino.maintenance.gravitinoAuth.uri\""));
+    Assertions.assertFalse(conf.get("updater_options").contains(GRAVITINO_URI));
+
+    Map<String, String> resolved =
+        new MaintenanceJobConfBuilder(config, Clock.fixed(FIXED, ZoneOffset.UTC))
+            .resolveForSubmit(conf);
+    Assertions.assertTrue(
+        resolved.get("updater_options").contains("\"gravitino_uri\":\"" + GRAVITINO_URI + "\""));
+    Assertions.assertTrue(
+        resolved
+            .get("spark_conf")
+            .contains("\"spark.sql.catalog.iceberg.rest.auth.type\":\"basic\""));
   }
 
   @Test
@@ -234,7 +249,9 @@ class TestMaintenanceJobConfBuilder {
   private static Config configWithUri() {
     Config config = new Config(false) {};
     config.loadFromMap(
-        Map.of(MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey(), GRAVITINO_URI),
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            GRAVITINO_URI),
         t -> true);
     return config;
   }

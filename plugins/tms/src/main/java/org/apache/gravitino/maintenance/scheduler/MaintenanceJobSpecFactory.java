@@ -46,6 +46,8 @@ import org.apache.gravitino.meta.PolicyEntity;
 public final class MaintenanceJobSpecFactory {
 
   private static final Pattern RESOURCE_NUMBER = Pattern.compile("^(\\d+)");
+  private static final Pattern MEMORY_VALUE =
+      Pattern.compile("^(\\d+(?:\\.\\d+)?)\\s*([kmgt]?i?b?)$", Pattern.CASE_INSENSITIVE);
 
   private final MaintenanceJobConfBuilder jobConfBuilder;
 
@@ -151,7 +153,8 @@ public final class MaintenanceJobSpecFactory {
 
   /**
    * For resource-shaped keys ({@code *memory*}, {@code *cores*}, {@code *instances*}), keep the
-   * larger numeric prefix; leave other keys from the first policy unchanged.
+   * larger value. Memory keys compare normalized byte sizes ({@code 1g} &gt; {@code 512m}); cores /
+   * instances compare the leading integer. Other keys from the first policy are left unchanged.
    *
    * @param into baseline jobConf (mutated)
    * @param from candidate jobConf
@@ -168,8 +171,8 @@ public final class MaintenanceJobSpecFactory {
         into.put(key, value);
         continue;
       }
-      Optional<Long> existingNum = leadingLong(existing);
-      Optional<Long> candidateNum = leadingLong(value);
+      Optional<Long> existingNum = resourceMagnitude(key, existing);
+      Optional<Long> candidateNum = resourceMagnitude(key, value);
       if (existingNum.isPresent()
           && candidateNum.isPresent()
           && candidateNum.get() > existingNum.get()) {
@@ -194,6 +197,68 @@ public final class MaintenanceJobSpecFactory {
   private static boolean isResourceKey(String key) {
     String lower = key.toLowerCase(Locale.ROOT);
     return lower.contains("memory") || lower.contains("cores") || lower.contains("instances");
+  }
+
+  private static Optional<Long> resourceMagnitude(String key, String value) {
+    if (key.toLowerCase(Locale.ROOT).contains("memory")) {
+      return parseMemoryBytes(value);
+    }
+    return leadingLong(value);
+  }
+
+  /**
+   * Parses Spark-style memory strings ({@code 512m}, {@code 1g}, {@code 2048}) into bytes for max
+   * merge.
+   */
+  @VisibleForTesting
+  static Optional<Long> parseMemoryBytes(String value) {
+    if (value == null) {
+      return Optional.empty();
+    }
+    Matcher matcher = MEMORY_VALUE.matcher(value.trim());
+    if (!matcher.matches()) {
+      return leadingLong(value);
+    }
+    try {
+      double amount = Double.parseDouble(matcher.group(1));
+      String unit = matcher.group(2) == null ? "" : matcher.group(2).toLowerCase(Locale.ROOT);
+      long multiplier;
+      switch (unit) {
+        case "":
+        case "b":
+          multiplier = 1L;
+          break;
+        case "k":
+        case "kb":
+        case "ki":
+        case "kib":
+          multiplier = 1024L;
+          break;
+        case "m":
+        case "mb":
+        case "mi":
+        case "mib":
+          multiplier = 1024L * 1024L;
+          break;
+        case "g":
+        case "gb":
+        case "gi":
+        case "gib":
+          multiplier = 1024L * 1024L * 1024L;
+          break;
+        case "t":
+        case "tb":
+        case "ti":
+        case "tib":
+          multiplier = 1024L * 1024L * 1024L * 1024L;
+          break;
+        default:
+          return Optional.empty();
+      }
+      return Optional.of(Math.round(amount * multiplier));
+    } catch (NumberFormatException e) {
+      return Optional.empty();
+    }
   }
 
   private static Optional<Long> leadingLong(String value) {

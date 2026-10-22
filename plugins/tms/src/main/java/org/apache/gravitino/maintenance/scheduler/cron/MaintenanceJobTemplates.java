@@ -31,13 +31,16 @@ import org.apache.gravitino.policy.Policy;
  */
 public final class MaintenanceJobTemplates {
 
-  /** Built-in template name for the TMS Iceberg maintenance Spark job. */
+  /**
+   * Built-in template name for the TMS Iceberg maintenance Spark job. Must match {@code
+   * IcebergMaintenanceJob.NAME} ({@code builtin-iceberg-maintenance-task}).
+   */
   public static final String TMS_ICEBERG_MAINTENANCE_TEMPLATE =
-      JobTemplateProvider.BUILTIN_NAME_PREFIX + "tms-iceberg-maintenance";
+      JobTemplateProvider.BUILTIN_NAME_PREFIX + "iceberg-maintenance-task";
 
   /**
    * JobConf key for procedure dispatch inside the TMS template. One wire name, or a comma-separated
-   * commit chain. Required by {@code builtin-iceberg-maintenance-task}.
+   * commit chain. Required by {@link #TMS_ICEBERG_MAINTENANCE_TEMPLATE}.
    */
   public static final String MAINTENANCE_TYPES_KEY = "maintenance_types";
 

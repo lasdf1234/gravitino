@@ -42,8 +42,8 @@ class TestMaintenanceAuthConfigs {
         "gravitino.maintenance.gravitinoAuth.oauthServerUri",
         MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_OAUTH_SERVER_URI.getKey());
     Assertions.assertEquals(
-        "gravitino.maintenance.gravitinoUri",
-        MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_URI.getKey());
+        "gravitino.maintenance.gravitinoAuth.uri",
+        MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey());
   }
 
   @Test
@@ -72,6 +72,8 @@ class TestMaintenanceAuthConfigs {
     Config config = new Config(false) {};
     config.loadFromMap(
         Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_AUTH_PREFIX + "uri",
+            "http://gravitino.example:8090",
             MaintenanceAuthConfigs.GRAVITINO_AUTH_PREFIX + "authType",
             "oauth",
             MaintenanceAuthConfigs.GRAVITINO_AUTH_PREFIX + "username",
@@ -90,6 +92,7 @@ class TestMaintenanceAuthConfigs {
 
     Assertions.assertEquals(
         ImmutableMap.<String, String>builder()
+            .put("gravitino_uri", "http://gravitino.example:8090")
             .put("auth_type", "oauth")
             .put("username", "tms")
             .put("password", "secret")
@@ -99,6 +102,49 @@ class TestMaintenanceAuthConfigs {
             .put("oauth_scope", "catalog")
             .build(),
         MaintenanceAuthConfigs.loadGravitinoAuth(config));
+  }
+
+  @Test
+  void loadGravitinoAuthAllowsUriWithoutAuthType() {
+    Config config = new Config(false) {};
+    config.loadFromMap(
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            "http://gravitino.example:8090"),
+        key -> key.startsWith("gravitino."));
+
+    Assertions.assertEquals(
+        ImmutableMap.of("gravitino_uri", "http://gravitino.example:8090"),
+        MaintenanceAuthConfigs.loadGravitinoAuth(config));
+  }
+
+  @Test
+  void loadAuthAsConfigKeysStoresKeysNotValues() {
+    Config config = new Config(false) {};
+    config.loadFromMap(
+        Map.of(
+            MaintenanceAuthConfigs.GRAVITINO_MAINTENANCE_GRAVITINO_AUTH_URI.getKey(),
+            "http://gravitino.example:8090",
+            MaintenanceAuthConfigs.GRAVITINO_AUTH_PREFIX + "authType",
+            "simple",
+            MaintenanceAuthConfigs.IRC_AUTH_PREFIX + "rest.auth.type",
+            "oauth2"),
+        key -> key.startsWith("gravitino."));
+
+    Assertions.assertEquals(
+        ImmutableMap.of(
+            "gravitino_uri",
+            "gravitino.maintenance.gravitinoAuth.uri",
+            "auth_type",
+            "gravitino.maintenance.gravitinoAuth.authType"),
+        MaintenanceAuthConfigs.loadGravitinoAuthAsConfigKeys(config));
+    Assertions.assertEquals(
+        ImmutableMap.of("rest.auth.type", "gravitino.maintenance.ircAuth.rest.auth.type"),
+        MaintenanceAuthConfigs.loadIrcAuthAsConfigKeys(config));
+    Assertions.assertEquals(
+        "http://gravitino.example:8090",
+        MaintenanceAuthConfigs.resolveConfigReference(
+            config, "gravitino.maintenance.gravitinoAuth.uri"));
   }
 
   @Test

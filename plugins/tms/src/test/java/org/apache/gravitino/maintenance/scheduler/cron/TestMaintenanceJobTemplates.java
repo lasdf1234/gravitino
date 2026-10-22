@@ -27,6 +27,9 @@ class TestMaintenanceJobTemplates {
 
   @Test
   void testAllFourTypesMapToSingleTmsTemplate() {
+    Assertions.assertEquals(
+        "builtin-iceberg-maintenance-task",
+        MaintenanceJobTemplates.TMS_ICEBERG_MAINTENANCE_TEMPLATE);
     for (Policy.BuiltInType type :
         new Policy.BuiltInType[] {
           Policy.BuiltInType.ICEBERG_COMPACTION,
