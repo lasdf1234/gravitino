@@ -203,11 +203,15 @@ class TestMaintenanceSparkSubmitPipeline {
             confCaptor.capture());
     List<Map<String, String>> confs = confCaptor.getAllValues();
     Assertions.assertEquals("iceberg", confs.get(0).get("catalog_name"));
-    Assertions.assertEquals("db.t1", confs.get(0).get("table_identifier"));
+    Assertions.assertNull(confs.get(0).get("table_identifier"));
+    Assertions.assertTrue(confs.get(0).get("tables").contains("\"table_identifier\":\"db.t1\""));
+    Assertions.assertTrue(confs.get(0).get("tables").contains("\"table_id\":10"));
     Assertions.assertFalse(confs.get(0).containsKey("tms_table_id"));
     Assertions.assertEquals("expire_snapshots", confs.get(0).get("maintenance_types"));
     Assertions.assertEquals("iceberg", confs.get(1).get("catalog_name"));
-    Assertions.assertEquals("db.t2", confs.get(1).get("table_identifier"));
+    Assertions.assertNull(confs.get(1).get("table_identifier"));
+    Assertions.assertTrue(confs.get(1).get("tables").contains("\"table_identifier\":\"db.t2\""));
+    Assertions.assertTrue(confs.get(1).get("tables").contains("\"table_id\":11"));
     Assertions.assertFalse(confs.get(1).containsKey("tms_table_id"));
     Assertions.assertFalse(confs.get(0).containsKey("tms_policy_id"));
     verify(actions).bindJobId(claimA, 555L);
@@ -241,7 +245,9 @@ class TestMaintenanceSparkSubmitPipeline {
             confCaptor.capture());
     Map<String, String> conf = confCaptor.getValue();
     Assertions.assertEquals("iceberg", conf.get("catalog_name"));
-    Assertions.assertEquals("db.t", conf.get("table_identifier"));
+    Assertions.assertNull(conf.get("table_identifier"));
+    Assertions.assertTrue(conf.get("tables").contains("\"table_identifier\":\"db.t\""));
+    Assertions.assertTrue(conf.get("tables").contains("\"table_id\":" + TABLE_ID));
     Assertions.assertFalse(conf.containsKey("tms_table_id"));
     Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
     Assertions.assertFalse(conf.containsKey("tms_policy_id"));
