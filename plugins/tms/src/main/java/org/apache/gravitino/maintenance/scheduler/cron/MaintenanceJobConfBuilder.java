@@ -88,7 +88,7 @@ public final class MaintenanceJobConfBuilder {
           "dry_run",
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
           MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
-          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
+          MaintenanceJobTemplates.RULES_KEY,
           "gravitino_job_id");
 
   private final Config gravitinoConfig;
@@ -155,8 +155,8 @@ public final class MaintenanceJobConfBuilder {
       Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
       rulesByType.put(maintenanceType.get(), new LinkedHashMap<>(content.rules()));
       jobConf.put(
-          MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY,
-          writeJson(rulesByType, MaintenanceJobTemplates.POLICY_RULES_BY_TYPE_KEY));
+          MaintenanceJobTemplates.RULES_KEY,
+          writeJson(rulesByType, MaintenanceJobTemplates.RULES_KEY));
     }
 
     jobConf.put(
