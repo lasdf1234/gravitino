@@ -35,6 +35,7 @@ import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.TableMaintenanceConfig;
 import org.apache.gravitino.maintenance.occupancy.OccupancyGate;
+import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobSubmitter;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceSparkSubmitPipeline;
 import org.apache.gravitino.maintenance.scheduler.cron.PendingCronExpandOccupancyGate;
@@ -133,6 +134,7 @@ public class TableMaintenanceSchedulerPools implements AutoCloseable {
             occupancyGate::isInFlight,
             TableMaintenanceActionMetaService.getInstance(),
             MaintenanceJobSubmitter.fromEnv(),
+            new MaintenanceJobConfBuilder(gravitinoConfig),
             config.claimTimeoutMs());
     CRON_SUBMIT.set(() -> cronSubmit);
 
