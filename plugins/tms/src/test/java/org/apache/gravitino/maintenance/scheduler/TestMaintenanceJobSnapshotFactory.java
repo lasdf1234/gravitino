@@ -18,12 +18,14 @@
  */
 package org.apache.gravitino.maintenance.scheduler;
 
+import com.github.kagkarlsson.scheduler.serializer.JacksonSerializer;
 import com.github.kagkarlsson.scheduler.serializer.Serializer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
+import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSnapshot.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
@@ -93,7 +95,7 @@ class TestMaintenanceJobSnapshotFactory {
     MaintenanceJobSnapshot original =
         factory.forCron(
             compaction(1L), List.of(new ResolvedTableRef(9L, "iceberg", "schema.table")));
-    Serializer serializer = MaintenanceSchedulerSerializers.jackson();
+    Serializer serializer = new JacksonSerializer(JsonUtils.anyFieldMapper());
     byte[] bytes = serializer.serialize(original);
     MaintenanceJobSnapshot restored = serializer.deserialize(MaintenanceJobSnapshot.class, bytes);
     Assertions.assertEquals(original, restored);
