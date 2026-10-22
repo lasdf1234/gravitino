@@ -141,7 +141,7 @@ class TestCronJobScheduler extends TestJDBCBackend {
     MaintenanceJobSpec data =
         (MaintenanceJobSpec) client.getScheduledExecution(batch0).get().getData();
     Assertions.assertEquals(List.of(10L, 11L, 12L, 13L), data.tableIds());
-    Assertions.assertEquals(1, data.getSteps().size());
+    Assertions.assertEquals(1, data.getOperations().size());
     Assertions.assertTrue(data.getJobConf().containsKey("updater_options"));
   }
 
