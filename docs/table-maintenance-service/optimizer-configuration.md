@@ -58,7 +58,7 @@ keep the first snapshot). **At enqueue**, TMS collects nearest policies with
 `commitTrigger=true` in order compaction → manifest-rewrite → snapshot-expiry, drops members
 still inside `minIntervalMs`, **fails closed when effective `gravitinoAuth` / `ircAuth` bags
 disagree across the chain**, and writes an enqueue-time job snapshot (`task_data`: tables,
-chain steps, merged `jobConf`). The commit pool **consumes that snapshot**: if any snapshot
+operations, merged `jobConf`). The commit pool **consumes that snapshot**: if any snapshot
 type is still in-flight it deletes the row and stops; otherwise it claims the first type and
 submits one chained `builtin-tms-iceberg-maintenance` Spark job.
 
