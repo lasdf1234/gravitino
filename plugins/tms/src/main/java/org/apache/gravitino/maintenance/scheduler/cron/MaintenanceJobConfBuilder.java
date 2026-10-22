@@ -19,6 +19,7 @@
 package org.apache.gravitino.maintenance.scheduler.cron;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.time.Clock;
 import java.time.DateTimeException;
@@ -43,13 +44,15 @@ import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyExecutionSpec;
 
 /**
- * Builds {@code runJob} configuration for TMS Spark submits.
+ * Builds the {@code runJob} configuration map for TMS Spark submits.
  *
- * <p>Maps typed compaction / orphan policy fields onto procedure placeholders; expire and manifest
- * rewrite remain jobOptions passthrough until those content types grow real thresholds. Keeps
- * catalog / Spark resource keys as top-level jobConf, and packs Iceberg REST / {@code
- * gravitino.maintenance.ircAuth.*} passthrough properties into {@code spark_conf} under {@code
- * spark.sql.catalog.<catalogName>.} so SparkSession can authenticate to IRC.
+ * <p>Shape matches Iceberg update-stats submit: flatten template placeholders into the top-level
+ * map, pack {@code updater_options} as one JSON string, and pack extra Spark / IRC settings into
+ * {@code spark_conf} as another JSON string. Policy {@code jobOptions} (including overlay from
+ * {@code gravitino.maintenance.ircAuth.*}) keep short IRC keys such as {@code rest.auth.type};
+ * those are expanded to {@code spark.sql.catalog.<catalog>.*} only when writing {@code spark_conf}.
+ * Dot-form Spark resource keys ({@code spark.executor.memory}) become the matching underscore
+ * placeholders ({@code spark_executor_memory}) instead of catalog properties.
  */
 public final class MaintenanceJobConfBuilder {
 
@@ -58,14 +61,12 @@ public final class MaintenanceJobConfBuilder {
 
   private static final String SPARK_SQL_CATALOG_PREFIX = "spark.sql.catalog.";
 
-  /**
-   * JobConf keys consumed by the TMS / Iceberg Spark templates as top-level placeholders (not
-   * catalog properties).
-   */
-  private static final Set<String> TEMPLATE_JOB_CONF_KEYS =
+  /** Top-level {@code runJob} placeholders consumed by Iceberg / TMS Spark templates. */
+  private static final Set<String> FLAT_PLACEHOLDER_KEYS =
       ImmutableSet.of(
           "catalog_name",
           "table_identifier",
+          "table_id",
           "catalog_type",
           "catalog_uri",
           "warehouse_location",
@@ -74,7 +75,6 @@ public final class MaintenanceJobConfBuilder {
           "spark_executor_cores",
           "spark_executor_memory",
           "spark_driver_memory",
-          "spark_conf",
           "strategy",
           "sort_order",
           "where_clause",
@@ -87,9 +87,24 @@ public final class MaintenanceJobConfBuilder {
           "location",
           "dry_run",
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
-          MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
           MaintenanceJobTemplates.RULES_KEY,
           "gravitino_job_id");
+
+  /**
+   * Spark resource / session keys that map onto flat template placeholders (same as update-stats).
+   */
+  private static final Map<String, String> SPARK_KEY_TO_PLACEHOLDER =
+      ImmutableMap.of(
+          "spark.master",
+          "spark_master",
+          "spark.executor.instances",
+          "spark_executor_instances",
+          "spark.executor.cores",
+          "spark_executor_cores",
+          "spark.executor.memory",
+          "spark_executor_memory",
+          "spark.driver.memory",
+          "spark_driver_memory");
 
   private final Config gravitinoConfig;
   private final Clock clock;
@@ -109,11 +124,12 @@ public final class MaintenanceJobConfBuilder {
   /**
    * @param policy effective maintenance policy
    * @param catalogName Spark catalog alias for IRC property scoping
-   * @return mutable jobConf (table/policy ids live on {@code MaintenanceJobSpec}, not here)
+   * @return mutable jobConf (per-table keys applied later by {@code jobConfForTable})
    */
   public Map<String, String> build(PolicyEntity policy, String catalogName) {
     PolicyContent content = policy.content();
     PolicyExecutionSpec spec = executionSpec(content);
+    // ircAuth suffixes stay short-named in jobOptions (e.g. rest.auth.type).
     Map<String, String> jobOptions =
         MaintenanceAuthConfigs.overlayJobOptions(gravitinoConfig, spec.jobOptions());
     Map<String, String> updaterOptions =
@@ -133,19 +149,16 @@ public final class MaintenanceJobConfBuilder {
     for (Map.Entry<String, String> entry : jobOptions.entrySet()) {
       String key = entry.getKey();
       String value = entry.getValue();
-      if (key == null || value == null) {
+      if (key == null
+          || value == null
+          || "spark_conf".equals(key)
+          || "updater_options".equals(key)) {
         continue;
       }
-      if ("spark_conf".equals(key)) {
-        continue;
-      }
-      if (TEMPLATE_JOB_CONF_KEYS.contains(key)) {
-        jobConf.put(key, value);
-      } else {
-        sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + "." + key, value);
-      }
+      routeJobOption(jobConf, sparkConf, catalogName, key, value);
     }
 
+    fillPlaceholdersFromSparkConf(jobConf, sparkConf, catalogName);
     putTypedProcedureParams(jobConf, content);
 
     Optional<String> maintenanceType = MaintenanceJobTemplates.maintenanceType(policy.policyType());
@@ -168,6 +181,60 @@ public final class MaintenanceJobConfBuilder {
     return jobConf;
   }
 
+  private static void routeJobOption(
+      Map<String, String> jobConf,
+      Map<String, String> sparkConf,
+      String catalogName,
+      String key,
+      String value) {
+    if (FLAT_PLACEHOLDER_KEYS.contains(key)) {
+      jobConf.put(key, value);
+      return;
+    }
+    String placeholder = SPARK_KEY_TO_PLACEHOLDER.get(key);
+    if (placeholder != null) {
+      jobConf.put(placeholder, value);
+      sparkConf.put(key, value);
+      return;
+    }
+    if (key.startsWith("spark.")) {
+      // Spark session / SQL settings stay as full keys in spark_conf (never catalog-prefixed).
+      sparkConf.put(key, value);
+      return;
+    }
+    if (key.startsWith(SPARK_SQL_CATALOG_PREFIX)) {
+      sparkConf.put(key, value);
+      return;
+    }
+    // IRC / Iceberg catalog props from jobOptions / ircAuth (short names).
+    sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + "." + key, value);
+  }
+
+  private static void fillPlaceholdersFromSparkConf(
+      Map<String, String> jobConf, Map<String, String> sparkConf, String catalogName) {
+    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
+      String sparkKey = entry.getKey();
+      String placeholder = entry.getValue();
+      if (!jobConf.containsKey(placeholder) && sparkConf.containsKey(sparkKey)) {
+        jobConf.put(placeholder, sparkConf.get(sparkKey));
+      }
+    }
+    String catalogPrefix = SPARK_SQL_CATALOG_PREFIX + catalogName;
+    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_type", catalogPrefix + ".type");
+    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_uri", catalogPrefix + ".uri");
+    putIfAbsentFromSpark(jobConf, sparkConf, "warehouse_location", catalogPrefix + ".warehouse");
+  }
+
+  private static void putIfAbsentFromSpark(
+      Map<String, String> jobConf,
+      Map<String, String> sparkConf,
+      String placeholder,
+      String sparkKey) {
+    if (!jobConf.containsKey(placeholder) && sparkConf.containsKey(sparkKey)) {
+      jobConf.put(placeholder, sparkConf.get(sparkKey));
+    }
+  }
+
   /**
    * Ensures Spark → Gravitino sample/finish callbacks have {@code metalake} (from the policy
    * namespace) and {@code gravitino_uri} (cluster config, overridable by policy updaterOptions).
@@ -178,8 +245,6 @@ public final class MaintenanceJobConfBuilder {
     if (overlaid != null) {
       updaterOptions.putAll(overlaid);
     }
-    // Callback metalake must match the policy namespace (authz path + job scope). Policy
-    // updaterOptions must not redirect sample/finish to another metalake.
     String metalake = policy.namespace().level(0);
     updaterOptions.put("metalake", metalake);
 

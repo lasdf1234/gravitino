@@ -43,8 +43,10 @@ import org.apache.gravitino.config.ConfigEntry;
  *
  * <p>{@link #IRC_AUTH_PREFIX} is an <strong>open</strong> passthrough for Spark / Iceberg REST
  * properties (for example {@code rest.auth.type}); any non-empty suffix under the prefix is loaded
- * and overlaid onto policy {@code jobOptions}. Auth wins on duplicate keys. Cron {@code runJob}
- * packs those IRC keys into {@code spark_conf} as {@code spark.sql.catalog.<catalog>.*}.
+ * and overlaid onto policy {@code jobOptions} with suffixes unchanged (for example {@code
+ * rest.auth.type}). Cron {@code runJob} later expands those short names into {@code spark_conf}
+ * under {@code spark.sql.catalog.<catalog>.*}; Spark resource keys such as {@code
+ * spark.executor.memory} stay as Spark settings, not catalog properties.
  */
 public final class MaintenanceAuthConfigs {
 

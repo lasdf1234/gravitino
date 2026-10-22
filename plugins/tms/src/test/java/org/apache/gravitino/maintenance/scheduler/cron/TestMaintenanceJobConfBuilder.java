@@ -87,16 +87,61 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertEquals("rest", conf.get("catalog_type"));
     Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
     Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY)
-            .contains("\"rewrite_data_files\""));
-    Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
+        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"rewrite_data_files\""));
+    Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
     Assertions.assertTrue(
         conf.get("spark_conf").contains("\"spark.sql.catalog.iceberg.rest.auth.type\":\"basic\""));
     Assertions.assertNull(conf.get("rest.auth.type"));
+    Assertions.assertFalse(conf.get("spark_conf").contains("\"rest.auth.type\""));
     Assertions.assertTrue(conf.get("updater_options").contains("\"metalake\":\"ml\""));
     Assertions.assertTrue(
         conf.get("updater_options").contains("\"gravitino_uri\":\"" + GRAVITINO_URI + "\""));
+  }
+
+  @Test
+  void testSparkResourceKeysFlattenToPlaceholdersNotCatalogProps() {
+    PolicyEntity policy =
+        PolicyEntity.builder()
+            .withId(POLICY_ID)
+            .withName("c")
+            .withNamespace(NamespaceUtil.ofPolicy("ml"))
+            .withPolicyType(Policy.BuiltInType.ICEBERG_COMPACTION)
+            .withEnabled(true)
+            .withContent(
+                PolicyContents.icebergDataCompaction(
+                    IcebergDataCompactionContent.DEFAULT_MIN_DATA_FILE_MSE,
+                    IcebergDataCompactionContent.DEFAULT_MIN_DELETE_FILE_NUMBER,
+                    IcebergDataCompactionContent.DEFAULT_DATA_FILE_MSE_WEIGHT,
+                    IcebergDataCompactionContent.DEFAULT_DELETE_FILE_NUMBER_WEIGHT,
+                    IcebergDataCompactionContent.DEFAULT_MAX_PARTITION_NUM,
+                    IcebergDataCompactionContent.DEFAULT_REWRITE_STRATEGY,
+                    IcebergDataCompactionContent.DEFAULT_SORT_ORDER,
+                    null,
+                    null,
+                    null,
+                    null,
+                    Map.of(
+                        "spark.executor.memory",
+                        "7g",
+                        "spark_executor_cores",
+                        "4",
+                        "catalog_type",
+                        "rest"),
+                    Map.of()))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
+            .build();
+
+    Map<String, String> conf =
+        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+            .build(policy, "iceberg");
+
+    Assertions.assertEquals("7g", conf.get("spark_executor_memory"));
+    Assertions.assertEquals("4", conf.get("spark_executor_cores"));
+    Assertions.assertEquals("rest", conf.get("catalog_type"));
+    Assertions.assertTrue(conf.get("spark_conf").contains("\"spark.executor.memory\":\"7g\""));
+    Assertions.assertFalse(
+        conf.get("spark_conf").contains("spark.sql.catalog.iceberg.spark.executor.memory"));
   }
 
   @Test

@@ -98,7 +98,7 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * Copies {@code shared} and overlays catalog / table identifier keys for one target.
+   * Copies {@code shared} and overlays catalog / table identifier / table id keys for one target.
    *
    * @param shared jobConf
    * @param target table to submit
@@ -117,6 +117,7 @@ public final class MaintenanceJobSpecFactory {
     Map<String, String> jobConf = new LinkedHashMap<>(shared);
     jobConf.put("catalog_name", catalogName);
     jobConf.put("table_identifier", tableIdentifier);
+    jobConf.put("table_id", Long.toString(target.getTableId()));
     return jobConf;
   }
 
