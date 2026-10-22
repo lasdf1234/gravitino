@@ -57,6 +57,8 @@ class TestCommitJobSpecFactory {
     Assertions.assertEquals(
         "rewrite_data_files,expire_snapshots",
         spec.getJobConf().get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
+    Assertions.assertEquals(
+        "202,303", spec.getJobConf().get(MaintenanceJobTemplates.POLICY_IDS_KEY));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_table_id"));
     Assertions.assertFalse(spec.getJobConf().containsKey("tms_policy_id"));
     Assertions.assertNull(spec.getJobConf().get("catalog_name"));

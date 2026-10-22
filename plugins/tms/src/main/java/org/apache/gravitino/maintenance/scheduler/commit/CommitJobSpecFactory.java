@@ -50,6 +50,7 @@ final class CommitJobSpecFactory {
   private static final Set<String> CHAIN_OWNED_KEYS =
       Set.of(
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
+          MaintenanceJobTemplates.POLICY_IDS_KEY,
           "catalog_name",
           "table_identifier",
           "tables",
@@ -71,7 +72,8 @@ final class CommitJobSpecFactory {
    *
    * @param chain non-empty onCommit members in order
    * @param ref resolved Spark table ref
-   * @return spec with merged {@code jobConf} including {@code maintenance_types}
+   * @return spec with merged {@code jobConf} including {@code maintenance_types} and {@code
+   *     policy_ids}
    */
   MaintenanceJobSpec forCommit(List<CommitChainMember> chain, ResolvedTableRef ref) {
     Preconditions.checkArgument(chain != null && !chain.isEmpty(), "chain must not be empty");
@@ -98,7 +100,10 @@ final class CommitJobSpecFactory {
     }
     List<String> types =
         chain.stream().map(CommitChainMember::maintenanceType).collect(Collectors.toList());
+    List<String> policyIds =
+        chain.stream().map(m -> Long.toString(m.policy().id())).collect(Collectors.toList());
     jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, String.join(",", types));
+    jobConf.put(MaintenanceJobTemplates.POLICY_IDS_KEY, String.join(",", policyIds));
     // Per-table keys (catalog_name / tables JSON) are applied at pick via jobConfForTable.
     jobConf.remove("catalog_name");
     jobConf.remove("table_identifier");
