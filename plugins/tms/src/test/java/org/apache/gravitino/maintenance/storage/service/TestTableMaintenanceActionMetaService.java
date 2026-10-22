@@ -19,6 +19,7 @@
 
 package org.apache.gravitino.maintenance.storage.service;
 
+import java.util.List;
 import java.util.Optional;
 import org.apache.gravitino.maintenance.TableMaintenanceConfig;
 import org.apache.gravitino.storage.relational.TestJDBCBackend;
@@ -285,5 +286,37 @@ class TestTableMaintenanceActionMetaService extends TestJDBCBackend {
 
     Assertions.assertTrue(actions.deleteUnboundClaim(reclaimed.get()));
     Assertions.assertNull(actions.getById(reclaimed.get().id()));
+  }
+
+  @TestTemplate
+  void testTryAcquireBatchClaimsAllPoliciesOrNone() {
+    TableMaintenanceActionMetaService actions = TableMaintenanceActionMetaService.getInstance();
+    long tableId = 31L;
+    long policyA = 41L;
+    long policyB = 42L;
+    long timeoutMs = 60_000L;
+
+    Optional<List<OccupancyClaim>> batch =
+        actions.tryAcquireInFlightBatch(tableId, List.of(policyA, policyB), timeoutMs);
+    Assertions.assertTrue(batch.isPresent());
+    Assertions.assertEquals(2, batch.get().size());
+    Assertions.assertEquals(0L, actions.getById(batch.get().get(0).id()).finishedAt());
+    Assertions.assertEquals(0L, actions.getById(batch.get().get(1).id()).finishedAt());
+
+    // Partial hold blocks the whole chain.
+    Assertions.assertTrue(
+        actions.tryAcquireInFlightBatch(tableId, List.of(policyA, policyB), timeoutMs).isEmpty());
+    Assertions.assertTrue(actions.tryAcquireInFlight(tableId, policyA, timeoutMs).isEmpty());
+
+    long jobId = 3100L;
+    actions.bindJobIds(batch.get(), jobId);
+    Assertions.assertEquals(jobId, actions.getById(batch.get().get(0).id()).jobId());
+    Assertions.assertEquals(jobId, actions.getById(batch.get().get(1).id()).jobId());
+
+    long finishedAt = System.currentTimeMillis();
+    actions.markFinished(jobId, tableId, policyA, 500L, finishedAt);
+    actions.markFinished(jobId, tableId, policyB, 501L, finishedAt + 1);
+    Assertions.assertTrue(actions.getById(batch.get().get(0).id()).finishedAt() > 0);
+    Assertions.assertTrue(actions.getById(batch.get().get(1).id()).finishedAt() > 0);
   }
 }

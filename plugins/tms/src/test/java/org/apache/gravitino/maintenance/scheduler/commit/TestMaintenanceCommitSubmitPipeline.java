@@ -18,6 +18,7 @@
  */
 package org.apache.gravitino.maintenance.scheduler.commit;
 
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -67,7 +68,7 @@ class TestMaintenanceCommitSubmitPipeline {
     TableMaintenanceActionMetaService actions = mock(TableMaintenanceActionMetaService.class);
     pipeline(allowAllGate(), actions, submitter).submit(Long.toString(TABLE_ID), null);
     verify(submitter, never()).runJob(anyString(), anyString(), anyMap());
-    verify(actions, never()).tryAcquireInFlight(anyLong(), anyLong(), anyLong());
+    verify(actions, never()).tryAcquireInFlightBatch(anyLong(), anyList(), anyLong());
   }
 
   @Test
@@ -75,18 +76,19 @@ class TestMaintenanceCommitSubmitPipeline {
     MaintenanceJobSubmitter submitter = mock(MaintenanceJobSubmitter.class);
     TableMaintenanceActionMetaService actions = mock(TableMaintenanceActionMetaService.class);
     pipeline(inFlightGate(POLICY_ID), actions, submitter).submit(Long.toString(TABLE_ID), spec());
-    verify(actions, never()).tryAcquireInFlight(anyLong(), anyLong(), anyLong());
+    verify(actions, never()).tryAcquireInFlightBatch(anyLong(), anyList(), anyLong());
     verify(submitter, never()).runJob(anyString(), anyString(), anyMap());
   }
 
   @Test
-  void testSubmitClaimsFirstPolicyAndUsesSpecJobConf() {
+  void testSubmitClaimsEveryChainPolicyAndUsesSpecJobConf() {
     MaintenanceJobSubmitter submitter = mock(MaintenanceJobSubmitter.class);
     when(submitter.runJob(anyString(), anyString(), anyMap())).thenReturn(999L);
     TableMaintenanceActionMetaService actions = mock(TableMaintenanceActionMetaService.class);
-    OccupancyClaim claim = new OccupancyClaim(1L, 2L);
-    when(actions.tryAcquireInFlight(TABLE_ID, POLICY_ID, CLAIM_TIMEOUT_MS))
-        .thenReturn(Optional.of(claim));
+    List<OccupancyClaim> claims = List.of(new OccupancyClaim(1L, 2L), new OccupancyClaim(3L, 4L));
+    when(actions.tryAcquireInFlightBatch(
+            eq(TABLE_ID), eq(List.of(POLICY_ID, EXPIRE_POLICY_ID)), eq(CLAIM_TIMEOUT_MS)))
+        .thenReturn(Optional.of(claims));
 
     Map<String, String> jobConf = new LinkedHashMap<>();
     jobConf.put(
@@ -110,7 +112,8 @@ class TestMaintenanceCommitSubmitPipeline {
             eq("ml"),
             eq(MaintenanceJobTemplates.TMS_ICEBERG_MAINTENANCE_TEMPLATE),
             confCaptor.capture());
-    verify(actions).bindJobId(claim, 999L);
+    verify(actions).bindJobIds(claims, 999L);
+    verify(actions, never()).bindJobId(org.mockito.ArgumentMatchers.any(), anyLong());
 
     Map<String, String> conf = confCaptor.getValue();
     Assertions.assertEquals(
