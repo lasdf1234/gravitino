@@ -70,8 +70,10 @@ class TestMaintenanceJobSpecFactory {
     Map<String, String> perTable =
         MaintenanceJobSpecFactory.jobConfForTable(spec.getJobConf(), first);
     Assertions.assertEquals("iceberg", perTable.get("catalog_name"));
-    Assertions.assertEquals("db.t1", perTable.get("table_identifier"));
-    Assertions.assertEquals("10", perTable.get("table_id"));
+    Assertions.assertNull(perTable.get("table_identifier"));
+    Assertions.assertNull(perTable.get("table_id"));
+    Assertions.assertTrue(perTable.get("tables").contains("\"table_id\":10"));
+    Assertions.assertTrue(perTable.get("tables").contains("\"table_identifier\":\"db.t1\""));
     Assertions.assertFalse(perTable.containsKey("tms_table_id"));
   }
 

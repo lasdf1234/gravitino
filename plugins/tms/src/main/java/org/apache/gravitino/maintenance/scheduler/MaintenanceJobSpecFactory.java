@@ -18,6 +18,7 @@
  */
 package org.apache.gravitino.maintenance.scheduler;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.gravitino.Config;
+import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobConfBuilder;
@@ -98,7 +100,10 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * Copies {@code shared} and overlays catalog / table identifier / table id keys for one target.
+   * Copies {@code shared} and overlays catalog plus a one-element {@code tables} JSON for submit.
+   *
+   * <p>Entity {@code table_id} stays inside {@code tables} (system-filled). It is not a top-level
+   * template placeholder — users submitting the built-in template do not know entity ids.
    *
    * @param shared jobConf
    * @param target table to submit
@@ -116,9 +121,32 @@ public final class MaintenanceJobSpecFactory {
         target.getTableId());
     Map<String, String> jobConf = new LinkedHashMap<>(shared);
     jobConf.put("catalog_name", catalogName);
-    jobConf.put("table_identifier", tableIdentifier);
-    jobConf.put("table_id", Long.toString(target.getTableId()));
+    jobConf.put("tables", toTablesJson(List.of(target)));
+    jobConf.remove("table_identifier");
+    jobConf.remove("table_id");
     return jobConf;
+  }
+
+  private static String toTablesJson(List<TableTarget> tables) {
+    List<Map<String, Object>> payload = new ArrayList<>(tables.size());
+    for (TableTarget target : tables) {
+      String catalogName = target.catalogName();
+      String tableIdentifier = target.sparkTableIdentifier();
+      Preconditions.checkArgument(
+          catalogName != null && tableIdentifier != null,
+          "table target %s is missing catalog/table identifier levels",
+          target.getTableId());
+      Map<String, Object> entry = new LinkedHashMap<>();
+      entry.put("table_id", target.getTableId());
+      entry.put("catalog_name", catalogName);
+      entry.put("table_identifier", tableIdentifier);
+      payload.add(entry);
+    }
+    try {
+      return JsonUtils.anyFieldMapper().writeValueAsString(payload);
+    } catch (JsonProcessingException e) {
+      throw new IllegalStateException("Failed to serialize tables for runJob", e);
+    }
   }
 
   /**
