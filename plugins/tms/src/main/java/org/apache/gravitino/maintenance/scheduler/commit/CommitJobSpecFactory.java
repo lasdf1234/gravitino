@@ -105,8 +105,8 @@ final class CommitJobSpecFactory {
 
   /**
    * Max-merge resource keys; fill missing non-owned keys from a later chain member (procedure
-   * params). First-policy auth / {@code spark_conf} / {@code updater_options} win. Policy rules by
-   * type are unioned.
+   * params). First-policy auth / {@code spark_conf} / {@code updater_options} win. {@code rules} are
+   * unioned by maintenance type.
    */
   static void mergeLaterMemberJobConf(Map<String, String> into, Map<String, String> from) {
     MaintenanceJobSpecFactory.mergeResourceKeys(into, from);
