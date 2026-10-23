@@ -51,7 +51,12 @@ class TestCommitAuthConsistency {
         Assertions.assertThrows(
             IllegalArgumentException.class,
             () -> CommitAuthConsistency.requireConsistent(List.of(a, b), config));
-    Assertions.assertTrue(ex.getMessage().contains("gravitinoAuth mismatch"));
+    String message = ex.getMessage();
+    Assertions.assertTrue(message.contains("gravitinoAuth mismatch"));
+    Assertions.assertTrue(message.contains("policy 1 vs policy 2"));
+    Assertions.assertTrue(message.contains("differing keys="));
+    Assertions.assertTrue(message.contains("auth_type"));
+    Assertions.assertTrue(message.contains("username"));
   }
 
   @Test
@@ -63,7 +68,37 @@ class TestCommitAuthConsistency {
         Assertions.assertThrows(
             IllegalArgumentException.class,
             () -> CommitAuthConsistency.requireConsistent(List.of(a, b), config));
-    Assertions.assertTrue(ex.getMessage().contains("ircAuth mismatch"));
+    String message = ex.getMessage();
+    Assertions.assertTrue(message.contains("ircAuth mismatch"));
+    Assertions.assertTrue(message.contains("policy 1 vs policy 2"));
+    Assertions.assertTrue(message.contains("differing keys=[rest.auth.type]"));
+  }
+
+  @Test
+  void testMismatchMessageOmitsAuthValues() {
+    Config config = new Config(false) {};
+    String secretA = "SuperSecretPassword-A";
+    String secretB = "SuperSecretPassword-B";
+    CommitChainMember a =
+        member(
+            1L,
+            Map.of("rest.auth.type", "basic", "rest.auth.basic.password", secretA),
+            Map.of("auth_type", "basic", "password", secretA));
+    CommitChainMember b =
+        member(
+            2L,
+            Map.of("rest.auth.type", "basic", "rest.auth.basic.password", secretB),
+            Map.of("auth_type", "basic", "password", secretB));
+    IllegalArgumentException ex =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> CommitAuthConsistency.requireConsistent(List.of(a, b), config));
+    String message = ex.getMessage();
+    Assertions.assertFalse(message.contains(secretA), message);
+    Assertions.assertFalse(message.contains(secretB), message);
+    Assertions.assertTrue(message.contains("differing keys="), message);
+    Assertions.assertTrue(
+        message.contains("password") || message.contains("rest.auth.basic.password"), message);
   }
 
   @Test
