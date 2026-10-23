@@ -153,6 +153,24 @@ class TestTableMaintenanceActionMetaService extends TestJDBCBackend {
   }
 
   @TestTemplate
+  void testBindJobIdsIdempotentWhenAlreadyBoundToSameJob() {
+    TableMaintenanceActionMetaService actions = TableMaintenanceActionMetaService.getInstance();
+    TableMaintenanceConfig config = TableMaintenanceConfig.forTest(1, 1, 1, 500L, 1_000L, 4, 10);
+    long tableId = 37L;
+    long policyA = 48L;
+    long policyB = 49L;
+    long jobId = 5700L;
+    OccupancyClaim claimA = actions.insertInFlight(tableId, policyA, config);
+    OccupancyClaim claimB = actions.insertInFlight(tableId, policyB, config);
+    actions.bindJobId(claimA, jobId);
+    actions.bindJobId(claimB, jobId);
+    // Spark may lazy-bind before commit-chain submit-side bindJobIds.
+    actions.bindJobIds(List.of(claimA, claimB), jobId);
+    Assertions.assertEquals(jobId, actions.getById(claimA.id()).jobId());
+    Assertions.assertEquals(jobId, actions.getById(claimB.id()).jobId());
+  }
+
+  @TestTemplate
   void testBindJobIdFailsWhenBoundToDifferentJob() {
     TableMaintenanceActionMetaService actions = TableMaintenanceActionMetaService.getInstance();
     TableMaintenanceConfig config = TableMaintenanceConfig.forTest(1, 1, 1, 500L, 1_000L, 4, 10);
@@ -285,6 +303,31 @@ class TestTableMaintenanceActionMetaService extends TestJDBCBackend {
     Assertions.assertEquals(0L, actions.getById(reclaimed.get().id()).finishedAt());
 
     Assertions.assertTrue(actions.deleteUnboundClaim(reclaimed.get()));
+    Assertions.assertNull(actions.getById(reclaimed.get().id()));
+  }
+
+  @TestTemplate
+  void testDeleteClaimsFencesAgainstReclaim() throws Exception {
+    TableMaintenanceActionMetaService actions = TableMaintenanceActionMetaService.getInstance();
+    long tableId = 38L;
+    long policyId = 50L;
+    long timeoutMs = 200L;
+
+    Optional<OccupancyClaim> first = actions.tryAcquireInFlight(tableId, policyId, timeoutMs);
+    Assertions.assertTrue(first.isPresent());
+    Thread.sleep(timeoutMs + 50L);
+    Optional<OccupancyClaim> reclaimed = actions.tryAcquireInFlight(tableId, policyId, timeoutMs);
+    Assertions.assertTrue(reclaimed.isPresent());
+    Assertions.assertEquals(first.get().id(), reclaimed.get().id());
+    Assertions.assertTrue(reclaimed.get().createdAt() >= first.get().createdAt());
+
+    // Failed submit cleanup uses deleteClaims; stale created_at must not remove live claim.
+    actions.deleteClaims(List.of(first.get()));
+    Assertions.assertNotNull(actions.getById(reclaimed.get().id()));
+    Assertions.assertNull(actions.getById(reclaimed.get().id()).jobId());
+    Assertions.assertEquals(0L, actions.getById(reclaimed.get().id()).finishedAt());
+
+    actions.deleteClaims(List.of(reclaimed.get()));
     Assertions.assertNull(actions.getById(reclaimed.get().id()));
   }
 

@@ -28,6 +28,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
+import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Operation;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.TableTarget;
@@ -113,19 +114,49 @@ final class CommitJobSpecFactory {
 
   /**
    * Max-merge resource keys; fill missing non-owned keys from a later chain member (procedure
-   * params). First-policy auth / {@code spark_conf} / {@code updater_options} win. {@code rules}
-   * are unioned by maintenance type.
+   * params). First-policy auth / {@code updater_options} win. Nested {@code spark_conf} is merged
+   * by key with first-wins {@code putIfAbsent}. {@code rules} are unioned by maintenance type.
    */
   static void mergeLaterMemberJobConf(Map<String, String> into, Map<String, String> from) {
     MaintenanceJobSpecFactory.mergeResourceKeys(into, from);
     mergePolicyRulesByType(into, from);
+    mergeSparkConfByKey(into, from);
     for (Map.Entry<String, String> entry : from.entrySet()) {
       String key = entry.getKey();
       String value = entry.getValue();
-      if (key == null || value == null || CHAIN_OWNED_KEYS.contains(key)) {
+      if (key == null
+          || value == null
+          || CHAIN_OWNED_KEYS.contains(key)
+          || "spark_conf".equals(key)) {
         continue;
       }
       into.putIfAbsent(key, value);
+    }
+  }
+
+  /**
+   * Merges nested {@code spark_conf} JSON maps. Existing keys in {@code into} win; keys only in
+   * {@code from} are added.
+   */
+  static void mergeSparkConfByKey(Map<String, String> into, Map<String, String> from) {
+    String fromJson = from.get("spark_conf");
+    if (fromJson == null || fromJson.trim().isEmpty()) {
+      return;
+    }
+    Map<String, String> merged =
+        new LinkedHashMap<>(
+            IcebergSparkConfigUtils.parseFlatJsonMap(into.get("spark_conf"), "spark_conf"));
+    Map<String, String> later = IcebergSparkConfigUtils.parseFlatJsonMap(fromJson, "spark_conf");
+    for (Map.Entry<String, String> entry : later.entrySet()) {
+      merged.putIfAbsent(entry.getKey(), entry.getValue());
+    }
+    if (merged.isEmpty()) {
+      return;
+    }
+    try {
+      into.put("spark_conf", JsonUtils.anyFieldMapper().writeValueAsString(merged));
+    } catch (JsonProcessingException e) {
+      throw new IllegalStateException("Failed to merge spark_conf for commit chain", e);
     }
   }
 

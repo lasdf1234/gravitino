@@ -305,6 +305,9 @@ public class TableMaintenanceActionMetaService {
    * Binds the same Gravitino job run id to every claim from {@link #tryAcquireInFlightBatch} in one
    * transaction (commit-chain submit).
    *
+   * <p>Idempotent per claim when the row is already bound to {@code jobId} and still in-flight
+   * (Spark may lazy-bind before submit-side bind), matching {@link #bindJobId}.
+   *
    * @param claims claims returned by batch acquire
    * @param jobId Gravitino job run id
    */
@@ -319,8 +322,15 @@ public class TableMaintenanceActionMetaService {
           for (OccupancyClaim claim : claims) {
             Preconditions.checkNotNull(claim, "claim must not be null");
             int updated = mapper.bindJobId(claim.id(), jobId, claim.createdAt());
+            if (updated == 1) {
+              continue;
+            }
+            TableMaintenanceActionPO current = mapper.selectById(claim.id());
             Preconditions.checkState(
-                updated == 1,
+                current != null
+                    && Objects.equals(current.jobId(), jobId)
+                    && current.finishedAt() != null
+                    && current.finishedAt() == 0L,
                 "expected to bind job_id on claim id=%s, updated=%s",
                 claim.id(),
                 updated);
@@ -329,7 +339,8 @@ public class TableMaintenanceActionMetaService {
   }
 
   /**
-   * Deletes unbound claims after a failed submit. Best-effort for each id.
+   * Releases unbound claims after a failed submit. Each delete is fenced on {@code (id,
+   * created_at)} so a concurrent reclaim's live claim is not removed.
    *
    * @param claims claims to release
    */
@@ -341,7 +352,7 @@ public class TableMaintenanceActionMetaService {
       if (claim == null) {
         continue;
       }
-      deleteById(claim.id());
+      deleteUnboundClaim(claim);
     }
   }
 
