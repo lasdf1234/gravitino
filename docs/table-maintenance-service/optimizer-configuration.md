@@ -65,8 +65,8 @@ type is still in-flight it deletes the row and stops; otherwise it claims a soft
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
 gravitino.auxService.names = iceberg-rest
-gravitino.eventListener.names = tms-commit-job
-gravitino.eventListener.tms-commit-job.class = org.apache.gravitino.maintenance.listener.IcebergUpdateTableEventListener
+gravitino.eventListener.names = post-commit-maintenance-listener
+gravitino.eventListener.post-commit-maintenance-listener.class = org.apache.gravitino.maintenance.listener.IcebergUpdateTableEventListener
 ```
 
 Without the listener, the crontab (`timeTrigger` → expand → cron-job) path still works; commit-triggered
