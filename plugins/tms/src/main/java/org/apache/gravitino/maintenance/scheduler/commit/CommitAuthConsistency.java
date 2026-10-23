@@ -19,12 +19,14 @@
 package org.apache.gravitino.maintenance.scheduler.commit;
 
 import com.google.common.base.Preconditions;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
@@ -81,17 +83,43 @@ final class CommitAuthConsistency {
       }
       if (!expectedGravitino.equals(gravitinoAuth)) {
         throw new IllegalArgumentException(
-            String.format(
-                "commit-chain gravitinoAuth mismatch: policy %s has %s but policy %s has %s",
-                expectedPolicyId, expectedGravitino, policy.id(), gravitinoAuth));
+            mismatchMessage(
+                "gravitinoAuth", expectedPolicyId, policy.id(), expectedGravitino, gravitinoAuth));
       }
       if (!Objects.equals(expectedIrc, ircAuth)) {
         throw new IllegalArgumentException(
-            String.format(
-                "commit-chain ircAuth mismatch: policy %s has %s but policy %s has %s",
-                expectedPolicyId, expectedIrc, policy.id(), ircAuth));
+            mismatchMessage("ircAuth", expectedPolicyId, policy.id(), expectedIrc, ircAuth));
       }
     }
+  }
+
+  /**
+   * Builds a mismatch message with policy ids and differing key names only — never auth values
+   * (passwords / tokens must not land in server logs).
+   */
+  static String mismatchMessage(
+      String bagName,
+      long expectedPolicyId,
+      long actualPolicyId,
+      Map<String, String> expected,
+      Map<String, String> actual) {
+    return String.format(
+        "commit-chain %s mismatch: policy %s vs policy %s; differing keys=%s",
+        bagName, expectedPolicyId, actualPolicyId, differingKeys(expected, actual));
+  }
+
+  /** Key names that are missing, extra, or present with unequal values. */
+  static List<String> differingKeys(Map<String, String> left, Map<String, String> right) {
+    Set<String> names = new TreeSet<>();
+    names.addAll(left.keySet());
+    names.addAll(right.keySet());
+    List<String> differing = new ArrayList<>();
+    for (String key : names) {
+      if (!Objects.equals(left.get(key), right.get(key))) {
+        differing.add(key);
+      }
+    }
+    return differing;
   }
 
   static Map<String, String> projectGravitinoAuth(@Nullable Map<String, String> updaterOptions) {
