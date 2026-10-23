@@ -27,7 +27,13 @@ import org.apache.gravitino.Config;
 import org.apache.gravitino.Configs;
 import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.maintenance.TableMaintenanceConfig;
+import org.apache.gravitino.maintenance.policy.PolicyExpandLifecycleHook;
+import org.apache.gravitino.maintenance.policy.PolicyExpandReconciler;
+import org.apache.gravitino.maintenance.policy.PolicyExpandRegistrar;
 import org.apache.gravitino.maintenance.scheduler.TableMaintenanceSchedulerPools;
+import org.apache.gravitino.maintenance.web.rest.TableMaintenanceActionOperations;
+import org.apache.gravitino.maintenance.web.rest.TableMaintenanceBinder;
+import org.apache.gravitino.policy.hook.PolicyLifecycleHooks;
 import org.apache.gravitino.storage.relational.session.SqlSessionFactoryHelper;
 import org.glassfish.jersey.server.monitoring.ApplicationEvent;
 import org.glassfish.jersey.server.monitoring.ApplicationEventListener;
@@ -37,15 +43,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Jersey feature that starts table maintenance db-scheduler pools when the extension package is
- * enabled (§7.1).
+ * Jersey feature that starts table maintenance db-scheduler pools and registers Spark action
+ * callback REST when the extension package is enabled (§7.1 / §5.2.2).
  *
- * <p>TMS does not register public REST resources in this change; the feature only owns server
- * lifecycle for in-process scheduling. Pools stop on Jersey {@code DESTROY_FINISHED}, which runs
- * during Jetty shutdown before {@code GravitinoEnv} closes the entity-store {@code DataSource}.
+ * <p>Registers {@link TableMaintenanceActionOperations} for sample/finish callbacks. Cron and
+ * commit pools poll. The expand pool stays stopped, and a policy lifecycle hook writes the matching
+ * {@code policy-expand} row on the same transaction as create, alter, enable, disable, and delete.
+ * On start, existing maintenance policies are reconciled into expand rows so upgrade and
+ * first-enable paths do not wait for an edit. Pools stop on Jersey {@code DESTROY_FINISHED}, which
+ * runs during Jetty shutdown before {@code GravitinoEnv} closes the entity-store {@code
+ * DataSource}.
  *
- * <p>After {@link #stopSchedulers()}, a later {@link #configure} may start pools again and
- * re-register the destroy listener (needed for tests / embedded restarts in the same JVM).
+ * <p>After {@link #stopSchedulers()}, a later {@link #configure} may start pools again, re-register
+ * the destroy listener, and reconcile again (needed for tests / embedded restarts in the same JVM).
  */
 @Provider
 public class TableMaintenanceRESTFeature implements Feature {
@@ -56,6 +66,9 @@ public class TableMaintenanceRESTFeature implements Feature {
   public static final String EXTENSION_PACKAGE = TableMaintenanceRESTFeature.class.getPackageName();
 
   private static final AtomicReference<TableMaintenanceSchedulerPools> SCHEDULER_POOLS =
+      new AtomicReference<>();
+
+  private static final AtomicReference<PolicyExpandLifecycleHook> LIFECYCLE_HOOK =
       new AtomicReference<>();
 
   @Override
@@ -80,19 +93,58 @@ public class TableMaintenanceRESTFeature implements Feature {
       return true;
     }
 
+    try {
+      registerLifecycleHook();
+      reconcileExistingPolicies();
+    } catch (RuntimeException e) {
+      unregisterLifecycleHook();
+      SCHEDULER_POOLS.set(null);
+      pools.stop();
+      throw e;
+    }
+
     // Register only after a successful CAS so a later configure-after-stop can attach a listener
     // again on the new FeatureContext (listener is scoped to the Jersey Application).
     context.register(new SchedulerShutdownListener());
+    context.register(TableMaintenanceBinder.class);
+    context.register(TableMaintenanceActionOperations.class);
     LOG.info("Table maintenance scheduler pools are running");
     return true;
   }
 
-  /** Stops scheduler pools. Invoked from Jersey destroy and tests. */
+  /**
+   * Stops scheduler pools. Invoked from Jersey destroy and tests.
+   *
+   * <p>Unregisters the lifecycle hook first so later policy writes skip expand sync. In-flight
+   * transactions that already passed the hook may still finish. A later {@link #configure}
+   * reconciles expand rows again from stored policies.
+   */
   public static void stopSchedulers() {
+    unregisterLifecycleHook();
     TableMaintenanceSchedulerPools pools = SCHEDULER_POOLS.getAndSet(null);
     if (pools != null) {
       pools.stop();
       LOG.info("Table maintenance scheduler pools stopped");
+    }
+  }
+
+  private static void registerLifecycleHook() {
+    PolicyExpandLifecycleHook hook =
+        new PolicyExpandLifecycleHook(PolicyExpandRegistrar.joiningCurrentTransaction());
+    PolicyLifecycleHooks.register(hook);
+    LIFECYCLE_HOOK.set(hook);
+  }
+
+  private static void reconcileExistingPolicies() {
+    PolicyExpandRegistrar registrar = PolicyExpandRegistrar.joiningCurrentTransaction();
+    PolicyExpandLifecycleHook aligner = new PolicyExpandLifecycleHook(registrar);
+    new PolicyExpandReconciler(aligner, registrar).reconcileAll();
+  }
+
+  private static void unregisterLifecycleHook() {
+    PolicyExpandLifecycleHook hook = LIFECYCLE_HOOK.getAndSet(null);
+    if (hook != null) {
+      PolicyLifecycleHooks.unregister(hook);
     }
   }
 
