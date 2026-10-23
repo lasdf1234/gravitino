@@ -19,9 +19,12 @@
 package org.apache.gravitino.maintenance.scheduler.commit;
 
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
+import org.apache.gravitino.json.JsonUtils;
+import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec;
 import org.apache.gravitino.maintenance.scheduler.cron.MaintenanceJobTemplates;
@@ -75,6 +78,40 @@ class TestCommitJobSpecFactory {
     Assertions.assertTrue(rulesByType.contains("\"rewrite_data_files\""));
     Assertions.assertTrue(rulesByType.contains("\"expire_snapshots\""));
     Assertions.assertTrue(rulesByType.contains("trigger-expr"));
+  }
+
+  @Test
+  void testMergeLaterMemberJobConfMergesSparkConfByKey() {
+    Map<String, String> into = new HashMap<>();
+    into.put("spark_conf", "{\"spark.executor.memory\":\"4g\",\"shared\":\"first\"}");
+    Map<String, String> from =
+        Map.of(
+            "spark_conf",
+            "{\"spark.executor.cores\":\"2\",\"shared\":\"later\",\"spark.driver.memory\":\"2g\"}");
+
+    CommitJobSpecFactory.mergeLaterMemberJobConf(into, from);
+
+    Map<String, String> merged =
+        IcebergSparkConfigUtils.parseFlatJsonMap(into.get("spark_conf"), "spark_conf");
+    Assertions.assertEquals("4g", merged.get("spark.executor.memory"));
+    Assertions.assertEquals("first", merged.get("shared"));
+    Assertions.assertEquals("2", merged.get("spark.executor.cores"));
+    Assertions.assertEquals("2g", merged.get("spark.driver.memory"));
+  }
+
+  @Test
+  void testMergeLaterMemberJobConfAddsSparkConfWhenMissing() throws Exception {
+    Map<String, String> into = new HashMap<>();
+    into.put("older_than", "7d");
+    Map<String, String> from =
+        Map.of("spark_conf", JsonUtils.anyFieldMapper().writeValueAsString(Map.of("k", "v")));
+
+    CommitJobSpecFactory.mergeLaterMemberJobConf(into, from);
+
+    Assertions.assertEquals("7d", into.get("older_than"));
+    Assertions.assertEquals(
+        "v",
+        IcebergSparkConfigUtils.parseFlatJsonMap(into.get("spark_conf"), "spark_conf").get("k"));
   }
 
   private static Config configWithUri() {
