@@ -59,8 +59,8 @@ keep the first snapshot). **At enqueue**, TMS collects nearest policies with
 still inside `minIntervalMs`, **fails closed when effective `gravitinoAuth` / `ircAuth` bags
 disagree across the chain**, and writes an enqueue-time job snapshot (`task_data`: tables,
 operations, merged `jobConf`). The commit pool **consumes that snapshot**: if any snapshot
-type is still in-flight it deletes the row and stops; otherwise it claims the first type and
-submits one chained `builtin-tms-iceberg-maintenance` Spark job.
+type is still in-flight it deletes the row and stops; otherwise it claims a soft slot for
+**every** chain policy and submits one chained `builtin-iceberg-maintenance-task` Spark job.
 
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
