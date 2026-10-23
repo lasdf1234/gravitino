@@ -294,7 +294,7 @@ gates**, **`minIntervalMs`**, and Iceberg **before/after snapshot ids**. That is
 | `id`                 | `BIGINT UNSIGNED` PK       | Auto increment                                                                             |
 | `job_id`             | `BIGINT UNSIGNED NULL`     | Set at `runJob`; maps to `job_run_meta.job_run_id`; **non-unique** — one Spark job may bind multiple tables; null if released before submit |
 | `table_id`           | `BIGINT UNSIGNED NOT NULL` | `table_meta` PK                                                                            |
-| `policy_id`          | `BIGINT UNSIGNED NOT NULL` | Cron: that Job's policy. Commit chain: first type that ran; full chain in runtime template |
+| `policy_id`          | `BIGINT UNSIGNED NOT NULL` | Soft slot per policy. Cron: that Job's policy. Commit chain: one row per chain member (same `job_id`) |
 | `before_snapshot_id` | `BIGINT NULL`              | Set inside the Spark Job when S0 is sampled                                                |
 | `after_snapshot_id`  | `BIGINT NULL`              | Iceberg snapshot after job terminal; null while pending                                    |
 | `finished_at`        | `BIGINT UNSIGNED NULL`     | Epoch millis; **null = in-flight**                                                         |
@@ -424,7 +424,7 @@ When a commit-job is due (commit pool) — keep the callback short; Spark runs e
 flowchart TD
   A[Read enqueue-time snapshot from task_data] --> B{Any snapshot type in-flight?}
   B -->|yes| Z[Delete commit-job; stop]
-  B -->|no| C[Insert table_maintenance_job for first type]
+  B -->|no| C[Claim soft slots for every chain policy]
   C --> D[runJob from snapshot jobConf / chain]
   D --> E[Delete commit-job]
 ```
@@ -600,8 +600,9 @@ Implementation checklist:
 - [ ] Insert `table_maintenance_job` then `runJob`; sample / recommend / drift handling run
       **inside** the Spark Job; then DELETE the scheduled row.
 - [ ] Validation reads metrics per type in the run; purge unreferenced history by TTL/N.
-- [ ] Commit path: one chained Job; `policy_id` = first type; full chain in runtime template;
-      orphan crontab-only; coalesce on `{table_id}`; Spark `jobOptions` merge uses max.
+- [ ] Commit path: one chained Job; soft slot per chain policy (same `job_id`); full chain in
+      `maintenance_types` / `policy_ids`; orphan crontab-only; coalesce on `{table_id}`; Spark
+      `jobOptions` merge uses max.
 - [ ] Client auth from `gravitino.conf` only; reject credential-shaped keys in policy
       `jobOptions`.
 - [ ] Authorization on ⇒ grants to the token identity; no auto user bootstrap.
