@@ -199,7 +199,13 @@ public final class MaintenanceSparkSubmitPipeline {
 
   private void releaseClaimQuietly(OccupancyClaim claim) {
     try {
-      actionMetaService.deleteById(claim.id());
+      // Fence on (id, created_at) + unbound so a concurrent reclaim's live claim is not deleted.
+      if (!actionMetaService.deleteUnboundClaim(claim)) {
+        LOG.debug(
+            "Occupancy claim {} created_at={} was not released (reclaimed or already bound)",
+            claim.id(),
+            claim.createdAt());
+      }
     } catch (RuntimeException releaseError) {
       LOG.warn(
           "Failed to release occupancy claim {} after submit failure", claim.id(), releaseError);

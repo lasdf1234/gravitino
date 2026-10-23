@@ -126,7 +126,7 @@ class TestMaintenanceSparkSubmitPipeline {
     pipeline(mockGate(false), actions, submitter).submit(INSTANCE, spec());
 
     verify(actions).bindJobId(claim, 999L);
-    verify(actions, never()).deleteById(anyLong());
+    verify(actions, never()).deleteUnboundClaim(any());
   }
 
   @Test
@@ -138,11 +138,12 @@ class TestMaintenanceSparkSubmitPipeline {
     OccupancyClaim claim = new OccupancyClaim(8L, 2_000L);
     when(actions.tryAcquireInFlight(TABLE_ID, POLICY_ID, CLAIM_TIMEOUT_MS))
         .thenReturn(Optional.of(claim));
+    when(actions.deleteUnboundClaim(claim)).thenReturn(true);
 
     Assertions.assertDoesNotThrow(
         () -> pipeline(mockGate(false), actions, submitter).submit(INSTANCE, spec()));
 
-    verify(actions).deleteById(8L);
+    verify(actions).deleteUnboundClaim(claim);
     verify(actions, never()).bindJobId(any(), anyLong());
     verify(submitter, never()).cancelJob(anyString(), anyLong());
   }
@@ -158,12 +159,35 @@ class TestMaintenanceSparkSubmitPipeline {
     when(actions.tryAcquireInFlight(TABLE_ID, POLICY_ID, CLAIM_TIMEOUT_MS))
         .thenReturn(Optional.of(claim));
     doThrow(new RuntimeException("bind failed")).when(actions).bindJobId(claim, 777L);
+    when(actions.deleteUnboundClaim(claim)).thenReturn(true);
 
     Assertions.assertDoesNotThrow(
         () -> pipeline(mockGate(false), actions, submitter).submit(INSTANCE, spec()));
 
     verify(submitter).cancelJob("metalake", 777L);
-    verify(actions).deleteById(9L);
+    verify(actions).deleteUnboundClaim(claim);
+  }
+
+  @Test
+  void testBindFailureSkipsReleaseWhenClaimAlreadyReclaimed() {
+    MaintenanceJobSubmitter submitter = mock(MaintenanceJobSubmitter.class);
+    when(submitter.runJob(
+            eq("metalake"), eq(MaintenanceJobTemplates.TMS_ICEBERG_MAINTENANCE_TEMPLATE), anyMap()))
+        .thenReturn(778L);
+    TableMaintenanceActionMetaService actions = mock(TableMaintenanceActionMetaService.class);
+    OccupancyClaim staleClaim = new OccupancyClaim(10L, 4_000L);
+    when(actions.tryAcquireInFlight(TABLE_ID, POLICY_ID, CLAIM_TIMEOUT_MS))
+        .thenReturn(Optional.of(staleClaim));
+    doThrow(new RuntimeException("bind lost lease")).when(actions).bindJobId(staleClaim, 778L);
+    // Concurrent reclaim already moved created_at — fenced delete matches zero rows.
+    when(actions.deleteUnboundClaim(staleClaim)).thenReturn(false);
+
+    Assertions.assertDoesNotThrow(
+        () -> pipeline(mockGate(false), actions, submitter).submit(INSTANCE, spec()));
+
+    verify(submitter).cancelJob("metalake", 778L);
+    verify(actions).deleteUnboundClaim(staleClaim);
+    verify(actions, never()).deleteById(anyLong());
   }
 
   @Test
