@@ -473,14 +473,14 @@ where needed, mutate tables, and run Jobs.
 | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `gravitino.server.rest.extensionPackages` | Include TMS Feature package (e.g. `org.apache.gravitino.maintenance.web.rest.feature`)     |
 | `gravitino.auxService.names`              | Include `iceberg-rest` when using IRC (same JVM)                                           |
-| `gravitino.eventListener.names`           | Include the commit-job listener name (example below uses `commit-job`)             |
+| `gravitino.eventListener.names`           | Include the post-commit maintenance listener name (example below)                          |
 | `gravitino.eventListener.{name}.class`    | FQCN of the TMS `EventListenerPlugin` that upserts commit-job on `IcebergUpdateTableEvent` |
 
 ```properties
 gravitino.server.rest.extensionPackages = org.apache.gravitino.maintenance.web.rest.feature
 gravitino.auxService.names = iceberg-rest
-gravitino.eventListener.names = commit-job
-gravitino.eventListener.commit-job.class = org.apache.gravitino.maintenance.listener.IcebergUpdateTableEventListener
+gravitino.eventListener.names = post-commit-maintenance-listener
+gravitino.eventListener.post-commit-maintenance-listener.class = org.apache.gravitino.maintenance.listener.IcebergUpdateTableEventListener
 gravitino.maintenance.scheduler.expandThreads = 4
 gravitino.maintenance.scheduler.cronThreads = 8
 gravitino.maintenance.scheduler.commitThreads = 4
