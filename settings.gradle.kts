@@ -133,8 +133,9 @@ include(":lineage")
 include(":mcp-server")
 include(":plugins:idp-basic")
 include(":plugins:k8s-job-executor")
-include(":plugins:tms")
+include(":plugins:maintenance")
 include(
+  ":maintenance:maintenance-common",
   ":maintenance:optimizer-api",
   ":maintenance:updaters",
   ":maintenance:optimizer",
