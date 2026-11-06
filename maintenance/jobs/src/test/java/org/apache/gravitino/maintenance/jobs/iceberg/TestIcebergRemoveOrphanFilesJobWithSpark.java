@@ -96,6 +96,30 @@ public class TestIcebergRemoveOrphanFilesJobWithSpark {
     assertEquals(0, IcebergRemoveOrphanFilesJob.execute(spark, args));
   }
 
+  /** Verifies TMS executeWithMetrics measures bytes; CLI execute does not. */
+  @Test
+  public void testBytesReclaimedMeasuredBeforeDelete() throws Exception {
+    spark.sql("CREATE TABLE test_catalog.db.bytes (id INT) USING iceberg");
+    Path root = tempDir.resolve("db/bytes");
+    byte[] payload = new byte[] {1, 2, 3, 4, 5, 6, 7};
+    Path old = Files.write(root.resolve("old-orphan.bin"), payload);
+    Files.setLastModifiedTime(old, FileTime.from(Instant.now().minus(5, ChronoUnit.DAYS)));
+    Map<String, String> options = args("bytes");
+    options.put("dry-run", "true");
+    assertEquals(1, IcebergRemoveOrphanFilesJob.execute(spark, options));
+    IcebergRemoveOrphanFilesJob.OrphanCleanupResult dry =
+        IcebergRemoveOrphanFilesJob.executeWithMetrics(spark, options);
+    assertEquals(1, dry.filesRemoved());
+    assertEquals(payload.length, dry.bytesReclaimed());
+    assertTrue(Files.exists(old));
+    options.put("dry-run", "false");
+    IcebergRemoveOrphanFilesJob.OrphanCleanupResult deleted =
+        IcebergRemoveOrphanFilesJob.executeWithMetrics(spark, options);
+    assertEquals(1, deleted.filesRemoved());
+    assertEquals(payload.length, deleted.bytesReclaimed());
+    assertFalse(Files.exists(old));
+  }
+
   /** Verifies blank locations default to the table root without CLI argument parsing. */
   @Test
   public void testBlankLocationDefaultsToTableRoot() throws Exception {

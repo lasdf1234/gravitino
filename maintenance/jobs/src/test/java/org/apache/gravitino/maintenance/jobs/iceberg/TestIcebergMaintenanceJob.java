@@ -28,7 +28,7 @@ import org.apache.gravitino.job.SparkJobTemplate;
 import org.apache.gravitino.maintenance.jobs.iceberg.IcebergMaintenanceJob.MaintenanceType;
 import org.junit.jupiter.api.Test;
 
-/** Unit tests for {@link IcebergMaintenanceJob}. */
+/** Unit tests for {@link IcebergMaintenanceJob} orchestration. */
 public class TestIcebergMaintenanceJob {
 
   @Test
@@ -79,5 +79,13 @@ public class TestIcebergMaintenanceJob {
             new String[] {
               "--maintenance-types", "expire_snapshots", "--policy-ids", "10", "--tables", "[]"
             }));
+  }
+
+  @Test
+  public void testSnapshotDriftGateOnlyForCompactionAndManifest() {
+    assertTrue(IcebergMaintenanceJob.usesSnapshotDriftGate(MaintenanceType.REWRITE_DATA_FILES));
+    assertTrue(IcebergMaintenanceJob.usesSnapshotDriftGate(MaintenanceType.REWRITE_MANIFESTS));
+    assertFalse(IcebergMaintenanceJob.usesSnapshotDriftGate(MaintenanceType.EXPIRE_SNAPSHOTS));
+    assertFalse(IcebergMaintenanceJob.usesSnapshotDriftGate(MaintenanceType.REMOVE_ORPHAN_FILES));
   }
 }
