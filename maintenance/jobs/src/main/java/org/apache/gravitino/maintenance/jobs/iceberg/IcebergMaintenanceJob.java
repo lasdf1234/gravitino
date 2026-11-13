@@ -52,9 +52,10 @@ import org.slf4j.LoggerFactory;
  * the maintenance action.
  *
  * <p>Started only from the built-in template (cron or commit-chain). JobConf carries a {@code
- * tasks} JSON array: each element is one work item with table identity, {@code maintenance_type},
- * {@code policy_id}, {@code action_id}, procedure {@code params}, and gate {@code rules}. Cron
- * snapshot-expiry batches and commit chains share this shape.
+ * tasks} JSON array: each element is one work item with {@code table_id}, {@code maintenance_type},
+ * {@code policy_id}, {@code action_id}, {@code params} (including {@code catalog_name}/{@code
+ * table_identifier} plus procedure flags), and gate {@code rules}. Cron snapshot-expiry batches and
+ * commit chains share this shape.
  *
  * <p>{@code metricsJson} carries only metric fields (no {@code maintenanceType} / {@code
  * snapshotId}; those live on the action/policy and {@code table_snapshot_metrics.snapshot_id}).
@@ -344,12 +345,14 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       throw new IllegalArgumentException("tasks entry must not be null");
     }
     long tableId = requirePositiveLong(entry.get("table_id"), "table_id");
-    String catalogName = requireNonBlank(entry.get("catalog_name"), "catalog_name");
-    String tableIdentifier = requireNonBlank(entry.get("table_identifier"), "table_identifier");
     MaintenanceType type = MaintenanceType.fromWire(stringOrNull(entry.get("maintenance_type")));
     long policyId = requirePositiveLong(entry.get("policy_id"), "policy_id");
     long actionId = requirePositiveLong(entry.get("action_id"), "action_id");
-    Map<String, String> procedureArgs = toProcedureArgMap(asStringMap(entry.get("params")));
+    Map<String, String> params = asStringMap(entry.get("params"));
+    String catalogName = requireNonBlank(params.get("catalog_name"), "params.catalog_name");
+    String tableIdentifier =
+        requireNonBlank(params.get("table_identifier"), "params.table_identifier");
+    Map<String, String> procedureArgs = toProcedureArgMap(params);
     Map<String, Object> rules = asObjectMap(entry.get("rules"));
     return new MaintenanceTask(
         tableId, catalogName, tableIdentifier, type, policyId, actionId, procedureArgs, rules);
@@ -362,12 +365,17 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       return args;
     }
     for (Map.Entry<String, String> entry : params.entrySet()) {
-      if (entry.getKey() == null || entry.getValue() == null || entry.getValue().trim().isEmpty()) {
+      String key = entry.getKey();
+      if (key == null
+          || "catalog_name".equals(key)
+          || "table_identifier".equals(key)
+          || entry.getValue() == null
+          || entry.getValue().trim().isEmpty()) {
         continue;
       }
-      String argKey = PARAM_KEY_TO_ARG.get(entry.getKey());
+      String argKey = PARAM_KEY_TO_ARG.get(key);
       if (argKey == null) {
-        argKey = entry.getKey().replace('_', '-');
+        argKey = key.replace('_', '-');
       }
       args.put(argKey, entry.getValue());
     }

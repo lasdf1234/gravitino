@@ -76,14 +76,15 @@ class TestMaintenanceJobSpecFactory {
             new MaintenanceJobSpec(
                 List.of(spec.getTasks().get(0)), spec.getUpdaterOptions(), spec.getSparkConf()));
     Assertions.assertTrue(perTable.containsKey(MaintenanceJobTemplates.TASKS_KEY));
+    String tasksJson = perTable.get(MaintenanceJobTemplates.TASKS_KEY);
+    Assertions.assertTrue(tasksJson.contains("\"table_id\":10"));
     Assertions.assertTrue(
-        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));
-    Assertions.assertTrue(
-        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_identifier\":\"db.t1\""));
-    Assertions.assertTrue(
-        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"policy_id\":202"));
-    Assertions.assertTrue(
-        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("rewrite_data_files"));
+        tasksJson.contains(
+            "\"params\":{\"catalog_name\":\"iceberg\",\"table_identifier\":\"db.t1\""));
+    // Identity keys live only under params, not as task-level siblings of table_id.
+    Assertions.assertFalse(tasksJson.contains("\"table_id\":10,\"catalog_name\""));
+    Assertions.assertTrue(tasksJson.contains("\"policy_id\":202"));
+    Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
     Assertions.assertTrue(perTable.containsKey("updater_options"));
     Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
 

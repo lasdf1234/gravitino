@@ -82,8 +82,15 @@ public final class MaintenanceJobSpecFactory {
    * Procedure / CALL placeholders stored on a schedule {@link Task} and projected into each Spark
    * {@code tasks[]} element's {@code params} object.
    */
+  /**
+   * Keys projected into each Spark {@code tasks[].params} object. Includes table identity keys
+   * ({@code catalog_name}, {@code table_identifier}) plus Iceberg procedure placeholders — same
+   * peer layout as the standalone builtin job CLIs.
+   */
   private static final Set<String> PROCEDURE_PARAM_KEYS =
       ImmutableSet.of(
+          "catalog_name",
+          "table_identifier",
           "strategy",
           "sort_order",
           "where_clause",
@@ -305,14 +312,16 @@ public final class MaintenanceJobSpecFactory {
 
     Map<String, Object> wire = new LinkedHashMap<>();
     wire.put("table_id", task.getTableId());
-    wire.put("catalog_name", catalogName);
-    wire.put("table_identifier", tableIdentifier);
     wire.put("maintenance_type", task.getMaintenanceType());
     wire.put("policy_id", task.getPolicyId());
     if (task.getActionId() != null) {
       wire.put("action_id", task.getActionId());
     }
-    wire.put("params", extractProcedureParams(task.getParameters()));
+    Map<String, String> params = extractProcedureParams(task.getParameters());
+    // Always set identity keys explicitly so a blank/missing value cannot slip through.
+    params.put("catalog_name", catalogName);
+    params.put("table_identifier", tableIdentifier);
+    wire.put("params", params);
     wire.put("rules", extractRulesForType(task.getParameters(), task.getMaintenanceType()));
     return wire;
   }

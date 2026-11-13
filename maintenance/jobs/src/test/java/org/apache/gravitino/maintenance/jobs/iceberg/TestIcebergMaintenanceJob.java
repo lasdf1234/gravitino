@@ -65,8 +65,8 @@ public class TestIcebergMaintenanceJob {
         IcebergMaintenanceJob.run(
             new String[] {
               "--tasks",
-              "[{\"table_id\":1,\"catalog_name\":\"c\",\"table_identifier\":\"db.t\","
-                  + "\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10}]"
+              "[{\"table_id\":1,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,"
+                  + "\"action_id\":100,\"params\":{}}]"
             }));
   }
 
@@ -75,16 +75,20 @@ public class TestIcebergMaintenanceJob {
     List<IcebergMaintenanceJob.MaintenanceTask> tasks =
         IcebergMaintenanceJob.parseTasks(
             "["
-                + "{\"table_id\":1,\"catalog_name\":\"c\",\"table_identifier\":\"db.t1\","
-                + "\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,\"action_id\":100,"
-                + "\"params\":{\"older_than\":\"7d\",\"retain_last\":\"10\"},\"rules\":{}},"
-                + "{\"table_id\":2,\"catalog_name\":\"c\",\"table_identifier\":\"db.t2\","
-                + "\"maintenance_type\":\"expire_snapshots\",\"policy_id\":11,\"action_id\":101,"
-                + "\"params\":{\"older_than\":\"30d\",\"retain_last\":\"3\"},\"rules\":{}}"
+                + "{\"table_id\":1,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,"
+                + "\"action_id\":100,\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t1\","
+                + "\"older_than\":\"7d\",\"retain_last\":\"10\"},\"rules\":{}},"
+                + "{\"table_id\":2,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":11,"
+                + "\"action_id\":101,\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t2\","
+                + "\"older_than\":\"30d\",\"retain_last\":\"3\"},\"rules\":{}}"
                 + "]");
     assertEquals(2, tasks.size());
+    assertEquals("c", tasks.get(0).catalogName);
+    assertEquals("db.t1", tasks.get(0).tableIdentifier);
     assertEquals("7d", tasks.get(0).procedureArgs.get("older-than"));
     assertEquals("10", tasks.get(0).procedureArgs.get("retain-last"));
+    assertFalse(tasks.get(0).procedureArgs.containsKey("catalog-name"));
+    assertFalse(tasks.get(0).procedureArgs.containsKey("table-identifier"));
     assertEquals("30d", tasks.get(1).procedureArgs.get("older-than"));
     assertEquals("3", tasks.get(1).procedureArgs.get("retain-last"));
   }
@@ -93,10 +97,22 @@ public class TestIcebergMaintenanceJob {
   public void testToProcedureArgMap() {
     Map<String, String> args =
         IcebergMaintenanceJob.toProcedureArgMap(
-            Map.of("strategy", "binpack", "where_clause", "dt=1", "sort_order", "id"));
+            Map.of(
+                "catalog_name",
+                "c",
+                "table_identifier",
+                "db.t",
+                "strategy",
+                "binpack",
+                "where_clause",
+                "dt=1",
+                "sort_order",
+                "id"));
     assertEquals("binpack", args.get("strategy"));
     assertEquals("dt=1", args.get("where"));
     assertEquals("id", args.get("sort-order"));
+    assertFalse(args.containsKey("catalog-name"));
+    assertFalse(args.containsKey("table-identifier"));
   }
 
   @Test
