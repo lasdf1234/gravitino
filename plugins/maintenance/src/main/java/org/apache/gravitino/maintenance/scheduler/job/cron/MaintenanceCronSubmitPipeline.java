@@ -19,9 +19,11 @@
 package org.apache.gravitino.maintenance.scheduler.job.cron;
 
 import com.google.common.base.Preconditions;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.gravitino.maintenance.MaintenanceActionManager;
 import org.apache.gravitino.maintenance.MaintenanceJobManager;
@@ -37,16 +39,17 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Cron-pool control-plane submit (§5.2.2): consume schedule-time {@link MaintenanceJobSpec} →
- * occupancy gate → soft-slot claim → {@link MaintenanceJobManager#submitAndBind}.
+ * occupancy gate → soft-slot claim for every task → one {@link MaintenanceJobManager#submitAndBind}
+ * Spark job (single-table or snapshot-expiry batch).
  *
  * <p>Single-table {@code table:...} and snapshot-expiry {@code batch:...} rows share the same spec
- * shape; each {@link Task} becomes one Spark job. After merge, a {@code table:} instance may still
- * hold multiple tasks (members live in {@code task_data}); occupancy uses each task's own {@code
- * policyId}. If any task is occupied, the whole pick stops without partial submits (one-shot row is
- * still removed by the caller).
+ * shape. After merge, a {@code table:} instance may still hold multiple tasks (members live in
+ * {@code task_data}); occupancy uses each task's own {@code policyId}. If any task is occupied, or
+ * any soft-slot claim fails, the whole pick stops without partial submits (one-shot row is still
+ * removed by the caller).
  *
- * <p>Does not sample metrics or evaluate trigger-expr (both run inside Spark from schedule-time
- * {@code rules} in task parameters).
+ * <p>Does not sample metrics or evaluate trigger-expr (both run inside Spark from per-task {@code
+ * rules}).
  */
 public final class MaintenanceCronSubmitPipeline {
 
@@ -135,60 +138,43 @@ public final class MaintenanceCronSubmitPipeline {
         return;
       }
     }
-    for (Task task : spec.getTasks()) {
-      submitOne(spec, task);
-    }
-  }
 
-  private void submitOne(MaintenanceJobSpec spec, Task task) {
-    long policyId = task.getPolicyId();
-    Optional<OccupancyClaim> claim =
-        actionMetaService.tryAcquireInFlight(task.getTableId(), policyId, claimTimeoutMs);
-    if (claim.isEmpty()) {
-      LOG.info(
-          "Skipping cron-job submit for table {} policy {} (lost soft-slot race)",
-          task.getTableId(),
-          policyId);
-      return;
+    List<OccupancyClaim> claims = new ArrayList<>(spec.getTasks().size());
+    for (Task task : spec.getTasks()) {
+      Optional<OccupancyClaim> claim =
+          actionMetaService.tryAcquireInFlight(
+              task.getTableId(), task.getPolicyId(), claimTimeoutMs);
+      if (claim.isEmpty()) {
+        if (!claims.isEmpty()) {
+          actionMetaService.deleteClaims(claims);
+        }
+        LOG.info(
+            "Skipping cron-job {} entirely (lost soft-slot race on table {} policy {})",
+            instanceId,
+            task.getTableId(),
+            task.getPolicyId());
+        return;
+      }
+      claims.add(claim.get());
     }
 
     Map<String, String> jobConf;
     try {
-      jobConf =
-          jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForTask(spec, task));
+      jobConf = jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForSpec(spec));
     } catch (RuntimeException e) {
-      releaseClaimQuietly(claim.get());
-      LOG.warn(
-          "Skipping cron-job submit for table {} policy {}: invalid task: {}",
-          task.getTableId(),
-          policyId,
-          e.toString());
+      actionMetaService.deleteClaims(claims);
+      LOG.warn("Skipping cron-job submit for {}: invalid task_data: {}", instanceId, e.toString());
       return;
     }
 
-    Optional<Long> jobId = jobManager.submitAndBind(spec.metalake(), jobConf, List.of(claim.get()));
+    Optional<Long> jobId = jobManager.submitAndBind(spec.metalake(), jobConf, claims);
     if (jobId.isPresent()) {
       LOG.info(
-          "Submitted cron-job for table {} policy {} as job {}",
-          task.getTableId(),
-          policyId,
-          jobId.get());
-    }
-  }
-
-  private void releaseClaimQuietly(OccupancyClaim claim) {
-    try {
-      if (!actionMetaService.deleteUnboundClaim(claim)) {
-        LOG.debug(
-            "Occupancy claim {} created_at={} was not released (reclaimed or already bound)",
-            claim.actionId(),
-            claim.createdAt());
-      }
-    } catch (RuntimeException releaseError) {
-      LOG.warn(
-          "Failed to release occupancy claim {} after conf resolve failure",
-          claim.actionId(),
-          releaseError);
+          "Submitted cron-job {} as job {} (tables={}, policies={})",
+          instanceId,
+          jobId.get(),
+          spec.tableIds(),
+          spec.getTasks().stream().map(Task::getPolicyId).collect(Collectors.toList()));
     }
   }
 }

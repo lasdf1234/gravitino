@@ -18,10 +18,8 @@
  */
 package org.apache.gravitino.maintenance.jobs.iceberg;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -50,24 +48,21 @@ final class MaintenanceTriggerGate {
   private static final Logger LOG = LoggerFactory.getLogger(MaintenanceTriggerGate.class);
   private static final ExpressionEvaluator EVALUATOR = new QLExpressionEvaluator();
 
-  /** Spark job argument key: JSON map of wire maintenance type → policy {@code rules()} object. */
-  static final String RULES_ARG = "rules";
-
   private MaintenanceTriggerGate() {}
 
   /**
    * @param type maintenance type for this sample
-   * @param argMap Spark job arguments (includes optional {@link #RULES_ARG})
+   * @param rules per-task policy {@code rules()} object (may be empty → type defaults)
    * @param metricsJson S0 metrics JSON
    * @return whether the procedure should run
    */
   static boolean shouldMaintain(
-      MaintenanceType type, Map<String, String> argMap, @Nullable String metricsJson) {
+      MaintenanceType type, @Nullable Map<String, Object> rules, @Nullable String metricsJson) {
     if (type == MaintenanceType.EXPIRE_SNAPSHOTS) {
       return true;
     }
 
-    Map<String, Object> rules = rulesForType(type, argMap);
+    Map<String, Object> effectiveRules = effectiveRules(type, rules);
     Map<String, Object> metrics = parseNumericMetrics(metricsJson);
     if (type == MaintenanceType.REWRITE_DATA_FILES
         && (metrics.isEmpty()
@@ -84,11 +79,11 @@ final class MaintenanceTriggerGate {
       return false;
     }
 
-    boolean maintain = evaluateTrigger(rules, metrics);
+    boolean maintain = evaluateTrigger(effectiveRules, metrics);
     LOG.info(
         "In-Spark recommend type={} expr={} -> {}",
         type.wireName(),
-        rules.get(IcebergDataCompactionContent.TRIGGER_EXPR_KEY),
+        effectiveRules.get(IcebergDataCompactionContent.TRIGGER_EXPR_KEY),
         maintain ? "MAINTAIN" : "SKIP");
     return maintain;
   }
@@ -121,25 +116,8 @@ final class MaintenanceTriggerGate {
     return EVALUATOR.evaluateBool(expression, context);
   }
 
-  private static Map<String, Object> rulesForType(
-      MaintenanceType type, Map<String, String> argMap) {
-    Map<String, Map<String, Object>> byType = Collections.emptyMap();
-    if (argMap != null) {
-      String raw = IcebergJobUtils.nullIfUnresolvedPlaceholder(argMap.get(RULES_ARG));
-      if (raw != null && !raw.trim().isEmpty()) {
-        try {
-          Map<String, Map<String, Object>> parsed =
-              JsonUtils.anyFieldMapper()
-                  .readValue(raw, new TypeReference<Map<String, Map<String, Object>>>() {});
-          if (parsed != null) {
-            byType = parsed;
-          }
-        } catch (IOException | RuntimeException e) {
-          LOG.warn("Failed to parse {}: {}", RULES_ARG, e.toString());
-        }
-      }
-    }
-    Map<String, Object> rules = byType.get(type.wireName());
+  private static Map<String, Object> effectiveRules(
+      MaintenanceType type, @Nullable Map<String, Object> rules) {
     if (rules != null && !rules.isEmpty()) {
       return rules;
     }
