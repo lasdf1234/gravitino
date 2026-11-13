@@ -72,17 +72,24 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertTrue(spec.getSparkConf().contains("spark.executor.memory"));
 
     Map<String, String> perTable =
-        MaintenanceJobSpecFactory.jobConfForTask(spec, spec.getTasks().get(0));
-    Assertions.assertEquals("iceberg", perTable.get("catalog_name"));
-    Assertions.assertNull(perTable.get("table_identifier"));
-    Assertions.assertNull(perTable.get("table_id"));
-    Assertions.assertEquals(
-        "rewrite_data_files", perTable.get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
-    Assertions.assertEquals("202", perTable.get(MaintenanceJobTemplates.POLICY_IDS_KEY));
-    Assertions.assertTrue(perTable.get("tables").contains("\"table_id\":10"));
-    Assertions.assertTrue(perTable.get("tables").contains("\"table_identifier\":\"db.t1\""));
+        MaintenanceJobSpecFactory.jobConfForSpec(
+            new MaintenanceJobSpec(
+                List.of(spec.getTasks().get(0)), spec.getUpdaterOptions(), spec.getSparkConf()));
+    Assertions.assertTrue(perTable.containsKey(MaintenanceJobTemplates.TASKS_KEY));
+    Assertions.assertTrue(
+        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));
+    Assertions.assertTrue(
+        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_identifier\":\"db.t1\""));
+    Assertions.assertTrue(
+        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"policy_id\":202"));
+    Assertions.assertTrue(
+        perTable.get(MaintenanceJobTemplates.TASKS_KEY).contains("rewrite_data_files"));
     Assertions.assertTrue(perTable.containsKey("updater_options"));
     Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
+
+    Map<String, String> batch = MaintenanceJobSpecFactory.jobConfForSpec(spec);
+    Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));
+    Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":11"));
 
     MaintenanceJobSpec mixedPolicies =
         factory.forCron(

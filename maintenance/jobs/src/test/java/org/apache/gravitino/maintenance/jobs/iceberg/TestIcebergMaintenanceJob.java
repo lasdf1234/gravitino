@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import org.apache.gravitino.job.SparkJobTemplate;
 import org.apache.gravitino.maintenance.jobs.iceberg.IcebergMaintenanceJob.MaintenanceType;
 import org.junit.jupiter.api.Test;
@@ -36,17 +37,15 @@ public class TestIcebergMaintenanceJob {
     SparkJobTemplate template = new IcebergMaintenanceJob().jobTemplate();
     assertEquals(IcebergMaintenanceJob.NAME, template.name());
     List<String> args = template.arguments();
-    assertTrue(args.contains("--maintenance-types"));
-    assertTrue(args.contains("{{maintenance_types}}"));
-    assertFalse(args.contains("{{maintenance_types:-}}"));
-    assertTrue(args.contains("--policy-ids"));
-    assertTrue(args.contains("{{policy_ids}}"));
-    assertTrue(args.contains("--tables"));
-    assertTrue(args.contains("{{tables}}"));
-    assertTrue(args.contains("--rules"));
-    assertTrue(args.contains("{{rules:-}}"));
-    assertFalse(args.contains("--table-id"));
-    assertFalse(args.contains("--gravitino-job-id"));
+    assertTrue(args.contains("--tasks"));
+    assertTrue(args.contains("{{tasks}}"));
+    assertFalse(args.contains("{{tasks:-}}"));
+    assertTrue(args.contains("--updater-options"));
+    assertTrue(args.contains("--spark-conf"));
+    assertFalse(args.contains("--maintenance-types"));
+    assertFalse(args.contains("--policy-ids"));
+    assertFalse(args.contains("--tables"));
+    assertFalse(args.contains("--strategy"));
   }
 
   @Test
@@ -60,25 +59,44 @@ public class TestIcebergMaintenanceJob {
 
   @Test
   public void testRunRejectsInvalidArgs() {
-    assertEquals(
-        1, IcebergMaintenanceJob.run(new String[] {"--maintenance-types", "expire_snapshots"}));
-    assertEquals(
-        1,
-        IcebergMaintenanceJob.run(
-            new String[] {
-              "--maintenance-types",
-              "expire_snapshots,rewrite_manifests",
-              "--policy-ids",
-              "10",
-              "--tables",
-              "[{\"table_id\":1,\"catalog_name\":\"c\",\"table_identifier\":\"db.t\"}]"
-            }));
+    assertEquals(1, IcebergMaintenanceJob.run(new String[] {"--tasks", "[]"}));
     assertEquals(
         1,
         IcebergMaintenanceJob.run(
             new String[] {
-              "--maintenance-types", "expire_snapshots", "--policy-ids", "10", "--tables", "[]"
+              "--tasks",
+              "[{\"table_id\":1,\"catalog_name\":\"c\",\"table_identifier\":\"db.t\","
+                  + "\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10}]"
             }));
+  }
+
+  @Test
+  public void testParseTasksKeepsPerTaskParams() {
+    List<IcebergMaintenanceJob.MaintenanceTask> tasks =
+        IcebergMaintenanceJob.parseTasks(
+            "["
+                + "{\"table_id\":1,\"catalog_name\":\"c\",\"table_identifier\":\"db.t1\","
+                + "\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,\"action_id\":100,"
+                + "\"params\":{\"older_than\":\"7d\",\"retain_last\":\"10\"},\"rules\":{}},"
+                + "{\"table_id\":2,\"catalog_name\":\"c\",\"table_identifier\":\"db.t2\","
+                + "\"maintenance_type\":\"expire_snapshots\",\"policy_id\":11,\"action_id\":101,"
+                + "\"params\":{\"older_than\":\"30d\",\"retain_last\":\"3\"},\"rules\":{}}"
+                + "]");
+    assertEquals(2, tasks.size());
+    assertEquals("7d", tasks.get(0).procedureArgs.get("older-than"));
+    assertEquals("10", tasks.get(0).procedureArgs.get("retain-last"));
+    assertEquals("30d", tasks.get(1).procedureArgs.get("older-than"));
+    assertEquals("3", tasks.get(1).procedureArgs.get("retain-last"));
+  }
+
+  @Test
+  public void testToProcedureArgMap() {
+    Map<String, String> args =
+        IcebergMaintenanceJob.toProcedureArgMap(
+            Map.of("strategy", "binpack", "where_clause", "dt=1", "sort_order", "id"));
+    assertEquals("binpack", args.get("strategy"));
+    assertEquals("dt=1", args.get("where"));
+    assertEquals("id", args.get("sort-order"));
   }
 
   @Test

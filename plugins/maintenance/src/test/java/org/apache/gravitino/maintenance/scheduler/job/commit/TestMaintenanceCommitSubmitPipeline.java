@@ -101,11 +101,12 @@ class TestMaintenanceCommitSubmitPipeline {
     ArgumentCaptor<Map<String, String>> confCaptor = ArgumentCaptor.forClass(Map.class);
     verify(mgr).submitAndBind(eq("ml"), confCaptor.capture(), eq(claims));
     Map<String, String> conf = confCaptor.getValue();
-    Assertions.assertEquals(
-        "rewrite_data_files,expire_snapshots",
-        conf.get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
+    Assertions.assertNull(conf.get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
     Assertions.assertNull(conf.get("table_identifier"));
-    Assertions.assertTrue(conf.get("tables").contains("\"table_id\":" + TABLE_ID));
+    String tasksJson = conf.get(MaintenanceJobTemplates.TASKS_KEY);
+    Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
+    Assertions.assertTrue(tasksJson.contains("expire_snapshots"));
+    Assertions.assertTrue(tasksJson.contains("\"table_id\":" + TABLE_ID));
   }
 
   private static MaintenanceCommitSubmitPipeline pipeline(

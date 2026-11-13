@@ -183,8 +183,8 @@ public final class MaintenanceJobSpec {
   }
 
   /**
-   * One runnable maintenance unit (typically one {@code runJob} on the cron path; commit chains
-   * pack several tasks into one Spark submit).
+   * One runnable maintenance unit. Cron snapshot-expiry batches and commit chains pack several
+   * tasks into one Spark submit; a single-table cron row usually has one task.
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
   public static final class Task {
