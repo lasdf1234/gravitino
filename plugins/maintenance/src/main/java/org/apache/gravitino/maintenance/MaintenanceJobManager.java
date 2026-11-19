@@ -18,7 +18,9 @@
  */
 package org.apache.gravitino.maintenance;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.base.Preconditions;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -27,7 +29,9 @@ import javax.annotation.Nullable;
 import org.apache.gravitino.UserPrincipal;
 import org.apache.gravitino.job.JobHandle;
 import org.apache.gravitino.job.JobOperationDispatcher;
+import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.model.OccupancyClaim;
+import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.storage.service.TableMaintenanceActionMetaService;
 import org.apache.gravitino.meta.JobEntity;
@@ -38,12 +42,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Submits TMS Spark jobs and binds the resulting job run id onto soft-slot claims.
  *
- * <p>{@link #submitAndBind} injects {@code action_ids}, calls {@code runJob}, then binds {@code
- * job_id}. When authorization is enabled, {@code runJob} runs as the configured {@link
- * TableMaintenanceConfig#JOB_SUBMITTER} USER so {@link org.apache.gravitino.job.JobManager} sets a
- * stable job owner (including for GROUP-owned metalakes). If {@code runJob} succeeds but bind
- * fails, the orphaned Spark job is cancelled and unbound claims are released. Callers that fail
- * before {@code runJob} must release claims themselves.
+ * <p>{@link #submitAndBind} calls {@code runJob}, then binds {@code job_id}. Callers must already
+ * have applied soft-slot {@code action_id} values onto the schedule spec (see {@link
+ * MaintenanceJobSpecFactory#applyActionIds}) before building {@code jobConf}. When authorization is
+ * enabled, {@code runJob} runs as the configured {@link TableMaintenanceConfig#JOB_SUBMITTER} USER
+ * so {@link org.apache.gravitino.job.JobManager} sets a stable job owner (including for GROUP-owned
+ * metalakes). If {@code runJob} succeeds but bind fails, the orphaned Spark job is cancelled and
+ * unbound claims are released. Callers that fail before {@code runJob} must release claims
+ * themselves.
  */
 public class MaintenanceJobManager {
 
@@ -108,12 +114,12 @@ public class MaintenanceJobManager {
   }
 
   /**
-   * Injects {@code action_ids}, runs the TMS maintenance template, and binds {@code job_id} on the
-   * claims (one claim for cron, several for a commit chain).
+   * Runs the TMS maintenance template and binds {@code job_id} on the claims. {@code jobConf} must
+   * already carry per-task {@code action_id} values (claim order matches {@code tasks[]}).
    *
    * @param metalake metalake name
-   * @param jobConf mutable runtime jobConf (policy options already resolved)
-   * @param claims soft-slot claims from acquire (non-empty)
+   * @param jobConf mutable runtime jobConf (policy options already resolved; action ids injected)
+   * @param claims soft-slot claims from acquire (non-empty, parallel to tasks)
    * @return job run id when run+bind succeeded; empty when submit or bind failed (claims released)
    */
   public Optional<Long> submitAndBind(
@@ -121,10 +127,12 @@ public class MaintenanceJobManager {
     Preconditions.checkNotNull(metalake, "metalake");
     Preconditions.checkNotNull(jobConf, "jobConf");
     Preconditions.checkArgument(claims != null && !claims.isEmpty(), "claims must be non-empty");
-
-    jobConf.put(
-        MaintenanceJobTemplates.ACTION_IDS_KEY,
-        claims.stream().map(c -> Long.toString(c.actionId())).collect(Collectors.joining(",")));
+    int taskCount = requireTasksCount(jobConf);
+    Preconditions.checkArgument(
+        taskCount == claims.size(),
+        "jobConf tasks size %s must match claims size %s",
+        taskCount,
+        claims.size());
 
     Long jobId = null;
     try {
@@ -154,6 +162,22 @@ public class MaintenanceJobManager {
           claims.stream().map(c -> Long.toString(c.actionId())).collect(Collectors.joining(",")),
           e.toString());
       return Optional.empty();
+    }
+  }
+
+  private static int requireTasksCount(Map<String, String> jobConf) {
+    String tasksJson = jobConf.get(MaintenanceJobTemplates.TASKS_KEY);
+    Preconditions.checkArgument(
+        tasksJson != null && !tasksJson.isBlank(),
+        "jobConf.%s is required",
+        MaintenanceJobTemplates.TASKS_KEY);
+    try {
+      JsonNode root = JsonUtils.anyFieldMapper().readTree(tasksJson);
+      Preconditions.checkArgument(root != null && root.isArray(), "tasks must be a JSON array");
+      return root.size();
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "Failed to parse jobConf." + MaintenanceJobTemplates.TASKS_KEY, e);
     }
   }
 

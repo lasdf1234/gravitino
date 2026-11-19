@@ -71,6 +71,27 @@ class TestMaintenanceCommitSubmitPipeline {
   }
 
   @Test
+  void testDuplicatePolicyIdsSkipWithoutAcquire() {
+    MaintenanceJobManager mgr = mock(MaintenanceJobManager.class);
+    TableMaintenanceActionMetaService actions = mock(TableMaintenanceActionMetaService.class);
+    Map<String, String> params =
+        new LinkedHashMap<>(Map.of("catalog_name", "iceberg", "table_identifier", "db.t"));
+    MaintenanceJobSpec dup =
+        new MaintenanceJobSpec(
+            List.of(
+                new Task(TABLE_ID, POLICY_ID, "rewrite_data_files", null, params),
+                new Task(
+                    TABLE_ID, POLICY_ID, "expire_snapshots", null, new LinkedHashMap<>(params))),
+            UPDATER,
+            null);
+
+    pipeline(Set.of(), actions, mgr).submit(MaintenanceTaskIds.forCommitTable(TABLE_ID), dup);
+
+    verify(actions, never()).tryAcquireInFlightBatch(anyLong(), anyList(), anyLong());
+    verify(mgr, never()).submitAndBind(anyString(), anyMap(), anyList());
+  }
+
+  @Test
   void testSubmitClaimsEveryChainPolicyAndUsesSpecJobConf() {
     MaintenanceJobManager mgr = mock(MaintenanceJobManager.class);
     List<OccupancyClaim> claims = List.of(new OccupancyClaim(1L, 2L), new OccupancyClaim(3L, 4L));
@@ -101,11 +122,14 @@ class TestMaintenanceCommitSubmitPipeline {
     ArgumentCaptor<Map<String, String>> confCaptor = ArgumentCaptor.forClass(Map.class);
     verify(mgr).submitAndBind(eq("ml"), confCaptor.capture(), eq(claims));
     Map<String, String> conf = confCaptor.getValue();
-    Assertions.assertEquals(
-        "rewrite_data_files,expire_snapshots",
-        conf.get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
+    Assertions.assertNull(conf.get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
     Assertions.assertNull(conf.get("table_identifier"));
-    Assertions.assertTrue(conf.get("tables").contains("\"table_id\":" + TABLE_ID));
+    String tasksJson = conf.get(MaintenanceJobTemplates.TASKS_KEY);
+    Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
+    Assertions.assertTrue(tasksJson.contains("expire_snapshots"));
+    Assertions.assertTrue(tasksJson.contains("\"table_id\":" + TABLE_ID));
+    Assertions.assertTrue(tasksJson.contains("\"action_id\":1"));
+    Assertions.assertTrue(tasksJson.contains("\"action_id\":3"));
   }
 
   private static MaintenanceCommitSubmitPipeline pipeline(

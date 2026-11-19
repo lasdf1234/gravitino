@@ -22,11 +22,13 @@ import com.github.kagkarlsson.scheduler.serializer.JacksonSerializer;
 import com.github.kagkarlsson.scheduler.serializer.Serializer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
+import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.model.TableCandidate;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
@@ -71,18 +73,43 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertFalse(spec.getUpdaterOptions().contains(GRAVITINO_URI));
     Assertions.assertTrue(spec.getSparkConf().contains("spark.executor.memory"));
 
-    Map<String, String> perTable =
-        MaintenanceJobSpecFactory.jobConfForTask(spec, spec.getTasks().get(0));
-    Assertions.assertEquals("iceberg", perTable.get("catalog_name"));
-    Assertions.assertNull(perTable.get("table_identifier"));
-    Assertions.assertNull(perTable.get("table_id"));
-    Assertions.assertEquals(
-        "rewrite_data_files", perTable.get(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY));
-    Assertions.assertEquals("202", perTable.get(MaintenanceJobTemplates.POLICY_IDS_KEY));
-    Assertions.assertTrue(perTable.get("tables").contains("\"table_id\":10"));
-    Assertions.assertTrue(perTable.get("tables").contains("\"table_identifier\":\"db.t1\""));
+    MaintenanceJobSpec one =
+        new MaintenanceJobSpec(
+            List.of(spec.getTasks().get(0)), spec.getUpdaterOptions(), spec.getSparkConf());
+    withActionIds(one, 9001L);
+    Map<String, String> perTable = MaintenanceJobSpecFactory.jobConfForSpec(one);
+    Assertions.assertTrue(perTable.containsKey(MaintenanceJobTemplates.TASKS_KEY));
+    String tasksJson = perTable.get(MaintenanceJobTemplates.TASKS_KEY);
+    Assertions.assertTrue(tasksJson.contains("\"table_id\":10"));
+    Assertions.assertTrue(
+        tasksJson.contains(
+            "\"params\":{\"catalog_name\":\"iceberg\",\"table_identifier\":\"db.t1\""));
+    // Identity keys live only under params, not as task-level siblings of table_id.
+    Assertions.assertFalse(tasksJson.contains("\"table_id\":10,\"catalog_name\""));
+    Assertions.assertTrue(tasksJson.contains("\"policy_id\":202"));
+    Assertions.assertTrue(tasksJson.contains("\"action_id\":9001"));
+    Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
     Assertions.assertTrue(perTable.containsKey("updater_options"));
     Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
+
+    withActionIds(spec, 9001L, 9002L);
+    Map<String, String> batch = MaintenanceJobSpecFactory.jobConfForSpec(spec);
+    Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));
+    Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":11"));
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            MaintenanceJobSpecFactory.jobConfForSpec(
+                new MaintenanceJobSpec(
+                    List.of(
+                        new MaintenanceJobSpec.Task(
+                            10L,
+                            202L,
+                            "rewrite_data_files",
+                            null,
+                            Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
+                    spec.getUpdaterOptions(),
+                    spec.getSparkConf())));
 
     MaintenanceJobSpec mixedPolicies =
         factory.forCron(
@@ -91,6 +118,56 @@ class TestMaintenanceJobSpecFactory {
                 candidate(11L, "iceberg", "db.t2", compaction(202L))));
     Assertions.assertEquals(201L, mixedPolicies.getTasks().get(0).getPolicyId());
     Assertions.assertEquals(202L, mixedPolicies.getTasks().get(1).getPolicyId());
+  }
+
+  @Test
+  void testApplyActionIdsThenJobConfIncludesActionId() {
+    MaintenanceJobSpecFactory factory = new MaintenanceJobSpecFactory(configWithUri());
+    MaintenanceJobSpec spec =
+        factory.forCron(
+            List.of(
+                candidate(10L, "iceberg", "db.t1", compaction(202L)),
+                candidate(11L, "iceberg", "db.t2", compaction(202L))));
+    Assertions.assertNull(spec.getTasks().get(0).getActionId());
+
+    withActionIds(spec, 101L, 102L);
+    Assertions.assertEquals(101L, spec.getTasks().get(0).getActionId());
+    Assertions.assertEquals(102L, spec.getTasks().get(1).getActionId());
+
+    String tasksJson =
+        MaintenanceJobSpecFactory.jobConfForSpec(spec).get(MaintenanceJobTemplates.TASKS_KEY);
+    Assertions.assertTrue(tasksJson.contains("\"action_id\":101"));
+    Assertions.assertTrue(tasksJson.contains("\"action_id\":102"));
+  }
+
+  private static void withActionIds(MaintenanceJobSpec spec, long... actionIds) {
+    ArrayList<OccupancyClaim> claims = new ArrayList<>(actionIds.length);
+    for (int i = 0; i < actionIds.length; i++) {
+      claims.add(new OccupancyClaim(actionIds[i], i + 1L));
+    }
+    MaintenanceJobSpecFactory.applyActionIds(spec, claims);
+  }
+
+  @Test
+  void testApplyActionIdsRejectsDuplicateTablePolicy() {
+    MaintenanceJobSpec spec =
+        new MaintenanceJobSpec(
+            List.of(
+                new MaintenanceJobSpec.Task(
+                    10L,
+                    202L,
+                    "rewrite_data_files",
+                    null,
+                    Map.of("catalog_name", "iceberg", "table_identifier", "db.t1")),
+                new MaintenanceJobSpec.Task(
+                    10L,
+                    202L,
+                    "expire_snapshots",
+                    null,
+                    Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
+            "{}",
+            null);
+    Assertions.assertThrows(IllegalArgumentException.class, () -> withActionIds(spec, 1L, 2L));
   }
 
   @Test

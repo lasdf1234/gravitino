@@ -120,6 +120,15 @@ public final class MaintenanceCommitSubmitPipeline {
 
     List<Long> policyIds =
         spec.getTasks().stream().map(Task::getPolicyId).collect(Collectors.toList());
+    // Batch acquire dedupes policy ids; duplicate chain members would shrink claims vs tasks.
+    long distinctPolicies = policyIds.stream().distinct().count();
+    if (distinctPolicies != policyIds.size()) {
+      LOG.warn(
+          "Skipping commit-job submit for table {}: duplicate policy_id in chain {}",
+          tableId,
+          policyIds);
+      return;
+    }
     Optional<List<OccupancyClaim>> claims =
         actionMetaService.tryAcquireInFlightBatch(tableId, policyIds, claimTimeoutMs);
     if (claims.isEmpty()) {
@@ -132,8 +141,8 @@ public final class MaintenanceCommitSubmitPipeline {
 
     Map<String, String> jobConf;
     try {
-      jobConf =
-          jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForCommitChain(spec));
+      MaintenanceJobSpecFactory.applyActionIds(spec, claims.get());
+      jobConf = jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForSpec(spec));
     } catch (RuntimeException e) {
       actionMetaService.deleteClaims(claims.get());
       LOG.warn(

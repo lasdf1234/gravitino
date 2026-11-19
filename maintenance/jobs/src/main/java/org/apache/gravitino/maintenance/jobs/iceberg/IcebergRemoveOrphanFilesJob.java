@@ -232,7 +232,12 @@ public class IcebergRemoveOrphanFilesJob implements BuiltInJob, IcebergMaintenan
       String normalizedLocation,
       boolean dryRun) {
     String sql =
-        buildProcedureCall(catalogName, tableIdentifier, olderThan, normalizedLocation, dryRun);
+        buildProcedureCall(
+            catalogName,
+            tableIdentifier,
+            IcebergJobUtils.normalizeOlderThan(olderThan),
+            normalizedLocation,
+            dryRun);
     LOG.info("Executing Iceberg remove_orphan_files: {}", sql);
     return spark.sql(sql).collectAsList();
   }

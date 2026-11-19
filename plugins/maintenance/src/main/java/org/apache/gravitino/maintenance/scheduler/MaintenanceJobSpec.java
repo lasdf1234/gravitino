@@ -39,9 +39,9 @@ import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
  *
  * <p>Shape stays close to Iceberg update-stats {@code runJob} conf: each {@link Task} carries TMS
  * routing fields plus a flat {@code parameters} map (old template placeholders). Shared {@code
- * updater_options} and {@code spark_conf} sit at the top as JSON object strings. Submit merges one
- * task (cron) or all tasks (commit chain) into the flat {@code Map<String,String>} passed to {@code
- * runJob}.
+ * updater_options} and {@code spark_conf} sit at the top as JSON object strings. Submit applies
+ * soft-slot {@code actionId} values onto tasks, then builds a {@code tasks[]} wire jobConf for
+ * {@code runJob}.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public final class MaintenanceJobSpec {
@@ -183,8 +183,8 @@ public final class MaintenanceJobSpec {
   }
 
   /**
-   * One runnable maintenance unit (typically one {@code runJob} on the cron path; commit chains
-   * pack several tasks into one Spark submit).
+   * One runnable maintenance unit. Cron snapshot-expiry batches and commit chains pack several
+   * tasks into one Spark submit; a single-table cron row usually has one task.
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
   public static final class Task {

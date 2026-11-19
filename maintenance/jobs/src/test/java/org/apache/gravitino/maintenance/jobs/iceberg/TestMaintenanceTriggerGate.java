@@ -40,12 +40,9 @@ public class TestMaintenanceTriggerGate {
 
   @Test
   public void testCompactionUsesEnqueueRules() {
-    Map<String, String> args = new HashMap<>();
-    args.put(
-        MaintenanceTriggerGate.RULES_ARG,
-        "{\"rewrite_data_files\":{"
-            + "\"trigger-expr\":\"custom-data-file-mse >= minDataFileMse\","
-            + "\"minDataFileMse\":10}}");
+    Map<String, Object> rules = new HashMap<>();
+    rules.put("trigger-expr", "custom-data-file-mse >= minDataFileMse");
+    rules.put("minDataFileMse", 10);
 
     String below =
         "{\""
@@ -54,7 +51,7 @@ public class TestMaintenanceTriggerGate {
             + IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC
             + "\":0}";
     assertFalse(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, args, below));
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, below));
 
     String above =
         "{\""
@@ -63,7 +60,7 @@ public class TestMaintenanceTriggerGate {
             + IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC
             + "\":0}";
     assertTrue(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, args, above));
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, above));
   }
 
   @Test
@@ -89,20 +86,17 @@ public class TestMaintenanceTriggerGate {
 
   @Test
   public void testManifestRewriteUsesEnqueueRules() {
-    Map<String, String> args = new HashMap<>();
-    args.put(
-        MaintenanceTriggerGate.RULES_ARG,
-        "{\"rewrite_manifests\":{"
-            + "\"trigger-expr\":\"custom-manifest-number >= manifest_count_threshold\","
-            + "\"manifest_count_threshold\":10}}");
+    Map<String, Object> rules = new HashMap<>();
+    rules.put("trigger-expr", "custom-manifest-number >= manifest_count_threshold");
+    rules.put("manifest_count_threshold", 10);
 
     String below = "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":5}";
     assertFalse(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_MANIFESTS, args, below));
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_MANIFESTS, rules, below));
 
     String above = "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":10}";
     assertTrue(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_MANIFESTS, args, above));
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_MANIFESTS, rules, above));
   }
 
   @Test
@@ -110,5 +104,56 @@ public class TestMaintenanceTriggerGate {
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
             MaintenanceType.REWRITE_MANIFESTS, new HashMap<>(), "{}"));
+  }
+
+  @Test
+  public void testOrphanEvaluatesTriggerExprWithoutBeforeMetrics() {
+    assertTrue(
+        MaintenanceTriggerGate.shouldMaintain(
+            MaintenanceType.REMOVE_ORPHAN_FILES, new HashMap<>(), null));
+
+    Map<String, Object> skip = new HashMap<>();
+    skip.put("trigger-expr", "false");
+    assertFalse(
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REMOVE_ORPHAN_FILES, skip, null));
+  }
+
+  @Test
+  public void testCompactionAllowsPartialMetricsWhenExprOnlyNeedsOne() {
+    Map<String, Object> rules = new HashMap<>();
+    rules.put("trigger-expr", "custom-data-file-mse >= 10");
+    String onlyMse = "{\"" + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC + "\":15}";
+    assertTrue(
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, onlyMse));
+  }
+
+  @Test
+  public void testCompactionSkipsWhenMetricsEmpty() {
+    assertFalse(
+        MaintenanceTriggerGate.shouldMaintain(
+            MaintenanceType.REWRITE_DATA_FILES, new HashMap<>(), "{}"));
+  }
+
+  @Test
+  public void testDefaultCompactionPartialMetricsSkipsNotThrows() {
+    // Default trigger-expr references both mse and delete-file-number; partial S0 must skip.
+    String onlyMse = "{\"" + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC + "\":15}";
+    assertFalse(
+        MaintenanceTriggerGate.shouldMaintain(
+            MaintenanceType.REWRITE_DATA_FILES, new HashMap<>(), onlyMse));
+  }
+
+  @Test
+  public void testMalformedTriggerExprSkipsNotThrows() {
+    Map<String, Object> rules = new HashMap<>();
+    rules.put("trigger-expr", "(((( broken");
+    String metrics =
+        "{\""
+            + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC
+            + "\":15,\""
+            + IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC
+            + "\":2}";
+    assertFalse(
+        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, metrics));
   }
 }

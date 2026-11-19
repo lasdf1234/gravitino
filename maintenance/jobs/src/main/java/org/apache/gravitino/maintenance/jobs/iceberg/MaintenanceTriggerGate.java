@@ -18,10 +18,8 @@
  */
 package org.apache.gravitino.maintenance.jobs.iceberg;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -50,43 +48,36 @@ final class MaintenanceTriggerGate {
 
   private static final Logger LOG = LoggerFactory.getLogger(MaintenanceTriggerGate.class);
 
-  /** Spark job argument key: JSON map of wire maintenance type → policy {@code rules()} object. */
-  static final String RULES_ARG = "rules";
-
   private MaintenanceTriggerGate() {}
 
   /**
    * @param type maintenance type for this sample
-   * @param argMap Spark job arguments (includes optional {@link #RULES_ARG})
+   * @param rules per-task policy {@code rules()} object (may be empty → type defaults)
    * @param metricsJson S0 metrics JSON
    * @return whether the procedure should run
    */
   static boolean shouldMaintain(
-      MaintenanceType type, Map<String, String> argMap, @Nullable String metricsJson) {
+      MaintenanceType type, @Nullable Map<String, Object> rules, @Nullable String metricsJson) {
     if (type == MaintenanceType.EXPIRE_SNAPSHOTS) {
       return true;
     }
 
-    Map<String, Object> rules = rulesForType(type, argMap);
+    Map<String, Object> effectiveRules = effectiveRules(type, rules);
     Map<String, Object> metrics = parseNumericMetrics(metricsJson);
-    if (type == MaintenanceType.REWRITE_DATA_FILES
-        && (metrics.isEmpty()
-            || !metrics.containsKey(IcebergDataCompactionContent.DATA_FILE_MSE_METRIC)
-            || !metrics.containsKey(IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC))) {
-      LOG.warn("Compaction recommend skip: metrics JSON missing compaction fields");
-      return false;
-    }
-    if (type == MaintenanceType.REWRITE_MANIFESTS
-        && (metrics.isEmpty()
-            || !metrics.containsKey(IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC))) {
-      LOG.warn("Manifest rewrite recommend skip: metrics JSON missing manifest fields");
+    // Compaction / manifest need some numeric metrics; do not require every known field — a custom
+    // trigger-expr may reference only a subset. Empty metrics still skip (nothing to evaluate).
+    if ((type == MaintenanceType.REWRITE_DATA_FILES || type == MaintenanceType.REWRITE_MANIFESTS)
+        && metrics.isEmpty()) {
+      LOG.warn(
+          "{} recommend skip: metrics JSON empty or non-numeric",
+          type == MaintenanceType.REWRITE_DATA_FILES ? "Compaction" : "Manifest rewrite");
       return false;
     }
 
     boolean maintain =
         type == MaintenanceType.REWRITE_MANIFESTS
-            ? ManifestRewriteTriggerEvaluator.shouldMaintain(rules, metrics)
-            : CompactionTriggerEvaluator.shouldMaintain(rules, metrics);
+            ? ManifestRewriteTriggerEvaluator.shouldMaintain(effectiveRules, metrics)
+            : CompactionTriggerEvaluator.shouldMaintain(effectiveRules, metrics);
     String triggerExprKey =
         type == MaintenanceType.REWRITE_MANIFESTS
             ? IcebergRewriteManifestsContent.TRIGGER_EXPR_KEY
@@ -94,30 +85,13 @@ final class MaintenanceTriggerGate {
     LOG.info(
         "In-Spark recommend type={} expr={} -> {}",
         type.wireName(),
-        rules.get(triggerExprKey),
+        effectiveRules.get(triggerExprKey),
         maintain ? "MAINTAIN" : "SKIP");
     return maintain;
   }
 
-  private static Map<String, Object> rulesForType(
-      MaintenanceType type, Map<String, String> argMap) {
-    Map<String, Map<String, Object>> byType = Collections.emptyMap();
-    if (argMap != null) {
-      String raw = IcebergJobUtils.nullIfUnresolvedPlaceholder(argMap.get(RULES_ARG));
-      if (raw != null && !raw.trim().isEmpty()) {
-        try {
-          Map<String, Map<String, Object>> parsed =
-              JsonUtils.anyFieldMapper()
-                  .readValue(raw, new TypeReference<Map<String, Map<String, Object>>>() {});
-          if (parsed != null) {
-            byType = parsed;
-          }
-        } catch (IOException | RuntimeException e) {
-          LOG.warn("Failed to parse {}: {}", RULES_ARG, e.toString());
-        }
-      }
-    }
-    Map<String, Object> rules = byType.get(type.wireName());
+  private static Map<String, Object> effectiveRules(
+      MaintenanceType type, @Nullable Map<String, Object> rules) {
     if (rules != null && !rules.isEmpty()) {
       return rules;
     }

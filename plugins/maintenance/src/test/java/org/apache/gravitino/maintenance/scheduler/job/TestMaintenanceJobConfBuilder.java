@@ -22,6 +22,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
@@ -29,6 +30,7 @@ import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
+import org.apache.gravitino.policy.IcebergRewriteManifestsContent;
 import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContents;
 import org.apache.gravitino.utils.NamespaceUtil;
@@ -234,6 +236,99 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
     Assertions.assertEquals("false", conf.get("dry_run"));
     Assertions.assertEquals("2024-06-08 12:00:00Z", conf.get("older_than"));
+  }
+
+  @Test
+  void testExpireMapsTypedFieldsAndNormalizesJobOptionDays() {
+    PolicyEntity fromContent =
+        PolicyEntity.builder()
+            .withId(POLICY_ID)
+            .withName("e")
+            .withNamespace(NamespaceUtil.ofPolicy("ml"))
+            .withPolicyType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+            .withEnabled(true)
+            .withContent(PolicyContents.icebergSnapshotExpiration(7L, 10L, true))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
+            .build();
+
+    Map<String, String> typed =
+        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+            .build(fromContent, "iceberg");
+    Assertions.assertEquals("expire_snapshots", typed.get("maintenance_types"));
+    Assertions.assertEquals("2024-06-08 12:00:00Z", typed.get("older_than"));
+    Assertions.assertEquals("10", typed.get("retain_last"));
+    Assertions.assertEquals("true", typed.get("stream_results"));
+
+    PolicyEntity fromJobOption =
+        PolicyEntity.builder()
+            .withId(POLICY_ID + 1)
+            .withName("e2")
+            .withNamespace(NamespaceUtil.ofPolicy("ml"))
+            .withPolicyType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+            .withEnabled(true)
+            .withContent(
+                PolicyContents.icebergSnapshotExpiration(
+                    null, true, null, Map.of("older_than", "7d", "retain_last", "10"), Map.of()))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
+            .build();
+    Map<String, String> normalized =
+        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+            .build(fromJobOption, "iceberg");
+    Assertions.assertEquals("2024-06-08 12:00:00Z", normalized.get("older_than"));
+    Assertions.assertEquals("10", normalized.get("retain_last"));
+  }
+
+  @Test
+  void testManifestMapsTypedSpecIdAndUseCaching() {
+    PolicyEntity policy =
+        PolicyEntity.builder()
+            .withId(POLICY_ID)
+            .withName("m")
+            .withNamespace(NamespaceUtil.ofPolicy("ml"))
+            .withPolicyType(Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
+            .withEnabled(true)
+            .withContent(PolicyContents.icebergRewriteManifests(null, null, null, 2, false))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
+            .build();
+
+    Map<String, String> conf =
+        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
+            .build(policy, "iceberg");
+
+    Assertions.assertEquals("rewrite_manifests", conf.get("maintenance_types"));
+    Assertions.assertEquals("2", conf.get(IcebergRewriteManifestsContent.SPEC_ID));
+    Assertions.assertEquals("false", conf.get(IcebergRewriteManifestsContent.USE_CACHING));
+  }
+
+  @Test
+  void testResolveForSubmitExpandsTasksParamsReferences() {
+    Config config = configWithUri();
+    Map<String, String> jobConf = new LinkedHashMap<>();
+    jobConf.put(
+        MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
+        "{\"gravitino_uri\":\"gravitino.maintenance.gravitinoAuth.uri\",\"metalake\":\"ml\"}");
+    jobConf.put(
+        MaintenanceJobTemplates.TASKS_KEY,
+        "[{\"table_id\":1,\"maintenance_type\":\"rewrite_manifests\",\"policy_id\":9,"
+            + "\"action_id\":100,\"params\":{\"catalog_name\":\"iceberg\","
+            + "\"table_identifier\":\"db.t\",\"use_caching\":\"false\","
+            + "\"warehouse_location\":\"gravitino.maintenance.gravitinoAuth.uri\"},\"rules\":{}}]");
+
+    Map<String, String> resolved =
+        new MaintenanceJobConfBuilder(config, Clock.fixed(FIXED, ZoneOffset.UTC))
+            .resolveForSubmit(jobConf);
+
+    Assertions.assertTrue(
+        resolved
+            .get(MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY)
+            .contains("\"gravitino_uri\":\"" + GRAVITINO_URI + "\""));
+    String tasks = resolved.get(MaintenanceJobTemplates.TASKS_KEY);
+    Assertions.assertTrue(tasks.contains("\"warehouse_location\":\"" + GRAVITINO_URI + "\""));
+    Assertions.assertTrue(tasks.contains("\"use_caching\":\"false\""));
+    Assertions.assertFalse(tasks.contains("gravitino.maintenance.gravitinoAuth.uri"));
   }
 
   @Test

@@ -19,19 +19,27 @@
 package org.apache.gravitino.maintenance.scheduler.job;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import java.io.IOException;
 import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
@@ -42,6 +50,7 @@ import org.apache.gravitino.policy.ExecutablePolicyContent;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
 import org.apache.gravitino.policy.IcebergRewriteManifestsContent;
+import org.apache.gravitino.policy.IcebergSnapshotExpirationContent;
 import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyExecutionSpec;
 
@@ -62,8 +71,12 @@ import org.apache.gravitino.policy.PolicyExecutionSpec;
  */
 public final class MaintenanceJobConfBuilder {
 
-  private static final DateTimeFormatter ORPHAN_CUTOFF =
+  private static final DateTimeFormatter RETENTION_CUTOFF =
       DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
+
+  /** Relative day forms such as {@code 7d} in jobOptions {@code older_than}. */
+  private static final Pattern OLDER_THAN_DAYS_SUFFIX =
+      Pattern.compile("^(\\d+)d$", Pattern.CASE_INSENSITIVE);
 
   private static final String SPARK_SQL_CATALOG_PREFIX = "spark.sql.catalog.";
 
@@ -165,6 +178,15 @@ public final class MaintenanceJobConfBuilder {
           || "spark_conf".equals(key)
           || "updater_options".equals(key)) {
         continue;
+      }
+      if (IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY.equals(key)) {
+        long days = parsePositiveDays(value, IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY);
+        IcebergSnapshotExpirationContent.validateOlderThanDays(days);
+        jobConf.put("older_than", retentionCutoff(days));
+        continue;
+      }
+      if ("older_than".equals(key)) {
+        value = normalizeOlderThan(value);
       }
       routeJobOption(jobConf, sparkConf, catalogName, key, value);
     }
@@ -286,6 +308,8 @@ public final class MaintenanceJobConfBuilder {
       if (MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY.equals(key)
           || "spark_conf".equals(key)) {
         resolved.put(key, resolveJsonMapValues(value, key));
+      } else if (MaintenanceJobTemplates.TASKS_KEY.equals(key)) {
+        resolved.put(key, resolveTasksJson(value));
       } else {
         resolved.put(key, MaintenanceAuthConfigs.resolveConfigReference(gravitinoConfig, value));
       }
@@ -302,6 +326,45 @@ public final class MaintenanceJobConfBuilder {
           MaintenanceAuthConfigs.resolveConfigReference(gravitinoConfig, entry.getValue()));
     }
     return writeJson(out, field);
+  }
+
+  /**
+   * Expands {@code gravitino.maintenance.*} conf-key references inside each {@code tasks[].params}
+   * string value. Other task fields ({@code rules}, ids, type) stay unchanged.
+   */
+  private String resolveTasksJson(String tasksJson) {
+    try {
+      JsonNode root = JsonUtils.anyFieldMapper().readTree(tasksJson);
+      Preconditions.checkArgument(root != null && root.isArray(), "tasks must be a JSON array");
+      for (JsonNode task : root) {
+        if (task == null || !task.isObject()) {
+          continue;
+        }
+        JsonNode paramsNode = task.get("params");
+        if (paramsNode == null || !paramsNode.isObject()) {
+          continue;
+        }
+        ObjectNode params = (ObjectNode) paramsNode;
+        List<String> keys = new ArrayList<>();
+        Iterator<String> names = params.fieldNames();
+        while (names.hasNext()) {
+          keys.add(names.next());
+        }
+        for (String paramKey : keys) {
+          JsonNode value = params.get(paramKey);
+          if (value == null || !value.isTextual()) {
+            continue;
+          }
+          params.put(
+              paramKey,
+              MaintenanceAuthConfigs.resolveConfigReference(gravitinoConfig, value.asText()));
+        }
+      }
+      return JsonUtils.anyFieldMapper().writeValueAsString(root);
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "Failed to resolve " + MaintenanceJobTemplates.TASKS_KEY, e);
+    }
   }
 
   private static void routeJobOption(
@@ -407,20 +470,61 @@ public final class MaintenanceJobConfBuilder {
     if (content instanceof IcebergOrphanFileRemovalContent) {
       IcebergOrphanFileRemovalContent orphan = (IcebergOrphanFileRemovalContent) content;
       IcebergOrphanFileRemovalContent.validateOlderThanDays(orphan.olderThanDays());
-      jobConf.put("older_than", orphanCutoff(orphan.olderThanDays()));
+      jobConf.put("older_than", retentionCutoff(orphan.olderThanDays()));
       jobConf.put("dry_run", Boolean.toString(orphan.dryRun()));
       if (orphan.location() != null) {
         jobConf.put("location", orphan.location());
       }
+      return;
+    }
+    if (content instanceof IcebergSnapshotExpirationContent) {
+      IcebergSnapshotExpirationContent expire = (IcebergSnapshotExpirationContent) content;
+      IcebergSnapshotExpirationContent.validateOlderThanDays(expire.olderThanDays());
+      IcebergSnapshotExpirationContent.validateRetainLast(expire.retainLast());
+      // putIfAbsent: jobOptions may already supply normalized older_than / retain_last.
+      if (expire.olderThanDays() == IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
+        jobConf.putIfAbsent("older_than", "");
+      } else {
+        jobConf.putIfAbsent("older_than", retentionCutoff(expire.olderThanDays()));
+      }
+      if (expire.retainLast() == IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
+        jobConf.putIfAbsent("retain_last", "");
+      } else {
+        jobConf.putIfAbsent("retain_last", Long.toString(expire.retainLast()));
+      }
+      jobConf.putIfAbsent("stream_results", Boolean.toString(expire.streamResults()));
     }
   }
 
-  private String orphanCutoff(long days) {
+  /**
+   * Converts relative day forms such as {@code 7d} to a UTC timestamp string; leaves
+   * already-absolute timestamps unchanged.
+   */
+  private String normalizeOlderThan(String value) {
+    String trimmed = value.trim();
+    Matcher matcher = OLDER_THAN_DAYS_SUFFIX.matcher(trimmed);
+    if (!matcher.matches()) {
+      return value;
+    }
+    long days = Long.parseLong(matcher.group(1));
+    IcebergSnapshotExpirationContent.validateOlderThanDays(days);
+    return retentionCutoff(days);
+  }
+
+  private static long parsePositiveDays(String value, String field) {
     try {
-      return ORPHAN_CUTOFF.format(clock.instant().minus(days, ChronoUnit.DAYS));
+      return Long.parseLong(value.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(field + " must be an integer", e);
+    }
+  }
+
+  private String retentionCutoff(long days) {
+    try {
+      return RETENTION_CUTOFF.format(clock.instant().minus(days, ChronoUnit.DAYS));
     } catch (DateTimeException | ArithmeticException e) {
       throw new IllegalArgumentException(
-          "olderThanDays cannot be represented as a cleanup timestamp", e);
+          "olderThanDays cannot be represented as a retention timestamp", e);
     }
   }
 
