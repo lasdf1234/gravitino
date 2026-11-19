@@ -111,20 +111,18 @@ public final class MaintenanceJobSpecFactory {
             MaintenanceJobTemplates.isIcebergMaintenance(policy.policyType()),
             "unsupported policy type %s",
             policy.policyType());
-        Map<String, String> built = jobConfBuilder.build(policy, catalogName);
-        MaintenanceJobConfBuilder.foldPlaceholdersIntoSparkConf(built, catalogName);
-        JobConfParts parts = splitJobConfParts(built);
+        MaintenanceJobConfBuilder.ScheduleConf built = jobConfBuilder.build(policy, catalogName);
         if (firstPolicy) {
-          updaterOptions = parts.updaterOptions;
-          if (parts.sparkConf != null && !parts.sparkConf.isBlank()) {
+          updaterOptions = built.updaterOptions();
+          if (built.sparkConf() != null && !built.sparkConf().isBlank()) {
             sparkConf.putAll(
-                IcebergSparkConfigUtils.parseFlatJsonMap(parts.sparkConf, "spark_conf"));
+                IcebergSparkConfigUtils.parseFlatJsonMap(built.sparkConf(), "spark_conf"));
           }
           firstPolicy = false;
         } else {
-          mergeSparkConfMaps(sparkConf, parts.sparkConf);
+          mergeSparkConfMaps(sparkConf, built.sparkConf());
         }
-        Map<String, String> parameters = new LinkedHashMap<>(parts.parameters);
+        Map<String, String> parameters = new LinkedHashMap<>(built.parameters());
         parameters.put("catalog_name", table.catalogName());
         parameters.put("table_identifier", table.tableIdentifier());
         Task task =
@@ -305,40 +303,6 @@ public final class MaintenanceJobSpecFactory {
     } catch (JsonProcessingException e) {
       throw new IllegalStateException("Failed to serialize " + field, e);
     }
-  }
-
-  /**
-   * Splits a {@link MaintenanceJobConfBuilder#build} map into per-task {@code parameters} plus
-   * shared {@code updater_options} / {@code spark_conf}.
-   */
-  private static JobConfParts splitJobConfParts(Map<String, String> built) {
-    Preconditions.checkNotNull(built, "built");
-    Map<String, String> parameters = new LinkedHashMap<>();
-    String updaterOptions = null;
-    String sparkConf = null;
-    for (Map.Entry<String, String> entry : built.entrySet()) {
-      String key = entry.getKey();
-      String value = entry.getValue();
-      if (key == null || value == null) {
-        continue;
-      }
-      if (MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY.equals(key)) {
-        updaterOptions = value;
-        continue;
-      }
-      if ("spark_conf".equals(key)) {
-        sparkConf = value;
-        continue;
-      }
-      if (MaintenanceJobConfBuilder.EXCLUDE_FROM_TASK_PARAMETERS.contains(key)) {
-        continue;
-      }
-      parameters.put(key, value);
-    }
-    Preconditions.checkArgument(
-        updaterOptions != null && !updaterOptions.isBlank(),
-        "updater_options is required on schedule jobConf");
-    return new JobConfParts(parameters, updaterOptions, sparkConf);
   }
 
   /**
@@ -558,23 +522,6 @@ public final class MaintenanceJobSpecFactory {
       return Optional.of(Long.parseLong(matcher.group(1)));
     } catch (NumberFormatException e) {
       return Optional.empty();
-    }
-  }
-
-  /**
-   * Result of splitting {@link MaintenanceJobConfBuilder#build} into per-task parameters and shared
-   * jobConf fields.
-   */
-  private static final class JobConfParts {
-    private final Map<String, String> parameters;
-    private final String updaterOptions;
-    @Nullable private final String sparkConf;
-
-    private JobConfParts(
-        Map<String, String> parameters, String updaterOptions, @Nullable String sparkConf) {
-      this.parameters = parameters;
-      this.updaterOptions = updaterOptions;
-      this.sparkConf = sparkConf;
     }
   }
 }

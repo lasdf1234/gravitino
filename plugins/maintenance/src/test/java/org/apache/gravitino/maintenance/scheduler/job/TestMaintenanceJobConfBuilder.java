@@ -79,32 +79,35 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf = new MaintenanceJobConfBuilder(config).build(policy, "iceberg");
+    MaintenanceJobConfBuilder.ScheduleConf conf =
+        new MaintenanceJobConfBuilder(config).build(policy, "iceberg");
 
-    Assertions.assertEquals("sort", conf.get("strategy"));
-    Assertions.assertEquals("id ASC NULLS LAST", conf.get("sort_order"));
-    Assertions.assertTrue(conf.get("options").contains("min-input-files"));
-    Assertions.assertNull(conf.get("where_clause"));
-    Assertions.assertEquals("rest", conf.get("catalog_type"));
-    Assertions.assertEquals("system_iceberg_compaction", conf.get("maintenance_types"));
-    Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
+    Assertions.assertEquals("sort", conf.parameters().get("strategy"));
+    Assertions.assertEquals("id ASC NULLS LAST", conf.parameters().get("sort_order"));
+    Assertions.assertTrue(conf.parameters().get("options").contains("min-input-files"));
+    Assertions.assertNull(conf.parameters().get("where_clause"));
+    Assertions.assertFalse(conf.parameters().containsKey("catalog_type"));
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.sql.catalog.iceberg.type\":\"rest\""));
     Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"system_iceberg_compaction\""));
-    Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
+        conf.parameters()
+            .get(MaintenanceJobTemplates.RULES_KEY)
+            .contains("\"system_iceberg_compaction\""));
     Assertions.assertTrue(
-        conf.get("spark_conf")
+        conf.parameters().get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
+    Assertions.assertTrue(
+        conf.sparkConf()
             .contains(
                 "\"spark.sql.catalog.iceberg.rest.auth.type\":\"gravitino.maintenance.ircAuth.rest.auth.type\""));
-    Assertions.assertFalse(conf.get("spark_conf").contains("\"basic\""));
-    Assertions.assertNull(conf.get("rest.auth.type"));
-    Assertions.assertFalse(conf.get("spark_conf").contains("\"rest.auth.type\""));
-    Assertions.assertTrue(conf.get("updater_options").contains("\"metalake\":\"ml\""));
+    Assertions.assertFalse(conf.sparkConf().contains("\"basic\""));
+    Assertions.assertFalse(conf.sparkConf().contains("\"rest.auth.type\""));
+    Assertions.assertTrue(conf.updaterOptions().contains("\"metalake\":\"ml\""));
     Assertions.assertTrue(
-        conf.get("updater_options")
+        conf.updaterOptions()
             .contains("\"gravitino_uri\":\"gravitino.maintenance.gravitinoAuth.uri\""));
-    Assertions.assertFalse(conf.get("updater_options").contains(GRAVITINO_URI));
+    Assertions.assertFalse(conf.updaterOptions().contains(GRAVITINO_URI));
 
-    Map<String, String> resolved = new MaintenanceJobConfBuilder(config).resolveForSubmit(conf);
+    Map<String, String> resolved =
+        new MaintenanceJobConfBuilder(config).resolveForSubmit(conf.asMap());
     Assertions.assertTrue(
         resolved.get("updater_options").contains("\"gravitino_uri\":\"" + GRAVITINO_URI + "\""));
     Assertions.assertTrue(
@@ -147,15 +150,16 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
+    MaintenanceJobConfBuilder.ScheduleConf conf =
         new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
-    Assertions.assertEquals("7g", conf.get("spark_executor_memory"));
-    Assertions.assertEquals("4", conf.get("spark_executor_cores"));
-    Assertions.assertEquals("rest", conf.get("catalog_type"));
-    Assertions.assertTrue(conf.get("spark_conf").contains("\"spark.executor.memory\":\"7g\""));
+    Assertions.assertFalse(conf.parameters().containsKey("spark_executor_memory"));
+    Assertions.assertFalse(conf.parameters().containsKey("spark_executor_cores"));
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.executor.memory\":\"7g\""));
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.executor.cores\":\"4\""));
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.sql.catalog.iceberg.type\":\"rest\""));
     Assertions.assertFalse(
-        conf.get("spark_conf").contains("spark.sql.catalog.iceberg.spark.executor.memory"));
+        conf.sparkConf().contains("spark.sql.catalog.iceberg.spark.executor.memory"));
   }
 
   @Test
@@ -172,17 +176,20 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
+    MaintenanceJobConfBuilder.ScheduleConf conf =
         new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     String policyTypeWire = Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS.policyType();
-    Assertions.assertEquals(policyTypeWire, conf.get("maintenance_types"));
-    Assertions.assertEquals("0", conf.get("spec_id"));
-    Assertions.assertEquals("false", conf.get("use_caching"));
+    Assertions.assertEquals("0", conf.parameters().get("spec_id"));
+    Assertions.assertEquals("false", conf.parameters().get("use_caching"));
     Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"" + policyTypeWire + "\""));
+        conf.parameters()
+            .get(MaintenanceJobTemplates.RULES_KEY)
+            .contains("\"" + policyTypeWire + "\""));
     Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("manifest_count_threshold"));
+        conf.parameters()
+            .get(MaintenanceJobTemplates.RULES_KEY)
+            .contains("manifest_count_threshold"));
   }
 
   @Test
@@ -199,13 +206,11 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
+    MaintenanceJobConfBuilder.ScheduleConf conf =
         new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
-    Assertions.assertEquals(
-        Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS.policyType(), conf.get("maintenance_types"));
-    Assertions.assertFalse(conf.containsKey("spec_id"));
-    Assertions.assertFalse(conf.containsKey("use_caching"));
+    Assertions.assertFalse(conf.parameters().containsKey("spec_id"));
+    Assertions.assertFalse(conf.parameters().containsKey("use_caching"));
   }
 
   @Test
@@ -222,13 +227,11 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
+    MaintenanceJobConfBuilder.ScheduleConf conf =
         new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
-    Assertions.assertEquals("system_iceberg_orphan_file_removal", conf.get("maintenance_types"));
-    Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
-    Assertions.assertEquals("false", conf.get("dry_run"));
-    Assertions.assertEquals("7d", conf.get("older_than"));
+    Assertions.assertEquals("false", conf.parameters().get("dry_run"));
+    Assertions.assertEquals("7d", conf.parameters().get("older_than"));
   }
 
   @Test
@@ -245,12 +248,11 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> typed =
+    MaintenanceJobConfBuilder.ScheduleConf typed =
         new MaintenanceJobConfBuilder(configWithUri()).build(fromContent, "iceberg");
-    Assertions.assertEquals("system_iceberg_snapshot_expiration", typed.get("maintenance_types"));
-    Assertions.assertEquals("7d", typed.get("older_than"));
-    Assertions.assertEquals("10", typed.get("retain_last"));
-    Assertions.assertEquals("true", typed.get("stream_results"));
+    Assertions.assertEquals("7d", typed.parameters().get("older_than"));
+    Assertions.assertEquals("10", typed.parameters().get("retain_last"));
+    Assertions.assertEquals("true", typed.parameters().get("stream_results"));
   }
 
   @Test
@@ -267,12 +269,12 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
+    MaintenanceJobConfBuilder.ScheduleConf conf =
         new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
-    Assertions.assertEquals("system_iceberg_rewrite_manifests", conf.get("maintenance_types"));
-    Assertions.assertEquals("2", conf.get(IcebergRewriteManifestsContent.SPEC_ID));
-    Assertions.assertEquals("false", conf.get(IcebergRewriteManifestsContent.USE_CACHING));
+    Assertions.assertEquals("2", conf.parameters().get(IcebergRewriteManifestsContent.SPEC_ID));
+    Assertions.assertEquals(
+        "false", conf.parameters().get(IcebergRewriteManifestsContent.USE_CACHING));
   }
 
   @Test
@@ -367,13 +369,14 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf = new MaintenanceJobConfBuilder(config).build(policy, "iceberg");
+    MaintenanceJobConfBuilder.ScheduleConf conf =
+        new MaintenanceJobConfBuilder(config).build(policy, "iceberg");
 
     Assertions.assertTrue(
-        conf.get("updater_options").contains("\"gravitino_uri\":\"http://policy-uri:8090\""));
+        conf.updaterOptions().contains("\"gravitino_uri\":\"http://policy-uri:8090\""));
     // Path metalake always comes from the policy namespace, never policy updaterOptions.
-    Assertions.assertTrue(conf.get("updater_options").contains("\"metalake\":\"ml\""));
-    Assertions.assertFalse(conf.get("updater_options").contains("policy-ml"));
+    Assertions.assertTrue(conf.updaterOptions().contains("\"metalake\":\"ml\""));
+    Assertions.assertFalse(conf.updaterOptions().contains("policy-ml"));
   }
 
   @Test

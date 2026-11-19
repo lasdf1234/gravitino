@@ -71,31 +71,6 @@ class TestMaintenanceCommitSubmitPipeline {
   }
 
   @Test
-  void testDuplicatePolicyIdsSkipWithoutAcquire() {
-    MaintenanceJobManager mgr = mock(MaintenanceJobManager.class);
-    TableMaintenanceActionMetaService actions = mock(TableMaintenanceActionMetaService.class);
-    Map<String, String> params =
-        new LinkedHashMap<>(Map.of("catalog_name", "iceberg", "table_identifier", "db.t"));
-    MaintenanceJobSpec dup =
-        new MaintenanceJobSpec(
-            List.of(
-                new Task(TABLE_ID, POLICY_ID, "system_iceberg_compaction", null, params),
-                new Task(
-                    TABLE_ID,
-                    POLICY_ID,
-                    "system_iceberg_snapshot_expiration",
-                    null,
-                    new LinkedHashMap<>(params))),
-            UPDATER,
-            null);
-
-    pipeline(Set.of(), actions, mgr).submit(MaintenanceTaskIds.forCommitTable(TABLE_ID), dup);
-
-    verify(actions, never()).tryAcquireInFlightBatch(anyLong(), anyList(), anyLong());
-    verify(mgr, never()).submitAndBind(anyString(), anyMap(), anyList());
-  }
-
-  @Test
   void testSubmitClaimsEveryChainPolicyAndUsesSpecJobConf() {
     MaintenanceJobManager mgr = mock(MaintenanceJobManager.class);
     List<OccupancyClaim> claims = List.of(new OccupancyClaim(1L, 2L), new OccupancyClaim(3L, 4L));

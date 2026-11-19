@@ -569,7 +569,7 @@ public class CronJobPlanner {
         client.getScheduledExecutionsForTask(
             MaintenanceSchedulerPools.CRON_JOB, MaintenanceJobSpec.class)) {
       MaintenanceJobSpec data = execution.getData();
-      if (data == null || !data.isValid() || !isExpireSnapshots(data)) {
+      if (data == null || !data.isValid() || !data.containsSnapshotExpiration()) {
         continue;
       }
       String instanceId = execution.getTaskInstance().getId();
@@ -605,11 +605,6 @@ public class CronJobPlanner {
       }
     }
     return open;
-  }
-
-  private static boolean isExpireSnapshots(MaintenanceJobSpec spec) {
-    String expireType = Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION.policyType();
-    return spec.getTasks().stream().anyMatch(t -> expireType.equals(t.getPolicyType()));
   }
 
   /**
@@ -648,7 +643,7 @@ public class CronJobPlanner {
       MaintenanceJobSpec data = execution.getData();
       if (data != null
           && data.isValid()
-          && !isExpireSnapshots(data)
+          && !data.containsSnapshotExpiration()
           && data.tableIds().contains(tableId)) {
         return true;
       }

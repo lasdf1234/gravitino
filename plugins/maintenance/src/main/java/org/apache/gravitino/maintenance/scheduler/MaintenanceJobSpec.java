@@ -32,6 +32,7 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
+import org.apache.gravitino.policy.Policy;
 
 /**
  * Schedule-time spec stored as JSON in db-scheduler {@code task_data} for {@code cron-job} and
@@ -152,6 +153,19 @@ public final class MaintenanceJobSpec {
         && tasks != null
         && !tasks.isEmpty()
         && tasks.stream().allMatch(Task::isValid);
+  }
+
+  /**
+   * @return true when any task is Iceberg snapshot expiration ({@link
+   *     Policy.BuiltInType#ICEBERG_SNAPSHOT_EXPIRATION})
+   */
+  @JsonIgnore
+  public boolean containsSnapshotExpiration() {
+    if (tasks == null || tasks.isEmpty()) {
+      return false;
+    }
+    String expireType = Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION.policyType();
+    return tasks.stream().anyMatch(t -> expireType.equals(t.getPolicyType()));
   }
 
   @Override

@@ -49,39 +49,29 @@ import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyExecutionSpec;
 
 /**
- * Builds the {@code runJob} configuration map for Spark submits.
+ * Builds schedule-time configuration for TMS Iceberg maintenance: per-task procedure {@code
+ * parameters} plus shared {@code updater_options} / {@code spark_conf}.
  *
- * <p>Shape matches Iceberg update-stats submit: flatten template placeholders into the top-level
- * map, pack {@code updater_options} as one JSON string, and pack extra Spark / IRC settings into
- * {@code spark_conf} as another JSON string. Policy {@code jobOptions} (including overlay from
- * {@code gravitino.maintenance.ircAuth.*}) keep short IRC keys such as {@code rest.auth.type};
- * those are expanded to {@code spark.sql.catalog.<catalog>.*} only when writing {@code spark_conf}.
- * Dot-form Spark resource keys ({@code spark.executor.memory}) become the matching underscore
- * placeholders ({@code spark_executor_memory}) instead of catalog properties.
+ * <p>Policy {@code jobOptions} (including overlay from {@code gravitino.maintenance.ircAuth.*})
+ * keep short IRC keys such as {@code rest.auth.type}; those are expanded to {@code
+ * spark.sql.catalog.<catalog>.*} only when writing {@code spark_conf}. Dot-form Spark resource keys
+ * ({@code spark.executor.memory}) land in {@code spark_conf} (never as catalog properties).
  *
- * <p>{@link #build} is for schedule {@code task_data}: cluster {@code gravitinoAuth} / {@code
- * ircAuth} are stored as conf <em>keys</em> (not secret values). Call {@link #resolveForSubmit}
- * immediately before {@code runJob} to expand those keys from the live {@code gravitino.conf}. Call
- * {@link #applyActionIdsFromClaims} to stamp soft-slot {@code action_id} onto {@code tasks[]} right
- * before submit.
+ * <p>{@link #build} stores cluster {@code gravitinoAuth} / {@code ircAuth} as conf <em>keys</em>
+ * (not secret values). Call {@link #resolveForSubmit} immediately before {@code runJob} to expand
+ * those keys from the live {@code gravitino.conf}. Call {@link #applyActionIdsFromClaims} to stamp
+ * soft-slot {@code action_id} onto {@code tasks[]} right before submit.
  */
 public final class MaintenanceJobConfBuilder {
 
   private static final String SPARK_SQL_CATALOG_PREFIX = "spark.sql.catalog.";
 
-  /** Top-level {@code runJob} placeholders consumed by Iceberg / Spark templates. */
-  private static final Set<String> FLAT_PLACEHOLDER_KEYS =
+  /**
+   * Procedure / CALL flags that belong on schedule {@code Task.parameters} (later {@code
+   * tasks[].params}).
+   */
+  private static final Set<String> PROCEDURE_PARAMETER_KEYS =
       ImmutableSet.of(
-          "catalog_name",
-          "table_identifier",
-          "catalog_type",
-          "catalog_uri",
-          "warehouse_location",
-          "spark_master",
-          "spark_executor_instances",
-          "spark_executor_cores",
-          "spark_executor_memory",
-          "spark_driver_memory",
           "strategy",
           "sort_order",
           "where_clause",
@@ -92,31 +82,9 @@ public final class MaintenanceJobConfBuilder {
           "retain_last",
           "stream_results",
           "location",
-          "dry_run",
-          MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
-          MaintenanceJobTemplates.RULES_KEY);
+          "dry_run");
 
-  /**
-   * Keys from {@link #build} that must not become schedule {@code Task.parameters}: deprecated flat
-   * dispatch fields and session/resource placeholders that stay on shared {@code spark_conf} /
-   * top-level jobConf. {@code updater_options} / {@code spark_conf} are peeled off separately.
-   */
-  public static final Set<String> EXCLUDE_FROM_TASK_PARAMETERS =
-      ImmutableSet.of(
-          MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
-          MaintenanceJobTemplates.POLICY_IDS_KEY,
-          "spark_master",
-          "spark_executor_instances",
-          "spark_executor_cores",
-          "spark_executor_memory",
-          "spark_driver_memory",
-          "catalog_type",
-          "catalog_uri",
-          "warehouse_location");
-
-  /**
-   * Spark resource / session keys that map onto flat template placeholders (same as update-stats).
-   */
+  /** Underscore session placeholders → Spark conf keys (same as update-stats). */
   private static final Map<String, String> SPARK_KEY_TO_PLACEHOLDER =
       ImmutableMap.of(
           "spark.master",
@@ -130,6 +98,16 @@ public final class MaintenanceJobConfBuilder {
           "spark.driver.memory",
           "spark_driver_memory");
 
+  private static final Map<String, String> PLACEHOLDER_TO_SPARK_KEY;
+
+  static {
+    Map<String, String> reverse = new LinkedHashMap<>();
+    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
+      reverse.put(entry.getValue(), entry.getKey());
+    }
+    PLACEHOLDER_TO_SPARK_KEY = ImmutableMap.copyOf(reverse);
+  }
+
   private final Config gravitinoConfig;
 
   /**
@@ -140,14 +118,15 @@ public final class MaintenanceJobConfBuilder {
   }
 
   /**
-   * Schedule-time jobConf for db-scheduler {@code task_data}. Cluster auth overlays store conf keys
-   * (for example {@code gravitino.maintenance.gravitinoAuth.uri}), not secret values.
+   * Schedule-time parts for one policy: procedure {@code parameters}, shared updater options, and
+   * nested spark conf. Cluster auth overlays store conf keys (for example {@code
+   * gravitino.maintenance.gravitinoAuth.uri}), not secret values.
    *
    * @param policy effective maintenance policy
    * @param catalogName Spark catalog alias for IRC property scoping
-   * @return mutable jobConf (split into shared fields / task {@code parameters} by the factory)
+   * @return schedule conf parts (factory adds catalog/table identity onto parameters)
    */
-  public Map<String, String> build(PolicyEntity policy, String catalogName) {
+  public ScheduleConf build(PolicyEntity policy, String catalogName) {
     PolicyContent content = policy.content();
     PolicyExecutionSpec spec = executionSpec(content);
     // ircAuth suffixes stay short-named; values are conf keys until resolveForSubmit.
@@ -161,7 +140,7 @@ public final class MaintenanceJobConfBuilder {
                 spec.updaterOptions(),
                 MaintenanceAuthConfigs.loadGravitinoAuthAsConfigKeys(gravitinoConfig)));
 
-    Map<String, String> jobConf = new LinkedHashMap<>();
+    Map<String, String> parameters = new LinkedHashMap<>();
     Map<String, String> sparkConf = new LinkedHashMap<>();
 
     String existingSparkConfJson = jobOptions.get("spark_conf");
@@ -183,41 +162,33 @@ public final class MaintenanceJobConfBuilder {
         long days = parsePositiveDays(value, IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY);
         IcebergSnapshotExpirationContent.validateOlderThanDays(days);
         // Spark job expands Nd → timestamp at execute time.
-        jobConf.put("older_than", days + "d");
+        parameters.put("older_than", days + "d");
         continue;
       }
-      routeJobOption(jobConf, sparkConf, catalogName, key, value);
+      routeJobOption(parameters, sparkConf, catalogName, key, value);
     }
 
-    fillPlaceholdersFromSparkConf(jobConf, sparkConf, catalogName);
-    putTypedProcedureParams(jobConf, content);
+    putTypedProcedureParams(parameters, content);
+    ensureIcebergCatalogImpl(sparkConf, catalogName);
 
-    if (MaintenanceJobTemplates.isIcebergMaintenance(policy.policyType())) {
+    if (MaintenanceJobTemplates.isIcebergMaintenance(policy.policyType()) && content != null) {
       String policyType = policy.policyType().policyType();
-      jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, policyType);
-      jobConf.put(MaintenanceJobTemplates.POLICY_IDS_KEY, Long.toString(policy.id()));
-      if (content != null) {
-        Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
-        rulesByType.put(policyType, new LinkedHashMap<>(content.rules()));
-        jobConf.put(
-            MaintenanceJobTemplates.RULES_KEY,
-            writeJson(rulesByType, MaintenanceJobTemplates.RULES_KEY));
-      }
+      Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
+      rulesByType.put(policyType, new LinkedHashMap<>(content.rules()));
+      parameters.put(
+          MaintenanceJobTemplates.RULES_KEY,
+          writeJson(rulesByType, MaintenanceJobTemplates.RULES_KEY));
     }
 
-    jobConf.put(
-        MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
-        writeJson(updaterOptions, "updater_options"));
-    if (!sparkConf.isEmpty()) {
-      jobConf.put("spark_conf", writeJson(new TreeMap<>(sparkConf), "spark_conf"));
-    }
-    return jobConf;
+    String updaterJson = writeJson(updaterOptions, "updater_options");
+    String sparkConfJson =
+        sparkConf.isEmpty() ? null : writeJson(new TreeMap<>(sparkConf), "spark_conf");
+    return new ScheduleConf(parameters, updaterJson, sparkConfJson);
   }
 
   /**
    * Re-derives flat template placeholders ({@code spark_executor_memory}, {@code catalog_type}, …)
-   * from nested {@code spark_conf}. Used when schedule {@code task_data} stores only the nested
-   * {@code spark_conf} JSON.
+   * from nested {@code spark_conf} onto a submit {@code runJob} map (Spark template configs).
    *
    * @param jobConf mutable runJob map that already contains {@code spark_conf}
    * @param catalogName Spark catalog alias for IRC property scoping
@@ -231,15 +202,24 @@ public final class MaintenanceJobConfBuilder {
     }
     Map<String, String> sparkConf =
         IcebergSparkConfigUtils.parseFlatJsonMap(sparkConfJson, "spark_conf");
-    fillPlaceholdersFromSparkConf(jobConf, sparkConf, catalogName);
+    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
+      String sparkKey = entry.getKey();
+      String placeholder = entry.getValue();
+      if (!jobConf.containsKey(placeholder) && sparkConf.containsKey(sparkKey)) {
+        jobConf.put(placeholder, sparkConf.get(sparkKey));
+      }
+    }
+    String catalogPrefix = SPARK_SQL_CATALOG_PREFIX + catalogName;
+    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_type", catalogPrefix + ".type");
+    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_uri", catalogPrefix + ".uri");
+    putIfAbsentFromSpark(jobConf, sparkConf, "warehouse_location", catalogPrefix + ".warehouse");
   }
 
   /**
    * Folds flat session placeholders ({@code spark_executor_memory}, {@code catalog_type}, …) into
-   * nested {@code spark_conf} so schedule {@code task_data} can keep only that JSON at the top
-   * level.
+   * nested {@code spark_conf}.
    *
-   * @param jobConf mutable map from {@link #build}
+   * @param jobConf mutable map that may carry flat placeholders plus optional {@code spark_conf}
    * @param catalogName Spark catalog alias for IRC property scoping
    */
   public static void foldPlaceholdersIntoSparkConf(
@@ -262,15 +242,7 @@ public final class MaintenanceJobConfBuilder {
     putIfAbsentSparkFromPlaceholder(jobConf, sparkConf, "catalog_uri", catalogPrefix + ".uri");
     putIfAbsentSparkFromPlaceholder(
         jobConf, sparkConf, "warehouse_location", catalogPrefix + ".warehouse");
-    // IcebergMaintenanceJob builds SparkSession from spark_conf JSON alone in some executors;
-    // without the catalog impl class, Spark falls back to spark_catalog and multipart names fail.
-    if (sparkConf.containsKey(catalogPrefix + ".type")
-        || sparkConf.containsKey(catalogPrefix + ".uri")
-        || sparkConf.containsKey(catalogPrefix + ".warehouse")) {
-      sparkConf.putIfAbsent(catalogPrefix, "org.apache.iceberg.spark.SparkCatalog");
-      sparkConf.putIfAbsent(
-          "spark.sql.extensions", IcebergSparkConfigUtils.ICEBERG_SPARK_EXTENSIONS);
-    }
+    ensureIcebergCatalogImpl(sparkConf, catalogName);
     if (!sparkConf.isEmpty()) {
       jobConf.put("spark_conf", writeJson(sparkConf, "spark_conf"));
     }
@@ -287,11 +259,24 @@ public final class MaintenanceJobConfBuilder {
     }
   }
 
+  private static void ensureIcebergCatalogImpl(Map<String, String> sparkConf, String catalogName) {
+    String catalogPrefix = SPARK_SQL_CATALOG_PREFIX + catalogName;
+    // IcebergMaintenanceJob builds SparkSession from spark_conf JSON alone in some executors;
+    // without the catalog impl class, Spark falls back to spark_catalog and multipart names fail.
+    if (sparkConf.containsKey(catalogPrefix + ".type")
+        || sparkConf.containsKey(catalogPrefix + ".uri")
+        || sparkConf.containsKey(catalogPrefix + ".warehouse")) {
+      sparkConf.putIfAbsent(catalogPrefix, "org.apache.iceberg.spark.SparkCatalog");
+      sparkConf.putIfAbsent(
+          "spark.sql.extensions", IcebergSparkConfigUtils.ICEBERG_SPARK_EXTENSIONS);
+    }
+  }
+
   /**
    * Expands {@code gravitino.maintenance.*} conf-key references in a schedule snapshot into live
    * values from {@code gravitino.conf}. Call immediately before {@code runJob}.
    *
-   * @param scheduleJobConf jobConf from {@link #build} / {@code task_data}
+   * @param scheduleJobConf jobConf from submit projection / {@code task_data}
    * @return new map with secrets and URIs resolved
    */
   public Map<String, String> resolveForSubmit(Map<String, String> scheduleJobConf) {
@@ -414,19 +399,34 @@ public final class MaintenanceJobConfBuilder {
   }
 
   private static void routeJobOption(
-      Map<String, String> jobConf,
+      Map<String, String> parameters,
       Map<String, String> sparkConf,
       String catalogName,
       String key,
       String value) {
-    if (FLAT_PLACEHOLDER_KEYS.contains(key)) {
-      jobConf.put(key, value);
+    if (PROCEDURE_PARAMETER_KEYS.contains(key)) {
+      parameters.put(key, value);
       return;
     }
-    String placeholder = SPARK_KEY_TO_PLACEHOLDER.get(key);
-    if (placeholder != null) {
-      jobConf.put(placeholder, value);
+    String sparkKey = PLACEHOLDER_TO_SPARK_KEY.get(key);
+    if (sparkKey != null) {
+      sparkConf.put(sparkKey, value);
+      return;
+    }
+    if (SPARK_KEY_TO_PLACEHOLDER.containsKey(key)) {
       sparkConf.put(key, value);
+      return;
+    }
+    if ("catalog_type".equals(key)) {
+      sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + ".type", value);
+      return;
+    }
+    if ("catalog_uri".equals(key)) {
+      sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + ".uri", value);
+      return;
+    }
+    if ("warehouse_location".equals(key)) {
+      sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + ".warehouse", value);
       return;
     }
     if (key.startsWith("spark.")) {
@@ -440,21 +440,6 @@ public final class MaintenanceJobConfBuilder {
     }
     // IRC / Iceberg catalog props from jobOptions / ircAuth (short names).
     sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + "." + key, value);
-  }
-
-  private static void fillPlaceholdersFromSparkConf(
-      Map<String, String> jobConf, Map<String, String> sparkConf, String catalogName) {
-    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
-      String sparkKey = entry.getKey();
-      String placeholder = entry.getValue();
-      if (!jobConf.containsKey(placeholder) && sparkConf.containsKey(sparkKey)) {
-        jobConf.put(placeholder, sparkConf.get(sparkKey));
-      }
-    }
-    String catalogPrefix = SPARK_SQL_CATALOG_PREFIX + catalogName;
-    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_type", catalogPrefix + ".type");
-    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_uri", catalogPrefix + ".uri");
-    putIfAbsentFromSpark(jobConf, sparkConf, "warehouse_location", catalogPrefix + ".warehouse");
   }
 
   private static void putIfAbsentFromSpark(
@@ -491,25 +476,25 @@ public final class MaintenanceJobConfBuilder {
   }
 
   private void putTypedProcedureParams(
-      Map<String, String> jobConf, @Nullable PolicyContent content) {
+      Map<String, String> parameters, @Nullable PolicyContent content) {
     if (content instanceof IcebergDataCompactionContent) {
       IcebergDataCompactionContent compaction = (IcebergDataCompactionContent) content;
-      jobConf.put("strategy", compaction.rewriteStrategy());
+      parameters.put("strategy", compaction.rewriteStrategy());
       if (compaction.sortOrder() != null && !compaction.sortOrder().isEmpty()) {
-        jobConf.put("sort_order", compaction.sortOrder());
+        parameters.put("sort_order", compaction.sortOrder());
       }
       if (!compaction.rewriteOptions().isEmpty()) {
-        jobConf.put("options", writeJson(new TreeMap<>(compaction.rewriteOptions()), "options"));
+        parameters.put("options", writeJson(new TreeMap<>(compaction.rewriteOptions()), "options"));
       }
       return;
     }
     if (content instanceof IcebergRewriteManifestsContent) {
       IcebergRewriteManifestsContent rewrite = (IcebergRewriteManifestsContent) content;
       if (rewrite.specId() != null) {
-        jobConf.put("spec_id", Integer.toString(rewrite.specId()));
+        parameters.put("spec_id", Integer.toString(rewrite.specId()));
       }
       if (rewrite.useCaching() != null) {
-        jobConf.put("use_caching", Boolean.toString(rewrite.useCaching()));
+        parameters.put("use_caching", Boolean.toString(rewrite.useCaching()));
       }
       return;
     }
@@ -517,10 +502,10 @@ public final class MaintenanceJobConfBuilder {
       IcebergOrphanFileRemovalContent orphan = (IcebergOrphanFileRemovalContent) content;
       IcebergOrphanFileRemovalContent.validateOlderThanDays(orphan.olderThanDays());
       // Spark job expands Nd → timestamp at execute time.
-      jobConf.put("older_than", orphan.olderThanDays() + "d");
-      jobConf.put("dry_run", Boolean.toString(orphan.dryRun()));
+      parameters.put("older_than", orphan.olderThanDays() + "d");
+      parameters.put("dry_run", Boolean.toString(orphan.dryRun()));
       if (orphan.location() != null) {
-        jobConf.put("location", orphan.location());
+        parameters.put("location", orphan.location());
       }
       return;
     }
@@ -531,16 +516,16 @@ public final class MaintenanceJobConfBuilder {
       // putIfAbsent: jobOptions may already supply older_than / retain_last.
       // Default days → empty so Iceberg table history.expire.* stays authoritative.
       if (expire.olderThanDays() == IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
-        jobConf.putIfAbsent("older_than", "");
+        parameters.putIfAbsent("older_than", "");
       } else {
-        jobConf.putIfAbsent("older_than", expire.olderThanDays() + "d");
+        parameters.putIfAbsent("older_than", expire.olderThanDays() + "d");
       }
       if (expire.retainLast() == IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
-        jobConf.putIfAbsent("retain_last", "");
+        parameters.putIfAbsent("retain_last", "");
       } else {
-        jobConf.putIfAbsent("retain_last", Long.toString(expire.retainLast()));
+        parameters.putIfAbsent("retain_last", Long.toString(expire.retainLast()));
       }
-      jobConf.putIfAbsent("stream_results", Boolean.toString(expire.streamResults()));
+      parameters.putIfAbsent("stream_results", Boolean.toString(expire.streamResults()));
     }
   }
 
@@ -564,6 +549,59 @@ public final class MaintenanceJobConfBuilder {
       return JsonUtils.anyFieldMapper().writeValueAsString(map);
     } catch (JsonProcessingException e) {
       throw new IllegalStateException("Failed to serialize " + field + " for runJob", e);
+    }
+  }
+
+  /**
+   * Schedule-time output of {@link #build}: per-task procedure parameters plus shared updater /
+   * spark JSON strings.
+   */
+  public static final class ScheduleConf {
+    private final Map<String, String> parameters;
+    private final String updaterOptions;
+    @Nullable private final String sparkConf;
+
+    ScheduleConf(
+        Map<String, String> parameters, String updaterOptions, @Nullable String sparkConf) {
+      this.parameters = Map.copyOf(Preconditions.checkNotNull(parameters, "parameters"));
+      this.updaterOptions = Preconditions.checkNotNull(updaterOptions, "updaterOptions");
+      this.sparkConf = sparkConf;
+    }
+
+    /**
+     * @return procedure flags and gate {@code rules} for one schedule task
+     */
+    public Map<String, String> parameters() {
+      return parameters;
+    }
+
+    /**
+     * @return shared {@code updater_options} JSON object string
+     */
+    public String updaterOptions() {
+      return updaterOptions;
+    }
+
+    /**
+     * @return shared {@code spark_conf} JSON object string, or null when empty
+     */
+    @Nullable
+    public String sparkConf() {
+      return sparkConf;
+    }
+
+    /**
+     * Flat map view for tests / {@link #resolveForSubmit}: parameters plus shared JSON fields.
+     *
+     * @return new mutable map
+     */
+    public Map<String, String> asMap() {
+      Map<String, String> out = new LinkedHashMap<>(parameters);
+      out.put(MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY, updaterOptions);
+      if (sparkConf != null && !sparkConf.isBlank()) {
+        out.put("spark_conf", sparkConf);
+      }
+      return out;
     }
   }
 }
