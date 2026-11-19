@@ -61,7 +61,6 @@ class TestCommitJobSpecFactory {
     Assertions.assertEquals("expire_snapshots", spec.getTasks().get(1).getMaintenanceType());
     String olderThan = spec.getTasks().get(1).getParameters().get("older_than");
     Assertions.assertNotNull(olderThan);
-    Assertions.assertNotEquals("7d", olderThan);
     Assertions.assertTrue(olderThan.matches("\\d{4}-\\d{2}-\\d{2} .*"));
     Assertions.assertEquals("10", spec.getTasks().get(1).getParameters().get("retain_last"));
     Assertions.assertTrue(spec.getUpdaterOptions().contains("metalake"));
@@ -152,11 +151,7 @@ class TestCommitJobSpecFactory {
         .withEnabled(true)
         .withContent(
             PolicyContents.icebergSnapshotExpiration(
-                null,
-                true,
-                null,
-                Map.of("older_than", "7d", "retain_last", "10", "spark_executor_memory", "2g"),
-                Map.of()))
+                7L, 10L, true, null, true, null, Map.of("spark_executor_memory", "2g"), Map.of()))
         .withAuditInfo(
             AuditInfo.builder().withCreator("test").withCreateTime(Instant.EPOCH).build())
         .build();

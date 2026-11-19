@@ -239,7 +239,7 @@ class TestMaintenanceJobConfBuilder {
   }
 
   @Test
-  void testExpireMapsTypedFieldsAndNormalizesJobOptionDays() {
+  void testExpireMapsTypedFields() {
     PolicyEntity fromContent =
         PolicyEntity.builder()
             .withId(POLICY_ID)
@@ -259,25 +259,6 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertEquals("2024-06-08 12:00:00Z", typed.get("older_than"));
     Assertions.assertEquals("10", typed.get("retain_last"));
     Assertions.assertEquals("true", typed.get("stream_results"));
-
-    PolicyEntity fromJobOption =
-        PolicyEntity.builder()
-            .withId(POLICY_ID + 1)
-            .withName("e2")
-            .withNamespace(NamespaceUtil.ofPolicy("ml"))
-            .withPolicyType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
-            .withEnabled(true)
-            .withContent(
-                PolicyContents.icebergSnapshotExpiration(
-                    null, true, null, Map.of("older_than", "7d", "retain_last", "10"), Map.of()))
-            .withAuditInfo(
-                AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
-            .build();
-    Map<String, String> normalized =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(fromJobOption, "iceberg");
-    Assertions.assertEquals("2024-06-08 12:00:00Z", normalized.get("older_than"));
-    Assertions.assertEquals("10", normalized.get("retain_last"));
   }
 
   @Test

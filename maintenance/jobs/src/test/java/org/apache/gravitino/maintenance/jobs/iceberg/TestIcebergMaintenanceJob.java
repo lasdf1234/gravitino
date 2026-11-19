@@ -77,19 +77,19 @@ public class TestIcebergMaintenanceJob {
             "["
                 + "{\"table_id\":1,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,"
                 + "\"action_id\":100,\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t1\","
-                + "\"older_than\":\"7d\",\"retain_last\":\"10\"},\"rules\":{}},"
+                + "\"older_than\":\"2024-06-08 12:00:00Z\",\"retain_last\":\"10\"},\"rules\":{}},"
                 + "{\"table_id\":2,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":11,"
                 + "\"action_id\":101,\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t2\","
-                + "\"older_than\":\"30d\",\"retain_last\":\"3\"},\"rules\":{}}"
+                + "\"older_than\":\"2024-05-16 12:00:00Z\",\"retain_last\":\"3\"},\"rules\":{}}"
                 + "]");
     assertEquals(2, tasks.size());
     assertEquals("c", tasks.get(0).catalogName);
     assertEquals("db.t1", tasks.get(0).tableIdentifier);
-    assertEquals("7d", tasks.get(0).procedureArgs.get("older-than"));
+    assertEquals("2024-06-08 12:00:00Z", tasks.get(0).procedureArgs.get("older-than"));
     assertEquals("10", tasks.get(0).procedureArgs.get("retain-last"));
     assertFalse(tasks.get(0).procedureArgs.containsKey("catalog-name"));
     assertFalse(tasks.get(0).procedureArgs.containsKey("table-identifier"));
-    assertEquals("30d", tasks.get(1).procedureArgs.get("older-than"));
+    assertEquals("2024-05-16 12:00:00Z", tasks.get(1).procedureArgs.get("older-than"));
     assertEquals("3", tasks.get(1).procedureArgs.get("retain-last"));
   }
 

@@ -262,16 +262,6 @@ public class TestIcebergExpireSnapshotsJob {
   }
 
   @Test
-  public void testNormalizeOlderThanRelativeDays() {
-    java.time.Clock fixed =
-        java.time.Clock.fixed(
-            java.time.Instant.parse("2024-06-15T12:00:00Z"), java.time.ZoneOffset.UTC);
-    assertEquals("2024-06-08 12:00:00Z", IcebergJobUtils.normalizeOlderThan("7d", fixed));
-    assertEquals(
-        "2024-01-01 00:00:00", IcebergJobUtils.normalizeOlderThan("2024-01-01 00:00:00", fixed));
-  }
-
-  @Test
   public void testBuildProcedureCallWithRetainLast() {
     String sql =
         IcebergExpireSnapshotsJob.buildProcedureCall("iceberg_prod", "db.sample", null, "5", false);

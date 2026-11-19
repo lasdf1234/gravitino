@@ -201,10 +201,8 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
       @Nullable String retainLast,
       boolean streamResults) {
     validateRetainLast(retainLast);
-    String normalizedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan);
     String sql =
-        buildProcedureCall(
-            catalogName, tableIdentifier, normalizedOlderThan, retainLast, streamResults);
+        buildProcedureCall(catalogName, tableIdentifier, olderThan, retainLast, streamResults);
     LOG.info("Executing Iceberg expire_snapshots: {}", sql);
     return spark.sql(sql).collectAsList();
   }

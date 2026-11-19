@@ -38,8 +38,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
@@ -73,10 +71,6 @@ public final class MaintenanceJobConfBuilder {
 
   private static final DateTimeFormatter RETENTION_CUTOFF =
       DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
-
-  /** Relative day forms such as {@code 7d} in jobOptions {@code older_than}. */
-  private static final Pattern OLDER_THAN_DAYS_SUFFIX =
-      Pattern.compile("^(\\d+)d$", Pattern.CASE_INSENSITIVE);
 
   private static final String SPARK_SQL_CATALOG_PREFIX = "spark.sql.catalog.";
 
@@ -184,9 +178,6 @@ public final class MaintenanceJobConfBuilder {
         IcebergSnapshotExpirationContent.validateOlderThanDays(days);
         jobConf.put("older_than", retentionCutoff(days));
         continue;
-      }
-      if ("older_than".equals(key)) {
-        value = normalizeOlderThan(value);
       }
       routeJobOption(jobConf, sparkConf, catalogName, key, value);
     }
@@ -494,21 +485,6 @@ public final class MaintenanceJobConfBuilder {
       }
       jobConf.putIfAbsent("stream_results", Boolean.toString(expire.streamResults()));
     }
-  }
-
-  /**
-   * Converts relative day forms such as {@code 7d} to a UTC timestamp string; leaves
-   * already-absolute timestamps unchanged.
-   */
-  private String normalizeOlderThan(String value) {
-    String trimmed = value.trim();
-    Matcher matcher = OLDER_THAN_DAYS_SUFFIX.matcher(trimmed);
-    if (!matcher.matches()) {
-      return value;
-    }
-    long days = Long.parseLong(matcher.group(1));
-    IcebergSnapshotExpirationContent.validateOlderThanDays(days);
-    return retentionCutoff(days);
   }
 
   private static long parsePositiveDays(String value, String field) {
