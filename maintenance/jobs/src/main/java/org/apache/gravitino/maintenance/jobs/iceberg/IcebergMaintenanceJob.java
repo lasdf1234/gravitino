@@ -186,9 +186,8 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       return 1;
     }
 
-    String appLabel = appLabel(tasks);
     SparkSession.Builder sparkBuilder =
-        SparkSession.builder().appName("Gravitino Iceberg Maintenance Task (" + appLabel + ")");
+        SparkSession.builder().appName("Gravitino Iceberg Maintenance Task");
     String sparkConfJson =
         IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("spark-conf"));
     if (sparkConfJson != null && !sparkConfJson.isEmpty()) {
@@ -229,18 +228,6 @@ public class IcebergMaintenanceJob implements BuiltInJob {
         }
       }
     }
-  }
-
-  private static String appLabel(List<MaintenanceTask> tasks) {
-    List<String> types =
-        tasks.stream().map(t -> t.policyType.policyType()).distinct().collect(Collectors.toList());
-    if (types.size() == 1 && tasks.size() == 1) {
-      return types.get(0);
-    }
-    if (types.size() == 1) {
-      return "batch:" + types.get(0) + ":" + tasks.size();
-    }
-    return "chain:" + String.join(",", types);
   }
 
   /**
