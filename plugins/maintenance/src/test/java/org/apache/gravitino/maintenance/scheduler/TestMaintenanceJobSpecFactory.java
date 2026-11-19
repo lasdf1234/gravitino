@@ -58,7 +58,7 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertEquals(List.of(10L, 11L), spec.tableIds());
     Assertions.assertEquals(2, spec.getTasks().size());
     Assertions.assertEquals(202L, spec.getTasks().get(0).getPolicyId());
-    Assertions.assertEquals("rewrite_data_files", spec.getTasks().get(0).getMaintenanceType());
+    Assertions.assertEquals("system_iceberg_compaction", spec.getTasks().get(0).getPolicyType());
     Assertions.assertEquals("iceberg", spec.getTasks().get(0).catalogName());
     Assertions.assertEquals("db.t1", spec.getTasks().get(0).tableIdentifier());
     Assertions.assertEquals("db.t2", spec.getTasks().get(1).tableIdentifier());
@@ -85,7 +85,7 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertFalse(tasksJson.contains("\"table_id\":10,\"catalog_name\""));
     Assertions.assertTrue(tasksJson.contains("\"policy_id\":202"));
     Assertions.assertFalse(tasksJson.contains("\"action_id\""));
-    Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
+    Assertions.assertTrue(tasksJson.contains("system_iceberg_compaction"));
     Assertions.assertTrue(perTable.containsKey("updater_options"));
     Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
 
@@ -115,13 +115,13 @@ class TestMaintenanceJobSpecFactory {
                 new MaintenanceJobSpec.Task(
                     10L,
                     202L,
-                    "rewrite_data_files",
+                    "system_iceberg_compaction",
                     null,
                     Map.of("catalog_name", "iceberg", "table_identifier", "db.t1")),
                 new MaintenanceJobSpec.Task(
                     10L,
                     202L,
-                    "expire_snapshots",
+                    "system_iceberg_snapshot_expiration",
                     null,
                     Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
             "{}",

@@ -189,15 +189,15 @@ public final class MaintenanceJobConfBuilder {
     fillPlaceholdersFromSparkConf(jobConf, sparkConf, catalogName);
     putTypedProcedureParams(jobConf, content);
 
-    Optional<String> maintenanceType = MaintenanceJobTemplates.maintenanceType(policy.policyType());
-    maintenanceType.ifPresent(
+    Optional<String> policyType = MaintenanceJobTemplates.policyTypeWire(policy.policyType());
+    policyType.ifPresent(
         type -> {
           jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type);
           jobConf.put(MaintenanceJobTemplates.POLICY_IDS_KEY, Long.toString(policy.id()));
         });
-    if (content != null && maintenanceType.isPresent()) {
+    if (content != null && policyType.isPresent()) {
       Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
-      rulesByType.put(maintenanceType.get(), new LinkedHashMap<>(content.rules()));
+      rulesByType.put(policyType.get(), new LinkedHashMap<>(content.rules()));
       jobConf.put(
           MaintenanceJobTemplates.RULES_KEY,
           writeJson(rulesByType, MaintenanceJobTemplates.RULES_KEY));

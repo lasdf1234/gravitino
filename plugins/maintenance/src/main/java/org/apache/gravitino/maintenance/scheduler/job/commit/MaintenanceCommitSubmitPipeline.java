@@ -112,7 +112,7 @@ public final class MaintenanceCommitSubmitPipeline {
         LOG.info(
             "Skipping commit-job submit for table {} (type {} policy {} still occupied)",
             tableId,
-            task.getMaintenanceType(),
+            task.getPolicyType(),
             task.getPolicyId());
         return;
       }
@@ -155,7 +155,7 @@ public final class MaintenanceCommitSubmitPipeline {
           "Submitted commit-job for table {} as job {} (chain={}, policies={})",
           tableId,
           jobId.get(),
-          spec.getTasks().stream().map(Task::getMaintenanceType).collect(Collectors.toList()),
+          spec.getTasks().stream().map(Task::getPolicyType).collect(Collectors.toList()),
           policyIds);
     }
   }

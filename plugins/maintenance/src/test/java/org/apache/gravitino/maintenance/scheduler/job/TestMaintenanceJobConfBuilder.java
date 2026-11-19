@@ -91,10 +91,10 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertTrue(conf.get("options").contains("min-input-files"));
     Assertions.assertNull(conf.get("where_clause"));
     Assertions.assertEquals("rest", conf.get("catalog_type"));
-    Assertions.assertEquals("rewrite_data_files", conf.get("maintenance_types"));
+    Assertions.assertEquals("system_iceberg_compaction", conf.get("maintenance_types"));
     Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
     Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"rewrite_data_files\""));
+        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"system_iceberg_compaction\""));
     Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("trigger-expr"));
     Assertions.assertTrue(
         conf.get("spark_conf")
@@ -234,7 +234,7 @@ class TestMaintenanceJobConfBuilder {
         new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
             .build(policy, "iceberg");
 
-    Assertions.assertEquals("remove_orphan_files", conf.get("maintenance_types"));
+    Assertions.assertEquals("system_iceberg_orphan_file_removal", conf.get("maintenance_types"));
     Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
     Assertions.assertEquals("false", conf.get("dry_run"));
     Assertions.assertEquals("2024-06-08 12:00:00Z", conf.get("older_than"));
@@ -257,7 +257,7 @@ class TestMaintenanceJobConfBuilder {
     Map<String, String> typed =
         new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
             .build(fromContent, "iceberg");
-    Assertions.assertEquals("expire_snapshots", typed.get("maintenance_types"));
+    Assertions.assertEquals("system_iceberg_snapshot_expiration", typed.get("maintenance_types"));
     Assertions.assertEquals("2024-06-08 12:00:00Z", typed.get("older_than"));
     Assertions.assertEquals("10", typed.get("retain_last"));
     Assertions.assertEquals("true", typed.get("stream_results"));
@@ -281,7 +281,7 @@ class TestMaintenanceJobConfBuilder {
         new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
             .build(policy, "iceberg");
 
-    Assertions.assertEquals("rewrite_manifests", conf.get("maintenance_types"));
+    Assertions.assertEquals("system_iceberg_rewrite_manifests", conf.get("maintenance_types"));
     Assertions.assertEquals("2", conf.get(IcebergRewriteManifestsContent.SPEC_ID));
     Assertions.assertEquals("false", conf.get(IcebergRewriteManifestsContent.USE_CACHING));
   }
@@ -291,7 +291,7 @@ class TestMaintenanceJobConfBuilder {
     Map<String, String> jobConf = new LinkedHashMap<>();
     jobConf.put(
         MaintenanceJobTemplates.TASKS_KEY,
-        "[{\"table_id\":1,\"maintenance_type\":\"rewrite_data_files\",\"policy_id\":1,"
+        "[{\"table_id\":1,\"policy_type\":\"system_iceberg_compaction\",\"policy_id\":1,"
             + "\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t\"},\"rules\":{}}]");
     OccupancyClaim claim = new OccupancyClaim(42L, 100L);
     Map<String, String> stamped =
@@ -311,7 +311,7 @@ class TestMaintenanceJobConfBuilder {
         "{\"gravitino_uri\":\"gravitino.maintenance.gravitinoAuth.uri\",\"metalake\":\"ml\"}");
     jobConf.put(
         MaintenanceJobTemplates.TASKS_KEY,
-        "[{\"table_id\":1,\"maintenance_type\":\"rewrite_manifests\",\"policy_id\":9,"
+        "[{\"table_id\":1,\"policy_type\":\"system_iceberg_rewrite_manifests\",\"policy_id\":9,"
             + "\"action_id\":100,\"params\":{\"catalog_name\":\"iceberg\","
             + "\"table_identifier\":\"db.t\",\"use_caching\":\"false\","
             + "\"warehouse_location\":\"gravitino.maintenance.gravitinoAuth.uri\"},\"rules\":{}}]");

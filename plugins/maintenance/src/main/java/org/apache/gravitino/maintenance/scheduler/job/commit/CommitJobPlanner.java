@@ -150,7 +150,7 @@ public class CommitJobPlanner {
         if (!Boolean.TRUE.equals(commitTrigger)) {
           continue;
         }
-        if (MaintenanceJobTemplates.maintenanceType(policy.policyType()).isEmpty()) {
+        if (MaintenanceJobTemplates.policyTypeWire(policy.policyType()).isEmpty()) {
           continue;
         }
         chain.add(policy);

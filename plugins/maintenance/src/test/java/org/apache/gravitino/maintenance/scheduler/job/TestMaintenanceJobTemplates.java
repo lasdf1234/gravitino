@@ -39,19 +39,19 @@ class TestMaintenanceJobTemplates {
       Assertions.assertEquals(
           MaintenanceJobTemplates.ICEBERG_MAINTENANCE_TEMPLATE,
           MaintenanceJobTemplates.templateName(type).orElseThrow());
-      Assertions.assertTrue(MaintenanceJobTemplates.maintenanceType(type).isPresent());
+      Assertions.assertTrue(MaintenanceJobTemplates.policyTypeWire(type).isPresent());
     }
   }
 
   @Test
-  void testMaintenanceTypeWireValues() {
+  void testPolicyTypeWireValues() {
     Assertions.assertEquals(
-        "rewrite_data_files",
-        MaintenanceJobTemplates.maintenanceType(Policy.BuiltInType.ICEBERG_COMPACTION)
+        "system_iceberg_compaction",
+        MaintenanceJobTemplates.policyTypeWire(Policy.BuiltInType.ICEBERG_COMPACTION)
             .orElseThrow());
     Assertions.assertEquals(
-        "expire_snapshots",
-        MaintenanceJobTemplates.maintenanceType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+        "system_iceberg_snapshot_expiration",
+        MaintenanceJobTemplates.policyTypeWire(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
             .orElseThrow());
   }
 }

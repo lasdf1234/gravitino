@@ -158,7 +158,7 @@ public final class MaintenanceJobSpecFactory {
     boolean firstPolicy = true;
     for (TableCandidate table : tables) {
       for (PolicyEntity policy : table.policies()) {
-        Optional<String> wire = MaintenanceJobTemplates.maintenanceType(policy.policyType());
+        Optional<String> wire = MaintenanceJobTemplates.policyTypeWire(policy.policyType());
         Preconditions.checkArgument(
             wire.isPresent(), "unsupported policy type %s", policy.policyType());
         Map<String, String> built = jobConfBuilder.build(policy, catalogName);
@@ -314,14 +314,14 @@ public final class MaintenanceJobSpecFactory {
 
     Map<String, Object> wire = new LinkedHashMap<>();
     wire.put("table_id", task.getTableId());
-    wire.put("maintenance_type", task.getMaintenanceType());
+    wire.put("policy_type", task.getPolicyType());
     wire.put("policy_id", task.getPolicyId());
     Map<String, String> params = extractProcedureParams(task.getParameters());
     // Always set identity keys explicitly so a blank/missing value cannot slip through.
     params.put("catalog_name", catalogName);
     params.put("table_identifier", tableIdentifier);
     wire.put("params", params);
-    wire.put("rules", extractRulesForType(task.getParameters(), task.getMaintenanceType()));
+    wire.put("rules", extractRulesForType(task.getParameters(), task.getPolicyType()));
     return wire;
   }
 
@@ -340,8 +340,8 @@ public final class MaintenanceJobSpecFactory {
   }
 
   private static Map<String, Object> extractRulesForType(
-      Map<String, String> parameters, String maintenanceType) {
-    if (parameters == null || maintenanceType == null) {
+      Map<String, String> parameters, String policyType) {
+    if (parameters == null || policyType == null) {
       return Map.of();
     }
     String raw = parameters.get(MaintenanceJobTemplates.RULES_KEY);
@@ -349,7 +349,7 @@ public final class MaintenanceJobSpecFactory {
       return Map.of();
     }
     Map<String, Map<String, Object>> byType = parseRulesByType(raw);
-    Map<String, Object> rules = byType.get(maintenanceType);
+    Map<String, Object> rules = byType.get(policyType);
     return rules == null || rules.isEmpty() ? Map.of() : new LinkedHashMap<>(rules);
   }
 

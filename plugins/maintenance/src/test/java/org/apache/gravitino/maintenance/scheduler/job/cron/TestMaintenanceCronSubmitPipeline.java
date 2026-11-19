@@ -168,8 +168,13 @@ class TestMaintenanceCronSubmitPipeline {
     MaintenanceJobSpec sameTable =
         new MaintenanceJobSpec(
             List.of(
-                new Task(TABLE_ID, POLICY_ID, "rewrite_data_files", null, params),
-                new Task(TABLE_ID, policyB, "expire_snapshots", null, new LinkedHashMap<>(params))),
+                new Task(TABLE_ID, POLICY_ID, "system_iceberg_compaction", null, params),
+                new Task(
+                    TABLE_ID,
+                    policyB,
+                    "system_iceberg_snapshot_expiration",
+                    null,
+                    new LinkedHashMap<>(params))),
             UPDATER,
             null);
 
@@ -264,7 +269,7 @@ class TestMaintenanceCronSubmitPipeline {
     params.putIfAbsent("catalog_name", "iceberg");
     params.putIfAbsent("table_identifier", "db.t");
     return new MaintenanceJobSpec(
-        List.of(new Task(TABLE_ID, POLICY_ID, "rewrite_data_files", null, params)),
+        List.of(new Task(TABLE_ID, POLICY_ID, "system_iceberg_compaction", null, params)),
         UPDATER,
         sparkConf);
   }
@@ -285,7 +290,7 @@ class TestMaintenanceCronSubmitPipeline {
     return new Task(
         tableId,
         policyId,
-        "expire_snapshots",
+        "system_iceberg_snapshot_expiration",
         null,
         new LinkedHashMap<>(Map.of("catalog_name", "iceberg", "table_identifier", identifier)));
   }

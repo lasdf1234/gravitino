@@ -192,7 +192,7 @@ public final class MaintenanceJobSpec {
     private long tableId;
     @Nullable private Long actionId;
     private long policyId;
-    private String maintenanceType;
+    private String policyType;
     private Map<String, String> parameters = new LinkedHashMap<>();
 
     /** Jackson constructor. */
@@ -201,21 +201,21 @@ public final class MaintenanceJobSpec {
     /**
      * @param tableId table entity id
      * @param policyId policy entity id
-     * @param maintenanceType Spark wire maintenance type
+     * @param policyType {@link org.apache.gravitino.policy.Policy.BuiltInType#policyType()}
      * @param actionId soft-slot action id when known; null at schedule
      * @param parameters flat template placeholders (old builtin jobConf keys)
      */
     public Task(
         long tableId,
         long policyId,
-        String maintenanceType,
+        String policyType,
         @Nullable Long actionId,
         Map<String, String> parameters) {
       Preconditions.checkArgument(tableId > 0, "tableId must be positive");
       Preconditions.checkArgument(policyId > 0, "policyId must be positive");
       this.tableId = tableId;
       this.policyId = policyId;
-      this.maintenanceType = Preconditions.checkNotNull(maintenanceType, "maintenanceType");
+      this.policyType = Preconditions.checkNotNull(policyType, "policyType");
       this.actionId = actionId;
       this.parameters = new LinkedHashMap<>(Preconditions.checkNotNull(parameters, "parameters"));
     }
@@ -264,17 +264,17 @@ public final class MaintenanceJobSpec {
     }
 
     /**
-     * @return Spark wire maintenance type
+     * @return {@link org.apache.gravitino.policy.Policy.BuiltInType#policyType()} wire value
      */
-    public String getMaintenanceType() {
-      return maintenanceType;
+    public String getPolicyType() {
+      return policyType;
     }
 
     /**
-     * @param maintenanceType Spark wire maintenance type
+     * @param policyType {@link org.apache.gravitino.policy.Policy.BuiltInType#policyType()}
      */
-    public void setMaintenanceType(String maintenanceType) {
-      this.maintenanceType = maintenanceType;
+    public void setPolicyType(String policyType) {
+      this.policyType = policyType;
     }
 
     /**
@@ -314,8 +314,8 @@ public final class MaintenanceJobSpec {
     boolean isValid() {
       return tableId > 0
           && policyId > 0
-          && maintenanceType != null
-          && !maintenanceType.isBlank()
+          && policyType != null
+          && !policyType.isBlank()
           && parameters != null
           && catalogName() != null
           && tableIdentifier() != null;
@@ -333,13 +333,13 @@ public final class MaintenanceJobSpec {
       return tableId == that.tableId
           && policyId == that.policyId
           && Objects.equals(actionId, that.actionId)
-          && Objects.equals(maintenanceType, that.maintenanceType)
+          && Objects.equals(policyType, that.policyType)
           && Objects.equals(parameters, that.parameters);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(tableId, actionId, policyId, maintenanceType, parameters);
+      return Objects.hash(tableId, actionId, policyId, policyType, parameters);
     }
 
     private static @Nullable String blankToNull(@Nullable String value) {

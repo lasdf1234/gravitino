@@ -56,8 +56,9 @@ class TestCommitJobSpecFactory {
     Assertions.assertEquals(2, spec.getTasks().size());
     Assertions.assertEquals(101L, spec.getTasks().get(0).getTableId());
     Assertions.assertEquals(202L, spec.getTasks().get(0).getPolicyId());
-    Assertions.assertEquals("rewrite_data_files", spec.getTasks().get(0).getMaintenanceType());
-    Assertions.assertEquals("expire_snapshots", spec.getTasks().get(1).getMaintenanceType());
+    Assertions.assertEquals("system_iceberg_compaction", spec.getTasks().get(0).getPolicyType());
+    Assertions.assertEquals(
+        "system_iceberg_snapshot_expiration", spec.getTasks().get(1).getPolicyType());
     String olderThan = spec.getTasks().get(1).getParameters().get("older_than");
     Assertions.assertNotNull(olderThan);
     Assertions.assertTrue(olderThan.matches("\\d{4}-\\d{2}-\\d{2} .*"));
@@ -71,8 +72,8 @@ class TestCommitJobSpecFactory {
     Map<String, String> runJob = MaintenanceJobSpecFactory.jobConfForSpec(spec);
     String tasksJson = runJob.get(MaintenanceJobTemplates.TASKS_KEY);
     Assertions.assertNotNull(tasksJson);
-    Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
-    Assertions.assertTrue(tasksJson.contains("expire_snapshots"));
+    Assertions.assertTrue(tasksJson.contains("system_iceberg_compaction"));
+    Assertions.assertTrue(tasksJson.contains("system_iceberg_snapshot_expiration"));
     Assertions.assertTrue(tasksJson.contains("\"policy_id\":202"));
     Assertions.assertTrue(tasksJson.contains("\"policy_id\":303"));
     Assertions.assertTrue(tasksJson.contains("\"older_than\":\"" + olderThan + "\""));

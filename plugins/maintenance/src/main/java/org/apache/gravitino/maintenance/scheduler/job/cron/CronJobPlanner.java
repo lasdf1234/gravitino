@@ -609,9 +609,9 @@ public class CronJobPlanner {
 
   private static boolean isExpireSnapshots(MaintenanceJobSpec spec) {
     String expireType =
-        MaintenanceJobTemplates.maintenanceType(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+        MaintenanceJobTemplates.policyTypeWire(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
             .orElseThrow();
-    return spec.getTasks().stream().anyMatch(t -> expireType.equals(t.getMaintenanceType()));
+    return spec.getTasks().stream().anyMatch(t -> expireType.equals(t.getPolicyType()));
   }
 
   /**

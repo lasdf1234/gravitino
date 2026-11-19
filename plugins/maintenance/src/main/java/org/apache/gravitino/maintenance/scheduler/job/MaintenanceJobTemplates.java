@@ -23,8 +23,8 @@ import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.policy.Policy;
 
 /**
- * Shared TMS job template name, jobConf keys, and {@link Policy.BuiltInType} → wire-type mapping
- * for cron and commit submits.
+ * Shared TMS job template name, jobConf keys, and Iceberg-maintenance {@link Policy.BuiltInType}
+ * helpers for cron and commit submits.
  *
  * <p>TMS always submits {@link #ICEBERG_MAINTENANCE_TEMPLATE}; standalone {@code builtin-iceberg-*}
  * templates remain for CLI / optimizer.
@@ -40,14 +40,15 @@ public final class MaintenanceJobTemplates {
 
   /**
    * JobConf key for the ordered maintenance work list (JSON array). Each element carries table,
-   * {@code maintenance_type}, {@code policy_id}, {@code action_id}, procedure {@code params}, and
-   * gate {@code rules}. Used by both cron (one or many tables) and commit-chain submits.
+   * {@code policy_type}, {@code policy_id}, {@code action_id}, procedure {@code params}, and gate
+   * {@code rules}. Used by both cron (one or many tables) and commit-chain submits.
    */
   public static final String TASKS_KEY = "tasks";
 
   /**
    * Deprecated flat dispatch key retained for schedule-time parameter maps and tests that still
-   * assert wire type strings. Runtime Spark submits use {@link #TASKS_KEY} instead.
+   * assert wire type strings. Runtime Spark submits use {@link #TASKS_KEY} instead. Values are
+   * {@link Policy.BuiltInType#policyType()}.
    */
   public static final String MAINTENANCE_TYPES_KEY = "maintenance_types";
 
@@ -67,9 +68,9 @@ public final class MaintenanceJobTemplates {
   public static final String UPDATER_OPTIONS_JOB_CONF_KEY = "updater_options";
 
   /**
-   * Schedule-time per-task parameter key for policy {@code rules()} (JSON map of wire type → rules
-   * object). At Spark submit this is projected into each {@link #TASKS_KEY} element's {@code rules}
-   * object.
+   * Schedule-time per-task parameter key for policy {@code rules()} (JSON map of {@code
+   * policy_type} → rules object). At Spark submit this is projected into each {@link #TASKS_KEY}
+   * element's {@code rules} object.
    */
   public static final String RULES_KEY = "rules";
 
@@ -80,7 +81,7 @@ public final class MaintenanceJobTemplates {
    * @return cron job template name when known
    */
   public static Optional<String> templateName(Policy.BuiltInType builtInType) {
-    if (maintenanceType(builtInType).isEmpty()) {
+    if (policyTypeWire(builtInType).isEmpty()) {
       return Optional.empty();
     }
     return Optional.of(ICEBERG_MAINTENANCE_TEMPLATE);
@@ -88,21 +89,18 @@ public final class MaintenanceJobTemplates {
 
   /**
    * @param builtInType maintenance policy type
-   * @return wire value for {@link #MAINTENANCE_TYPES_KEY}
+   * @return {@link Policy.BuiltInType#policyType()} when this is an Iceberg maintenance type
    */
-  public static Optional<String> maintenanceType(Policy.BuiltInType builtInType) {
+  public static Optional<String> policyTypeWire(Policy.BuiltInType builtInType) {
     if (builtInType == null) {
       return Optional.empty();
     }
     switch (builtInType) {
       case ICEBERG_COMPACTION:
-        return Optional.of("rewrite_data_files");
       case ICEBERG_REWRITE_MANIFESTS:
-        return Optional.of("rewrite_manifests");
       case ICEBERG_SNAPSHOT_EXPIRATION:
-        return Optional.of("expire_snapshots");
       case ICEBERG_ORPHAN_FILE_REMOVAL:
-        return Optional.of("remove_orphan_files");
+        return Optional.of(builtInType.policyType());
       default:
         return Optional.empty();
     }

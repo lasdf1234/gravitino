@@ -23,9 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
 import java.util.Map;
-import org.apache.gravitino.maintenance.jobs.iceberg.IcebergMaintenanceJob.MaintenanceType;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergRewriteManifestsContent;
+import org.apache.gravitino.policy.Policy;
 import org.junit.jupiter.api.Test;
 
 /** Unit tests for {@link MaintenanceTriggerGate}. */
@@ -35,7 +35,9 @@ public class TestMaintenanceTriggerGate {
   public void testExpireSnapshotsAlwaysMaintain() {
     assertTrue(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.EXPIRE_SNAPSHOTS, new HashMap<>(), "{\"custom-snapshot-number\":1}"));
+            Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION,
+            new HashMap<>(),
+            "{\"custom-snapshot-number\":1}"));
   }
 
   @Test
@@ -51,7 +53,7 @@ public class TestMaintenanceTriggerGate {
             + IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC
             + "\":0}";
     assertFalse(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, below));
+        MaintenanceTriggerGate.shouldMaintain(Policy.BuiltInType.ICEBERG_COMPACTION, rules, below));
 
     String above =
         "{\""
@@ -60,7 +62,7 @@ public class TestMaintenanceTriggerGate {
             + IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC
             + "\":0}";
     assertTrue(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, above));
+        MaintenanceTriggerGate.shouldMaintain(Policy.BuiltInType.ICEBERG_COMPACTION, rules, above));
   }
 
   @Test
@@ -70,18 +72,18 @@ public class TestMaintenanceTriggerGate {
         "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":99}";
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REWRITE_MANIFESTS, new HashMap<>(), belowThreshold));
+            Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, new HashMap<>(), belowThreshold));
 
     String atThreshold = "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":100}";
     assertTrue(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REWRITE_MANIFESTS, new HashMap<>(), atThreshold));
+            Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, new HashMap<>(), atThreshold));
 
     String aboveThreshold =
         "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":500}";
     assertTrue(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REWRITE_MANIFESTS, new HashMap<>(), aboveThreshold));
+            Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, new HashMap<>(), aboveThreshold));
   }
 
   @Test
@@ -92,30 +94,33 @@ public class TestMaintenanceTriggerGate {
 
     String below = "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":5}";
     assertFalse(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_MANIFESTS, rules, below));
+        MaintenanceTriggerGate.shouldMaintain(
+            Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, rules, below));
 
     String above = "{\"" + IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC + "\":10}";
     assertTrue(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_MANIFESTS, rules, above));
+        MaintenanceTriggerGate.shouldMaintain(
+            Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, rules, above));
   }
 
   @Test
   public void testManifestRewriteSkipsWhenMetricsMissing() {
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REWRITE_MANIFESTS, new HashMap<>(), "{}"));
+            Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS, new HashMap<>(), "{}"));
   }
 
   @Test
   public void testOrphanEvaluatesTriggerExprWithoutBeforeMetrics() {
     assertTrue(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REMOVE_ORPHAN_FILES, new HashMap<>(), null));
+            Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL, new HashMap<>(), null));
 
     Map<String, Object> skip = new HashMap<>();
     skip.put("trigger-expr", "false");
     assertFalse(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REMOVE_ORPHAN_FILES, skip, null));
+        MaintenanceTriggerGate.shouldMaintain(
+            Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL, skip, null));
   }
 
   @Test
@@ -124,14 +129,15 @@ public class TestMaintenanceTriggerGate {
     rules.put("trigger-expr", "custom-data-file-mse >= 10");
     String onlyMse = "{\"" + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC + "\":15}";
     assertTrue(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, onlyMse));
+        MaintenanceTriggerGate.shouldMaintain(
+            Policy.BuiltInType.ICEBERG_COMPACTION, rules, onlyMse));
   }
 
   @Test
   public void testCompactionSkipsWhenMetricsEmpty() {
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REWRITE_DATA_FILES, new HashMap<>(), "{}"));
+            Policy.BuiltInType.ICEBERG_COMPACTION, new HashMap<>(), "{}"));
   }
 
   @Test
@@ -140,7 +146,7 @@ public class TestMaintenanceTriggerGate {
     String onlyMse = "{\"" + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC + "\":15}";
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
-            MaintenanceType.REWRITE_DATA_FILES, new HashMap<>(), onlyMse));
+            Policy.BuiltInType.ICEBERG_COMPACTION, new HashMap<>(), onlyMse));
   }
 
   @Test
@@ -154,6 +160,7 @@ public class TestMaintenanceTriggerGate {
             + IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC
             + "\":2}";
     assertFalse(
-        MaintenanceTriggerGate.shouldMaintain(MaintenanceType.REWRITE_DATA_FILES, rules, metrics));
+        MaintenanceTriggerGate.shouldMaintain(
+            Policy.BuiltInType.ICEBERG_COMPACTION, rules, metrics));
   }
 }

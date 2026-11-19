@@ -195,7 +195,7 @@ class TestMaintenanceJobManager extends TestJDBCBackend {
     Map<String, String> conf = new HashMap<>();
     conf.put(
         MaintenanceJobTemplates.TASKS_KEY,
-        "[{\"table_id\":1,\"maintenance_type\":\"rewrite_data_files\",\"policy_id\":1,"
+        "[{\"table_id\":1,\"policy_type\":\"system_iceberg_compaction\",\"policy_id\":1,"
             + "\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t\"},\"rules\":{}}]");
     return conf;
   }

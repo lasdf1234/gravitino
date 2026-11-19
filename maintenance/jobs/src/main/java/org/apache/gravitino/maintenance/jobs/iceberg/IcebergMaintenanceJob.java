@@ -25,15 +25,12 @@ import com.google.common.collect.ImmutableMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.gravitino.job.JobTemplateProvider;
@@ -44,6 +41,7 @@ import org.apache.gravitino.maintenance.dto.requests.MaintenanceActionMetricsReq
 import org.apache.gravitino.maintenance.jobs.BuiltInJob;
 import org.apache.gravitino.maintenance.jobs.MaintenanceActionHttpClient;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
+import org.apache.gravitino.policy.Policy;
 import org.apache.spark.sql.SparkSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,15 +51,14 @@ import org.slf4j.LoggerFactory;
  * the maintenance action.
  *
  * <p>Started only from the built-in template (cron or commit-chain). JobConf carries a {@code
- * tasks} JSON array: each element is one work item with {@code table_id}, {@code maintenance_type},
- * {@code policy_id}, {@code action_id}, {@code params} (including {@code catalog_name}/{@code
- * table_identifier} plus procedure flags), and gate {@code rules}. Cron snapshot-expiry batches and
- * commit chains share this shape.
+ * tasks} JSON array: each element is one work item with {@code table_id}, {@code policy_type}
+ * ({@link Policy.BuiltInType#policyType()}), {@code policy_id}, {@code action_id}, {@code params}
+ * (including {@code catalog_name}/{@code table_identifier} plus procedure flags), and gate {@code
+ * rules}. Cron snapshot-expiry batches and commit chains share this shape.
  *
- * <p>{@code metricsJson} carries only metric fields (no {@code maintenanceType} / {@code
- * snapshotId}; those live on the action/policy and {@code table_snapshot_metrics.snapshot_id}).
- * Snapshot drift skips only compaction and manifest rewrite. Orphan cleanup reports after-metrics
- * only.
+ * <p>{@code metricsJson} carries only metric fields (no policy type / {@code snapshotId}; those
+ * live on the action/policy and {@code table_snapshot_metrics.snapshot_id}). Snapshot drift skips
+ * only compaction and manifest rewrite. Orphan cleanup reports after-metrics only.
  */
 public class IcebergMaintenanceJob implements BuiltInJob {
 
@@ -96,66 +93,44 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           .put("dry_run", "dry-run")
           .build();
 
-  /** Values accepted in {@code maintenance_type}. */
-  public enum MaintenanceType {
-    REWRITE_DATA_FILES("rewrite_data_files"),
-    REWRITE_MANIFESTS("rewrite_manifests"),
-    EXPIRE_SNAPSHOTS("expire_snapshots"),
-    REMOVE_ORPHAN_FILES("remove_orphan_files");
-
-    private final String wireName;
-
-    MaintenanceType(String wireName) {
-      this.wireName = wireName;
+  /**
+   * @param policyType Iceberg maintenance {@link Policy.BuiltInType}
+   * @return a fresh built-in job for this policy type (not a shared singleton — expire keeps
+   *     per-run {@code preExpireData} on the instance)
+   */
+  @VisibleForTesting
+  static IcebergMaintenanceAction actionFor(Policy.BuiltInType policyType) {
+    if (policyType == null) {
+      throw new IllegalArgumentException("policy_type is required");
     }
-
-    /**
-     * @return jobConf wire value
-     */
-    public String wireName() {
-      return wireName;
-    }
-
-    /**
-     * @return a fresh built-in job for this maintenance type (not a shared singleton — expire keeps
-     *     per-run {@code preExpireData} on the instance)
-     */
-    public IcebergMaintenanceAction action() {
-      return ACTIONS.get(this).get();
-    }
-
-    /**
-     * @param raw one maintenance type wire name
-     * @return parsed type
-     */
-    public static MaintenanceType fromWire(@Nullable String raw) {
-      if (raw == null || raw.trim().isEmpty()) {
-        throw new IllegalArgumentException("maintenance_type is required");
-      }
-      String normalized = raw.trim().toLowerCase(Locale.ROOT);
-      for (MaintenanceType type : values()) {
-        if (type.wireName.equals(normalized)) {
-          return type;
-        }
-      }
-      throw new IllegalArgumentException(
-          "Unknown maintenance_type value '"
-              + raw
-              + "'. Expected one of: rewrite_data_files, rewrite_manifests, expire_snapshots,"
-              + " remove_orphan_files");
+    switch (policyType) {
+      case ICEBERG_COMPACTION:
+        return new IcebergRewriteDataFilesJob();
+      case ICEBERG_REWRITE_MANIFESTS:
+        return new IcebergRewriteManifestsJob();
+      case ICEBERG_SNAPSHOT_EXPIRATION:
+        return new IcebergExpireSnapshotsJob();
+      case ICEBERG_ORPHAN_FILE_REMOVAL:
+        return new IcebergRemoveOrphanFilesJob();
+      default:
+        throw new IllegalArgumentException(
+            "Unsupported maintenance policy type: " + policyType.policyType());
     }
   }
 
-  private static final Map<MaintenanceType, Supplier<IcebergMaintenanceAction>> ACTIONS;
-
-  static {
-    Map<MaintenanceType, Supplier<IcebergMaintenanceAction>> actions =
-        new EnumMap<>(MaintenanceType.class);
-    actions.put(MaintenanceType.REWRITE_DATA_FILES, IcebergRewriteDataFilesJob::new);
-    actions.put(MaintenanceType.REWRITE_MANIFESTS, IcebergRewriteManifestsJob::new);
-    actions.put(MaintenanceType.EXPIRE_SNAPSHOTS, IcebergExpireSnapshotsJob::new);
-    actions.put(MaintenanceType.REMOVE_ORPHAN_FILES, IcebergRemoveOrphanFilesJob::new);
-    ACTIONS = Collections.unmodifiableMap(actions);
+  /**
+   * @param raw {@link Policy.BuiltInType#policyType()} wire value
+   * @return Iceberg maintenance built-in type
+   */
+  @VisibleForTesting
+  static Policy.BuiltInType requireMaintenancePolicyType(@Nullable String raw) {
+    if (raw == null || raw.trim().isEmpty()) {
+      throw new IllegalArgumentException("policy_type is required");
+    }
+    Policy.BuiltInType type = Policy.BuiltInType.fromPolicyType(raw.trim());
+    // Reject non-maintenance built-ins (row_filter, custom, …) early.
+    actionFor(type);
+    return type;
   }
 
   @Override
@@ -258,7 +233,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
 
   private static String appLabel(List<MaintenanceTask> tasks) {
     List<String> types =
-        tasks.stream().map(t -> t.type.wireName).distinct().collect(Collectors.toList());
+        tasks.stream().map(t -> t.policyType.policyType()).distinct().collect(Collectors.toList());
     if (types.size() == 1 && tasks.size() == 1) {
       return types.get(0);
     }
@@ -283,7 +258,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
     // does not inherit that resolution.
     String priorSpecId = task.procedureArgs.get("spec-id");
     try {
-      IcebergMaintenanceAction action = task.type.action();
+      IcebergMaintenanceAction action = actionFor(task.policyType);
       TableSnapshotMetrics before = null;
       if (action.hasBeforeMetrics()) {
         before =
@@ -294,7 +269,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           LOG.info(
               "TMS type {} stopped for action_id {} table {} policy {}: before-metrics failed"
                   + " (abandoned or unbound)",
-              task.type.wireName,
+              task.policyType.policyType(),
               task.actionId,
               task.tableId,
               task.policyId);
@@ -307,7 +282,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           LOG.info(
               "TMS type {} skipped for action_id {} table {} policy {}: snapshot drifted"
                   + " (sampled={} head={})",
-              task.type.wireName,
+              task.policyType.policyType(),
               task.actionId,
               task.tableId,
               task.policyId,
@@ -318,10 +293,10 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       }
 
       String metricsJson = before == null ? null : before.metricsJson();
-      if (!MaintenanceTriggerGate.shouldMaintain(task.type, task.rules, metricsJson)) {
+      if (!MaintenanceTriggerGate.shouldMaintain(task.policyType, task.rules, metricsJson)) {
         LOG.info(
             "TMS type {} skipped for action_id {} table {} policy {}: trigger-expr skip",
-            task.type.wireName,
+            task.policyType.policyType(),
             task.actionId,
             task.tableId,
             task.policyId);
@@ -368,7 +343,8 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       throw new IllegalArgumentException("tasks entry must not be null");
     }
     long tableId = requirePositiveLong(entry.get("table_id"), "table_id");
-    MaintenanceType type = MaintenanceType.fromWire(stringOrNull(entry.get("maintenance_type")));
+    Policy.BuiltInType policyType =
+        requireMaintenancePolicyType(stringOrNull(entry.get("policy_type")));
     long policyId = requirePositiveLong(entry.get("policy_id"), "policy_id");
     long actionId = requirePositiveLong(entry.get("action_id"), "action_id");
     Map<String, String> params = asStringMap(entry.get("params"));
@@ -378,7 +354,14 @@ public class IcebergMaintenanceJob implements BuiltInJob {
     Map<String, String> procedureArgs = toProcedureArgMap(params);
     Map<String, Object> rules = asObjectMap(entry.get("rules"));
     return new MaintenanceTask(
-        tableId, catalogName, tableIdentifier, type, policyId, actionId, procedureArgs, rules);
+        tableId,
+        catalogName,
+        tableIdentifier,
+        policyType,
+        policyId,
+        actionId,
+        procedureArgs,
+        rules);
   }
 
   @VisibleForTesting
@@ -562,7 +545,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
     final long tableId;
     final String catalogName;
     final String tableIdentifier;
-    final MaintenanceType type;
+    final Policy.BuiltInType policyType;
     final long policyId;
     final long actionId;
     final Map<String, String> procedureArgs;
@@ -572,7 +555,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
         long tableId,
         String catalogName,
         String tableIdentifier,
-        MaintenanceType type,
+        Policy.BuiltInType policyType,
         long policyId,
         long actionId,
         Map<String, String> procedureArgs,
@@ -580,7 +563,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       this.tableId = tableId;
       this.catalogName = catalogName;
       this.tableIdentifier = tableIdentifier;
-      this.type = type;
+      this.policyType = policyType;
       this.policyId = policyId;
       this.actionId = actionId;
       this.procedureArgs = procedureArgs;

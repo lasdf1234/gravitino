@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.job.SparkJobTemplate;
-import org.apache.gravitino.maintenance.jobs.iceberg.IcebergMaintenanceJob.MaintenanceType;
+import org.apache.gravitino.policy.Policy;
 import org.junit.jupiter.api.Test;
 
 /** Unit tests for {@link IcebergMaintenanceJob} orchestration. */
@@ -49,12 +49,19 @@ public class TestIcebergMaintenanceJob {
   }
 
   @Test
-  public void testMaintenanceTypeFromWire() {
-    assertEquals(MaintenanceType.EXPIRE_SNAPSHOTS, MaintenanceType.fromWire("expire_snapshots"));
+  public void testRequireMaintenancePolicyType() {
     assertEquals(
-        MaintenanceType.REWRITE_DATA_FILES, MaintenanceType.fromWire("REWRITE_DATA_FILES"));
-    assertThrows(IllegalArgumentException.class, () -> MaintenanceType.fromWire("unknown"));
-    assertThrows(IllegalArgumentException.class, () -> MaintenanceType.fromWire(null));
+        Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION,
+        IcebergMaintenanceJob.requireMaintenancePolicyType("system_iceberg_snapshot_expiration"));
+    assertEquals(
+        Policy.BuiltInType.ICEBERG_COMPACTION,
+        IcebergMaintenanceJob.requireMaintenancePolicyType("SYSTEM_ICEBERG_COMPACTION"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> IcebergMaintenanceJob.requireMaintenancePolicyType("system_row_filter"));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> IcebergMaintenanceJob.requireMaintenancePolicyType(null));
   }
 
   @Test
@@ -65,8 +72,8 @@ public class TestIcebergMaintenanceJob {
         IcebergMaintenanceJob.run(
             new String[] {
               "--tasks",
-              "[{\"table_id\":1,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,"
-                  + "\"action_id\":100,\"params\":{}}]"
+              "[{\"table_id\":1,\"policy_type\":\"system_iceberg_snapshot_expiration\","
+                  + "\"policy_id\":10,\"action_id\":100,\"params\":{}}]"
             }));
   }
 
@@ -75,12 +82,14 @@ public class TestIcebergMaintenanceJob {
     List<IcebergMaintenanceJob.MaintenanceTask> tasks =
         IcebergMaintenanceJob.parseTasks(
             "["
-                + "{\"table_id\":1,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":10,"
-                + "\"action_id\":100,\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t1\","
-                + "\"older_than\":\"2024-06-08 12:00:00Z\",\"retain_last\":\"10\"},\"rules\":{}},"
-                + "{\"table_id\":2,\"maintenance_type\":\"expire_snapshots\",\"policy_id\":11,"
-                + "\"action_id\":101,\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t2\","
-                + "\"older_than\":\"2024-05-16 12:00:00Z\",\"retain_last\":\"3\"},\"rules\":{}}"
+                + "{\"table_id\":1,\"policy_type\":\"system_iceberg_snapshot_expiration\","
+                + "\"policy_id\":10,\"action_id\":100,\"params\":{\"catalog_name\":\"c\","
+                + "\"table_identifier\":\"db.t1\",\"older_than\":\"2024-06-08 12:00:00Z\","
+                + "\"retain_last\":\"10\"},\"rules\":{}},"
+                + "{\"table_id\":2,\"policy_type\":\"system_iceberg_snapshot_expiration\","
+                + "\"policy_id\":11,\"action_id\":101,\"params\":{\"catalog_name\":\"c\","
+                + "\"table_identifier\":\"db.t2\",\"older_than\":\"2024-05-16 12:00:00Z\","
+                + "\"retain_last\":\"3\"},\"rules\":{}}"
                 + "]");
     assertEquals(2, tasks.size());
     assertEquals("c", tasks.get(0).catalogName);
@@ -117,22 +126,45 @@ public class TestIcebergMaintenanceJob {
 
   @Test
   public void testSnapshotDriftGateOnlyForCompactionAndManifest() {
-    assertTrue(MaintenanceType.REWRITE_DATA_FILES.action().shouldCheckSnapshotDrift());
-    assertTrue(MaintenanceType.REWRITE_MANIFESTS.action().shouldCheckSnapshotDrift());
-    assertFalse(MaintenanceType.EXPIRE_SNAPSHOTS.action().shouldCheckSnapshotDrift());
-    assertFalse(MaintenanceType.REMOVE_ORPHAN_FILES.action().shouldCheckSnapshotDrift());
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_COMPACTION)
+            .shouldCheckSnapshotDrift());
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
+            .shouldCheckSnapshotDrift());
+    assertFalse(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+            .shouldCheckSnapshotDrift());
+    assertFalse(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL)
+            .shouldCheckSnapshotDrift());
   }
 
   @Test
   public void testMaintenanceActionsWireToJobClasses() {
-    assertTrue(MaintenanceType.REWRITE_DATA_FILES.action() instanceof IcebergRewriteDataFilesJob);
-    assertTrue(MaintenanceType.REWRITE_MANIFESTS.action() instanceof IcebergRewriteManifestsJob);
-    assertTrue(MaintenanceType.EXPIRE_SNAPSHOTS.action() instanceof IcebergExpireSnapshotsJob);
-    assertTrue(MaintenanceType.REMOVE_ORPHAN_FILES.action() instanceof IcebergRemoveOrphanFilesJob);
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_COMPACTION)
+            instanceof IcebergRewriteDataFilesJob);
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
+            instanceof IcebergRewriteManifestsJob);
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+            instanceof IcebergExpireSnapshotsJob);
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL)
+            instanceof IcebergRemoveOrphanFilesJob);
 
-    assertTrue(MaintenanceType.REWRITE_DATA_FILES.action().hasBeforeMetrics());
-    assertTrue(MaintenanceType.REWRITE_MANIFESTS.action().hasBeforeMetrics());
-    assertTrue(MaintenanceType.EXPIRE_SNAPSHOTS.action().hasBeforeMetrics());
-    assertFalse(MaintenanceType.REMOVE_ORPHAN_FILES.action().hasBeforeMetrics());
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_COMPACTION).hasBeforeMetrics());
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
+            .hasBeforeMetrics());
+    assertTrue(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
+            .hasBeforeMetrics());
+    assertFalse(
+        IcebergMaintenanceJob.actionFor(Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL)
+            .hasBeforeMetrics());
   }
 }

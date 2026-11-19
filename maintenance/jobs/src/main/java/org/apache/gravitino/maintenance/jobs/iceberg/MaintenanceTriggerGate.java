@@ -26,12 +26,12 @@ import java.util.Map;
 import java.util.Map.Entry;
 import javax.annotation.Nullable;
 import org.apache.gravitino.json.JsonUtils;
-import org.apache.gravitino.maintenance.jobs.iceberg.IcebergMaintenanceJob.MaintenanceType;
 import org.apache.gravitino.maintenance.optimizer.recommender.handler.compaction.CompactionTriggerEvaluator;
 import org.apache.gravitino.maintenance.optimizer.recommender.handler.manifest.ManifestRewriteTriggerEvaluator;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
 import org.apache.gravitino.policy.IcebergRewriteManifestsContent;
+import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,62 +51,65 @@ final class MaintenanceTriggerGate {
   private MaintenanceTriggerGate() {}
 
   /**
-   * @param type maintenance type for this sample
+   * @param policyType Iceberg maintenance {@link Policy.BuiltInType}
    * @param rules per-task policy {@code rules()} object (may be empty → type defaults)
    * @param metricsJson S0 metrics JSON
    * @return whether the procedure should run
    */
   static boolean shouldMaintain(
-      MaintenanceType type, @Nullable Map<String, Object> rules, @Nullable String metricsJson) {
-    if (type == MaintenanceType.EXPIRE_SNAPSHOTS) {
+      Policy.BuiltInType policyType,
+      @Nullable Map<String, Object> rules,
+      @Nullable String metricsJson) {
+    if (policyType == Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION) {
       return true;
     }
 
-    Map<String, Object> effectiveRules = effectiveRules(type, rules);
+    Map<String, Object> effectiveRules = effectiveRules(policyType, rules);
     Map<String, Object> metrics = parseNumericMetrics(metricsJson);
     // Compaction / manifest need some numeric metrics; do not require every known field — a custom
     // trigger-expr may reference only a subset. Empty metrics still skip (nothing to evaluate).
-    if ((type == MaintenanceType.REWRITE_DATA_FILES || type == MaintenanceType.REWRITE_MANIFESTS)
+    if ((policyType == Policy.BuiltInType.ICEBERG_COMPACTION
+            || policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
         && metrics.isEmpty()) {
       LOG.warn(
           "{} recommend skip: metrics JSON empty or non-numeric",
-          type == MaintenanceType.REWRITE_DATA_FILES ? "Compaction" : "Manifest rewrite");
+          policyType == Policy.BuiltInType.ICEBERG_COMPACTION ? "Compaction" : "Manifest rewrite");
       return false;
     }
 
     boolean maintain =
-        type == MaintenanceType.REWRITE_MANIFESTS
+        policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS
             ? ManifestRewriteTriggerEvaluator.shouldMaintain(effectiveRules, metrics)
             : CompactionTriggerEvaluator.shouldMaintain(effectiveRules, metrics);
     String triggerExprKey =
-        type == MaintenanceType.REWRITE_MANIFESTS
+        policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS
             ? IcebergRewriteManifestsContent.TRIGGER_EXPR_KEY
             : IcebergDataCompactionContent.TRIGGER_EXPR_KEY;
     LOG.info(
         "In-Spark recommend type={} expr={} -> {}",
-        type.wireName(),
+        policyType.policyType(),
         effectiveRules.get(triggerExprKey),
         maintain ? "MAINTAIN" : "SKIP");
     return maintain;
   }
 
   private static Map<String, Object> effectiveRules(
-      MaintenanceType type, @Nullable Map<String, Object> rules) {
+      Policy.BuiltInType policyType, @Nullable Map<String, Object> rules) {
     if (rules != null && !rules.isEmpty()) {
       return rules;
     }
-    if (type == MaintenanceType.REWRITE_DATA_FILES) {
-      return new HashMap<>(PolicyContents.icebergDataCompaction().rules());
+    switch (policyType) {
+      case ICEBERG_COMPACTION:
+        return new HashMap<>(PolicyContents.icebergDataCompaction().rules());
+      case ICEBERG_REWRITE_MANIFESTS:
+        return new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
+      case ICEBERG_ORPHAN_FILE_REMOVAL:
+        return new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
+      default:
+        Map<String, Object> empty = new HashMap<>();
+        empty.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
+        return empty;
     }
-    if (type == MaintenanceType.REWRITE_MANIFESTS) {
-      return new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
-    }
-    if (type == MaintenanceType.REMOVE_ORPHAN_FILES) {
-      return new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
-    }
-    Map<String, Object> empty = new HashMap<>();
-    empty.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
-    return empty;
   }
 
   private static Map<String, Object> parseNumericMetrics(@Nullable String metricsJson) {
