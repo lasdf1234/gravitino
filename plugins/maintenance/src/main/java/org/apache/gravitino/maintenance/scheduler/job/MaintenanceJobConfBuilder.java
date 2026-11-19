@@ -94,8 +94,25 @@ public final class MaintenanceJobConfBuilder {
           "location",
           "dry_run",
           MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
-          MaintenanceJobTemplates.RULES_KEY,
-          "gravitino_job_id");
+          MaintenanceJobTemplates.RULES_KEY);
+
+  /**
+   * Keys from {@link #build} that must not become schedule {@code Task.parameters}: deprecated flat
+   * dispatch fields and session/resource placeholders that stay on shared {@code spark_conf} /
+   * top-level jobConf. {@code updater_options} / {@code spark_conf} are peeled off separately.
+   */
+  public static final Set<String> EXCLUDE_FROM_TASK_PARAMETERS =
+      ImmutableSet.of(
+          MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
+          MaintenanceJobTemplates.POLICY_IDS_KEY,
+          "spark_master",
+          "spark_executor_instances",
+          "spark_executor_cores",
+          "spark_executor_memory",
+          "spark_driver_memory",
+          "catalog_type",
+          "catalog_uri",
+          "warehouse_location");
 
   /**
    * Spark resource / session keys that map onto flat template placeholders (same as update-stats).
@@ -334,7 +351,7 @@ public final class MaintenanceJobConfBuilder {
         long actionId = claims.get(i).actionId();
         Preconditions.checkArgument(
             actionId > 0, "claims[%s].actionId must be positive, got %s", i, actionId);
-        ((ObjectNode) task).put("action_id", actionId);
+        ((ObjectNode) task).put(MaintenanceJobTemplates.ACTION_ID_KEY, actionId);
       }
       Map<String, String> out = new LinkedHashMap<>(jobConf);
       out.put(
@@ -369,7 +386,7 @@ public final class MaintenanceJobConfBuilder {
         if (task == null || !task.isObject()) {
           continue;
         }
-        JsonNode paramsNode = task.get("params");
+        JsonNode paramsNode = task.get(MaintenanceJobTemplates.PARAMS_KEY);
         if (paramsNode == null || !paramsNode.isObject()) {
           continue;
         }

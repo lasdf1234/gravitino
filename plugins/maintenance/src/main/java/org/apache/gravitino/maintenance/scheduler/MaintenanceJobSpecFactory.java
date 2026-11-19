@@ -21,7 +21,6 @@ package org.apache.gravitino.maintenance.scheduler;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -29,7 +28,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -54,30 +52,6 @@ public final class MaintenanceJobSpecFactory {
   private static final Pattern RESOURCE_NUMBER = Pattern.compile("^(\\d+)");
   private static final Pattern MEMORY_VALUE =
       Pattern.compile("^(\\d+(?:\\.\\d+)?)\\s*([kmgt]?i?b?)$", Pattern.CASE_INSENSITIVE);
-
-  /**
-   * Keys that belong on the shared {@code task_data} fields or are re-derived at submit — not
-   * stored in per-task {@code parameters}.
-   */
-  private static final Set<String> NON_PARAMETER_KEYS =
-      ImmutableSet.of(
-          MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY,
-          "spark_conf",
-          MaintenanceJobTemplates.TASKS_KEY,
-          MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY,
-          MaintenanceJobTemplates.POLICY_IDS_KEY,
-          "action_ids",
-          "tables",
-          "table_id",
-          "spark_master",
-          "spark_executor_instances",
-          "spark_executor_cores",
-          "spark_executor_memory",
-          "spark_driver_memory",
-          "catalog_type",
-          "catalog_uri",
-          "warehouse_location",
-          "gravitino_job_id");
 
   private final MaintenanceJobConfBuilder jobConfBuilder;
 
@@ -295,11 +269,11 @@ public final class MaintenanceJobSpecFactory {
       }
 
       Map<String, Object> wire = new LinkedHashMap<>();
-      wire.put("table_id", task.getTableId());
-      wire.put("policy_type", task.getPolicyType());
-      wire.put("policy_id", task.getPolicyId());
-      wire.put("params", params);
-      wire.put("rules", rules);
+      wire.put(MaintenanceJobTemplates.TABLE_ID_KEY, task.getTableId());
+      wire.put(MaintenanceJobTemplates.POLICY_TYPE_KEY, task.getPolicyType());
+      wire.put(MaintenanceJobTemplates.POLICY_ID_KEY, task.getPolicyId());
+      wire.put(MaintenanceJobTemplates.PARAMS_KEY, params);
+      wire.put(MaintenanceJobTemplates.RULES_KEY, rules);
       wireTasks.add(wire);
     }
 
@@ -356,7 +330,7 @@ public final class MaintenanceJobSpecFactory {
         sparkConf = value;
         continue;
       }
-      if (NON_PARAMETER_KEYS.contains(key)) {
+      if (MaintenanceJobConfBuilder.EXCLUDE_FROM_TASK_PARAMETERS.contains(key)) {
         continue;
       }
       parameters.put(key, value);
@@ -498,7 +472,7 @@ public final class MaintenanceJobSpecFactory {
   private static String toTablesJson(long tableId, String catalogName, String tableIdentifier) {
     List<Map<String, Object>> payload = new ArrayList<>(1);
     Map<String, Object> entry = new LinkedHashMap<>();
-    entry.put("table_id", tableId);
+    entry.put(MaintenanceJobTemplates.TABLE_ID_KEY, tableId);
     entry.put("catalog_name", catalogName);
     entry.put("table_identifier", tableIdentifier);
     payload.add(entry);
