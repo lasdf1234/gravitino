@@ -30,7 +30,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.job.SparkJobTemplate;
@@ -159,12 +158,23 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       try (MaintenanceActionHttpClient client =
           MaintenanceActionHttpClient.fromUpdaterOptions(updaterOptions)) {
         Set<String> finishedKeys = new HashSet<>();
-        List<Long> actionIds = tasks.stream().map(t -> t.actionId).collect(Collectors.toList());
+        boolean anyFailed = false;
         try {
+          // One bad task must not abort peers in the same merged Spark job.
           for (MaintenanceTask task : tasks) {
             String key = task.tableId + ":" + task.policyId + ":" + task.actionId;
             try {
-              runMaintenanceForTask(spark, client, task);
+              try {
+                runMaintenanceForTask(spark, client, task);
+              } catch (Exception e) {
+                anyFailed = true;
+                LOG.error(
+                    "TMS Iceberg maintenance failed for action_id {} table {} policy {}",
+                    task.actionId,
+                    task.tableId,
+                    task.policyId,
+                    e);
+              }
             } finally {
               try {
                 client.finish(
@@ -180,10 +190,6 @@ public class IcebergMaintenanceJob implements BuiltInJob {
               finishedKeys.add(key);
             }
           }
-          return 0;
-        } catch (Exception e) {
-          LOG.error("TMS Iceberg maintenance failed for action_ids {}", actionIds, e);
-          return 1;
         } finally {
           for (MaintenanceTask task : tasks) {
             String key = task.tableId + ":" + task.policyId + ":" + task.actionId;
@@ -202,6 +208,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
             }
           }
         }
+        return anyFailed ? 1 : 0;
       }
     }
   }
