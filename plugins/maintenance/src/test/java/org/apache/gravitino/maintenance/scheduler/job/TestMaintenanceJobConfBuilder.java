@@ -23,9 +23,11 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
+import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.PolicyEntity;
@@ -282,6 +284,22 @@ class TestMaintenanceJobConfBuilder {
     Assertions.assertEquals("rewrite_manifests", conf.get("maintenance_types"));
     Assertions.assertEquals("2", conf.get(IcebergRewriteManifestsContent.SPEC_ID));
     Assertions.assertEquals("false", conf.get(IcebergRewriteManifestsContent.USE_CACHING));
+  }
+
+  @Test
+  void testApplyActionIdsFromClaimsStampsTasks() {
+    Map<String, String> jobConf = new LinkedHashMap<>();
+    jobConf.put(
+        MaintenanceJobTemplates.TASKS_KEY,
+        "[{\"table_id\":1,\"maintenance_type\":\"rewrite_data_files\",\"policy_id\":1,"
+            + "\"params\":{\"catalog_name\":\"c\",\"table_identifier\":\"db.t\"},\"rules\":{}}]");
+    OccupancyClaim claim = new OccupancyClaim(42L, 100L);
+    Map<String, String> stamped =
+        MaintenanceJobConfBuilder.applyActionIdsFromClaims(jobConf, List.of(claim));
+    Assertions.assertTrue(
+        stamped.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"action_id\":42"));
+    Assertions.assertFalse(
+        jobConf.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"action_id\""));
   }
 
   @Test

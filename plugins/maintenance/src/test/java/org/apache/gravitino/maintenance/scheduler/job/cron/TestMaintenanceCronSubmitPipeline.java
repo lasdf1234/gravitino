@@ -125,8 +125,8 @@ class TestMaintenanceCronSubmitPipeline {
     Assertions.assertTrue(tasksJson.contains("db.t1"));
     Assertions.assertTrue(tasksJson.contains("db.t2"));
     Assertions.assertTrue(tasksJson.contains("\"older_than\"") || !tasksJson.isEmpty());
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":1"));
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":2"));
+    // action_id is stamped inside submitAndBind from claims, not in the pre-submit jobConf.
+    Assertions.assertFalse(tasksJson.contains("\"action_id\""));
     Assertions.assertEquals(List.of(claimA, claimB), claims.getValue());
   }
 
@@ -221,7 +221,7 @@ class TestMaintenanceCronSubmitPipeline {
     Assertions.assertNull(conf.get("strategy"));
     Assertions.assertTrue(conf.get("tasks").contains("db.t"));
     Assertions.assertTrue(conf.get("tasks").contains("binpack"));
-    Assertions.assertTrue(conf.get("tasks").contains("\"action_id\":1"));
+    Assertions.assertFalse(conf.get("tasks").contains("\"action_id\""));
     Assertions.assertTrue(conf.get("updater_options").contains("gravitino_uri"));
     Assertions.assertTrue(conf.get("spark_conf").contains("basic"));
   }

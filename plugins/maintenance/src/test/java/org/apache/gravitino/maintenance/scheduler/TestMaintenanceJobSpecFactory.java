@@ -22,13 +22,11 @@ import com.github.kagkarlsson.scheduler.serializer.JacksonSerializer;
 import com.github.kagkarlsson.scheduler.serializer.Serializer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
-import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.model.TableCandidate;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
@@ -76,7 +74,7 @@ class TestMaintenanceJobSpecFactory {
     MaintenanceJobSpec one =
         new MaintenanceJobSpec(
             List.of(spec.getTasks().get(0)), spec.getUpdaterOptions(), spec.getSparkConf());
-    Map<String, String> perTable = MaintenanceJobSpecFactory.jobConfForSpec(one, claims(9001L));
+    Map<String, String> perTable = MaintenanceJobSpecFactory.jobConfForSpec(one);
     Assertions.assertTrue(perTable.containsKey(MaintenanceJobTemplates.TASKS_KEY));
     String tasksJson = perTable.get(MaintenanceJobTemplates.TASKS_KEY);
     Assertions.assertTrue(tasksJson.contains("\"table_id\":10"));
@@ -86,30 +84,19 @@ class TestMaintenanceJobSpecFactory {
     // Identity keys live only under params, not as task-level siblings of table_id.
     Assertions.assertFalse(tasksJson.contains("\"table_id\":10,\"catalog_name\""));
     Assertions.assertTrue(tasksJson.contains("\"policy_id\":202"));
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":9001"));
+    Assertions.assertFalse(tasksJson.contains("\"action_id\""));
     Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
     Assertions.assertTrue(perTable.containsKey("updater_options"));
     Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
 
-    Map<String, String> batch =
-        MaintenanceJobSpecFactory.jobConfForSpec(spec, claims(9001L, 9002L));
+    Map<String, String> batch = MaintenanceJobSpecFactory.jobConfForSpec(spec);
     Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));
     Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":11"));
     Assertions.assertThrows(
         IllegalArgumentException.class,
         () ->
             MaintenanceJobSpecFactory.jobConfForSpec(
-                new MaintenanceJobSpec(
-                    List.of(
-                        new MaintenanceJobSpec.Task(
-                            10L,
-                            202L,
-                            "rewrite_data_files",
-                            null,
-                            Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
-                    spec.getUpdaterOptions(),
-                    spec.getSparkConf()),
-                List.of()));
+                new MaintenanceJobSpec(List.of(), spec.getUpdaterOptions(), spec.getSparkConf())));
 
     MaintenanceJobSpec mixedPolicies =
         factory.forCron(
@@ -118,34 +105,6 @@ class TestMaintenanceJobSpecFactory {
                 candidate(11L, "iceberg", "db.t2", compaction(202L))));
     Assertions.assertEquals(201L, mixedPolicies.getTasks().get(0).getPolicyId());
     Assertions.assertEquals(202L, mixedPolicies.getTasks().get(1).getPolicyId());
-  }
-
-  @Test
-  void testJobConfForSpecEmbedsActionIdsFromClaims() {
-    MaintenanceJobSpecFactory factory = new MaintenanceJobSpecFactory(configWithUri());
-    MaintenanceJobSpec spec =
-        factory.forCron(
-            List.of(
-                candidate(10L, "iceberg", "db.t1", compaction(202L)),
-                candidate(11L, "iceberg", "db.t2", compaction(202L))));
-    Assertions.assertNull(spec.getTasks().get(0).getActionId());
-
-    String tasksJson =
-        MaintenanceJobSpecFactory.jobConfForSpec(spec, claims(101L, 102L))
-            .get(MaintenanceJobTemplates.TASKS_KEY);
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":101"));
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":102"));
-    // Spec tasks stay unchanged; action ids live only on the wire jobConf.
-    Assertions.assertNull(spec.getTasks().get(0).getActionId());
-    Assertions.assertNull(spec.getTasks().get(1).getActionId());
-  }
-
-  private static List<OccupancyClaim> claims(long... actionIds) {
-    ArrayList<OccupancyClaim> claims = new ArrayList<>(actionIds.length);
-    for (int i = 0; i < actionIds.length; i++) {
-      claims.add(new OccupancyClaim(actionIds[i], i + 1L));
-    }
-    return claims;
   }
 
   @Test
@@ -168,8 +127,7 @@ class TestMaintenanceJobSpecFactory {
             "{}",
             null);
     Assertions.assertThrows(
-        IllegalArgumentException.class,
-        () -> MaintenanceJobSpecFactory.jobConfForSpec(spec, claims(1L, 2L)));
+        IllegalArgumentException.class, () -> MaintenanceJobSpecFactory.jobConfForSpec(spec));
   }
 
   @Test

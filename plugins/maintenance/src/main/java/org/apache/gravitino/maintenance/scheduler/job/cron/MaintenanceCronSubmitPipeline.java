@@ -171,8 +171,7 @@ public final class MaintenanceCronSubmitPipeline {
 
     Map<String, String> jobConf;
     try {
-      jobConf =
-          jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForSpec(spec, claims));
+      jobConf = jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForSpec(spec));
     } catch (RuntimeException e) {
       actionMetaService.deleteClaims(claims);
       LOG.warn("Skipping cron-job submit for {}: invalid task_data: {}", instanceId, e.toString());

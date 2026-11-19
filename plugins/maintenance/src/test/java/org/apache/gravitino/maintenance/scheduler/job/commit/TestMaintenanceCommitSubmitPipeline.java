@@ -128,8 +128,8 @@ class TestMaintenanceCommitSubmitPipeline {
     Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
     Assertions.assertTrue(tasksJson.contains("expire_snapshots"));
     Assertions.assertTrue(tasksJson.contains("\"table_id\":" + TABLE_ID));
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":1"));
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":3"));
+    // action_id is stamped inside submitAndBind from claims, not in the pre-submit jobConf.
+    Assertions.assertFalse(tasksJson.contains("\"action_id\""));
   }
 
   private static MaintenanceCommitSubmitPipeline pipeline(

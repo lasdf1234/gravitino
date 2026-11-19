@@ -20,6 +20,7 @@ package org.apache.gravitino.maintenance.scheduler.job;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
@@ -41,6 +42,7 @@ import java.util.TreeMap;
 import javax.annotation.Nullable;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
+import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.meta.PolicyEntity;
@@ -65,7 +67,9 @@ import org.apache.gravitino.policy.PolicyExecutionSpec;
  *
  * <p>{@link #build} is for schedule {@code task_data}: cluster {@code gravitinoAuth} / {@code
  * ircAuth} are stored as conf <em>keys</em> (not secret values). Call {@link #resolveForSubmit}
- * immediately before {@code runJob} to expand those keys from the live {@code gravitino.conf}.
+ * immediately before {@code runJob} to expand those keys from the live {@code gravitino.conf}. Call
+ * {@link #applyActionIdsFromClaims} to stamp soft-slot {@code action_id} onto {@code tasks[]} right
+ * before submit.
  */
 public final class MaintenanceJobConfBuilder {
 
@@ -306,6 +310,55 @@ public final class MaintenanceJobConfBuilder {
       }
     }
     return resolved;
+  }
+
+  /**
+   * Returns a copy of {@code jobConf} with each {@code tasks[]} element stamped with {@code
+   * action_id} from {@code claims} (same order). Call after {@link #resolveForSubmit} and before
+   * {@code runJob}.
+   *
+   * @param jobConf resolved runJob map whose {@code tasks[]} lack {@code action_id}
+   * @param claims soft-slot claims parallel to {@code tasks[]}
+   * @return new map with {@code action_id} applied
+   */
+  public static Map<String, String> applyActionIdsFromClaims(
+      Map<String, String> jobConf, List<OccupancyClaim> claims) {
+    Preconditions.checkNotNull(jobConf, "jobConf");
+    Preconditions.checkArgument(claims != null && !claims.isEmpty(), "claims must be non-empty");
+    String tasksJson = jobConf.get(MaintenanceJobTemplates.TASKS_KEY);
+    Preconditions.checkArgument(
+        tasksJson != null && !tasksJson.isBlank(),
+        "jobConf.%s is required",
+        MaintenanceJobTemplates.TASKS_KEY);
+    try {
+      JsonNode root = JsonUtils.anyFieldMapper().readTree(tasksJson);
+      Preconditions.checkArgument(
+          root != null && root.isArray(),
+          "jobConf.%s must be a JSON array",
+          MaintenanceJobTemplates.TASKS_KEY);
+      ArrayNode tasks = (ArrayNode) root;
+      Preconditions.checkArgument(
+          tasks.size() == claims.size(),
+          "jobConf tasks size %s must match claims size %s",
+          tasks.size(),
+          claims.size());
+      for (int i = 0; i < tasks.size(); i++) {
+        JsonNode task = tasks.get(i);
+        Preconditions.checkArgument(
+            task != null && task.isObject(), "tasks[%s] must be a JSON object", i);
+        long actionId = claims.get(i).actionId();
+        Preconditions.checkArgument(
+            actionId > 0, "claims[%s].actionId must be positive, got %s", i, actionId);
+        ((ObjectNode) task).put("action_id", actionId);
+      }
+      Map<String, String> out = new LinkedHashMap<>(jobConf);
+      out.put(
+          MaintenanceJobTemplates.TASKS_KEY, JsonUtils.anyFieldMapper().writeValueAsString(tasks));
+      return out;
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "Failed to apply action_id onto jobConf." + MaintenanceJobTemplates.TASKS_KEY, e);
+    }
   }
 
   private String resolveJsonMapValues(String json, String field) {

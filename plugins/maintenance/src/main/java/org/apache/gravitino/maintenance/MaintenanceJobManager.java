@@ -29,6 +29,7 @@ import org.apache.gravitino.job.JobHandle;
 import org.apache.gravitino.job.JobOperationDispatcher;
 import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory;
+import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobConfBuilder;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
 import org.apache.gravitino.maintenance.storage.service.TableMaintenanceActionMetaService;
 import org.apache.gravitino.meta.JobEntity;
@@ -39,14 +40,13 @@ import org.slf4j.LoggerFactory;
 /**
  * Submits TMS Spark jobs and binds the resulting job run id onto soft-slot claims.
  *
- * <p>{@link #submitAndBind} calls {@code runJob}, then binds {@code job_id}. Callers must build
- * {@code jobConf} with soft-slot {@code action_id} values already embedded in {@code tasks[]} (see
- * {@link MaintenanceJobSpecFactory#jobConfForSpec}). When authorization is enabled, {@code runJob}
- * runs as the configured {@link TableMaintenanceConfig#JOB_SUBMITTER} USER so {@link
- * org.apache.gravitino.job.JobManager} sets a stable job owner (including for GROUP-owned
- * metalakes). If {@code runJob} succeeds but bind fails, the orphaned Spark job is cancelled and
- * unbound claims are released. Callers that fail before {@code runJob} must release claims
- * themselves.
+ * <p>{@link #submitAndBind} does {@code jobConf =
+ * MaintenanceJobConfBuilder.applyActionIdsFromClaims(jobConf, claims)}, then {@code runJob} and
+ * bind {@code job_id}. When authorization is enabled, {@code runJob} runs as the configured {@link
+ * TableMaintenanceConfig#JOB_SUBMITTER} USER so {@link org.apache.gravitino.job.JobManager} sets a
+ * stable job owner (including for GROUP-owned metalakes). If {@code runJob} succeeds but bind
+ * fails, the orphaned Spark job is cancelled and unbound claims are released. Callers that fail
+ * before {@code runJob} must release claims themselves.
  */
 public class MaintenanceJobManager {
 
@@ -111,13 +111,13 @@ public class MaintenanceJobManager {
   }
 
   /**
-   * Runs the TMS maintenance template and binds {@code job_id} on the claims. {@code jobConf} must
-   * already carry per-task {@code action_id} values from {@link
-   * MaintenanceJobSpecFactory#jobConfForSpec}.
+   * Applies claim {@code action_id}s onto {@code tasks[]}, runs the TMS maintenance template, and
+   * binds {@code job_id} on the claims.
    *
    * @param metalake metalake name
-   * @param jobConf mutable runtime jobConf (policy options already resolved; action ids injected)
-   * @param claims soft-slot claims from acquire (non-empty)
+   * @param jobConf runtime jobConf from {@link MaintenanceJobSpecFactory#jobConfForSpec} (secrets
+   *     already resolved); {@code tasks[]} must not yet carry {@code action_id}
+   * @param claims soft-slot claims from acquire (non-empty, parallel to {@code tasks[]})
    * @return job run id when run+bind succeeded; empty when submit or bind failed (claims released)
    */
   public Optional<Long> submitAndBind(
@@ -128,6 +128,7 @@ public class MaintenanceJobManager {
 
     Long jobId = null;
     try {
+      jobConf = MaintenanceJobConfBuilder.applyActionIdsFromClaims(jobConf, claims);
       JobEntity job = runIcebergMaintenanceJob(metalake, jobConf);
       jobId = job.id();
       ACTION_SERVICE.bindJobIds(claims, jobId);

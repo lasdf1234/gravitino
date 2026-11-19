@@ -58,9 +58,8 @@ public final class MaintenanceJobTemplates {
   public static final String POLICY_IDS_KEY = "policy_ids";
 
   /**
-   * Deprecated flat action-id list; submit paths embed {@code action_id} on each {@link #TASKS_KEY}
-   * element via {@link
-   * org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpecFactory#jobConfForSpec}.
+   * Deprecated flat action-id list; {@link MaintenanceJobConfBuilder#applyActionIdsFromClaims}
+   * stamps {@code action_id} onto each {@link #TASKS_KEY} element from soft-slot claims.
    */
   public static final String ACTION_IDS_KEY = "action_ids";
 

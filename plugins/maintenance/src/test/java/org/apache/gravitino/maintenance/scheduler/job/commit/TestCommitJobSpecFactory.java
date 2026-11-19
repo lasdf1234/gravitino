@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
-import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.model.TableCandidate;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
@@ -69,9 +68,7 @@ class TestCommitJobSpecFactory {
         IcebergSparkConfigUtils.parseFlatJsonMap(spec.getSparkConf(), "spark_conf");
     Assertions.assertEquals("4g", spark.get("spark.executor.memory"));
 
-    Map<String, String> runJob =
-        MaintenanceJobSpecFactory.jobConfForSpec(
-            spec, List.of(new OccupancyClaim(1L, 1L), new OccupancyClaim(2L, 2L)));
+    Map<String, String> runJob = MaintenanceJobSpecFactory.jobConfForSpec(spec);
     String tasksJson = runJob.get(MaintenanceJobTemplates.TASKS_KEY);
     Assertions.assertNotNull(tasksJson);
     Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));
@@ -80,7 +77,7 @@ class TestCommitJobSpecFactory {
     Assertions.assertTrue(tasksJson.contains("\"policy_id\":303"));
     Assertions.assertTrue(tasksJson.contains("\"older_than\":\"" + olderThan + "\""));
     Assertions.assertTrue(tasksJson.contains("\"retain_last\":\"10\""));
-    Assertions.assertTrue(tasksJson.contains("\"action_id\":1"));
+    Assertions.assertFalse(tasksJson.contains("\"action_id\""));
     Assertions.assertTrue(tasksJson.contains("trigger-expr"));
     Assertions.assertNull(runJob.get("older_than"));
     Assertions.assertEquals("4g", runJob.get("spark_executor_memory"));

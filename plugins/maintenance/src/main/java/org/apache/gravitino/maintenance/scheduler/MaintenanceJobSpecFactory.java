@@ -38,7 +38,6 @@ import org.apache.gravitino.Config;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.json.JsonUtils;
-import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.model.TableCandidate;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.scheduler.MaintenanceJobSpec.Task;
@@ -253,25 +252,18 @@ public final class MaintenanceJobSpecFactory {
    * a {@link MaintenanceJobTemplates#TASKS_KEY} JSON array. Each task keeps its own {@code params}
    * and {@code rules}; procedure arguments are not flattened across tasks.
    *
-   * <p>Soft-slot {@code claims} supply {@code action_id} for the wire {@code tasks[]} (one claim
-   * per task, same order). Commit chains must not list the same policy twice; batch acquire dedupes
-   * policy ids and would otherwise shrink the claim list.
+   * <p>{@code action_id} is not set here; {@link
+   * MaintenanceJobConfBuilder#applyActionIdsFromClaims} stamps soft-slot claim ids onto {@code
+   * tasks[]} immediately before {@code runJob}. Commit chains must not list the same policy twice;
+   * batch acquire dedupes policy ids and would otherwise shrink the claim list.
    *
    * @param spec schedule spec (non-empty tasks)
-   * @param claims soft-slot claims parallel to {@code spec.getTasks()}
    * @return mutable jobConf (caller resolves secrets)
    */
-  public static Map<String, String> jobConfForSpec(
-      MaintenanceJobSpec spec, List<OccupancyClaim> claims) {
+  public static Map<String, String> jobConfForSpec(MaintenanceJobSpec spec) {
     Preconditions.checkNotNull(spec, "spec");
-    Preconditions.checkArgument(claims != null && !claims.isEmpty(), "claims must be non-empty");
     List<Task> tasks = spec.getTasks();
     Preconditions.checkArgument(tasks != null && !tasks.isEmpty(), "tasks must not be empty");
-    Preconditions.checkArgument(
-        tasks.size() == claims.size(),
-        "tasks size %s must match claims size %s",
-        tasks.size(),
-        claims.size());
 
     HashSet<String> seen = new HashSet<>();
     List<Map<String, Object>> wireTasks = new ArrayList<>(tasks.size());
@@ -284,10 +276,7 @@ public final class MaintenanceJobSpecFactory {
               + " align 1:1",
           task.getTableId(),
           task.getPolicyId());
-      long actionId = claims.get(i).actionId();
-      Preconditions.checkArgument(
-          actionId > 0, "claims[%s].actionId must be positive, got %s", i, actionId);
-      wireTasks.add(toWireTask(task, actionId));
+      wireTasks.add(toWireTask(task));
     }
 
     Task first = tasks.get(0);
@@ -308,16 +297,14 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * Projects a schedule {@link Task} into the Spark {@code tasks[]} wire object.
+   * Projects a schedule {@link Task} into the Spark {@code tasks[]} wire object without {@code
+   * action_id} (filled at submit from soft-slot claims).
    *
    * @param task schedule task
-   * @param actionId soft-slot action id for this work item
-   * @return mutable wire map including {@code action_id}
+   * @return mutable wire map
    */
-  public static Map<String, Object> toWireTask(Task task, long actionId) {
+  public static Map<String, Object> toWireTask(Task task) {
     Preconditions.checkNotNull(task, "task");
-    Preconditions.checkArgument(
-        actionId > 0, "task tableId=%s is missing actionId", task.getTableId());
     String catalogName = task.catalogName();
     String tableIdentifier = task.tableIdentifier();
     Preconditions.checkArgument(
@@ -329,7 +316,6 @@ public final class MaintenanceJobSpecFactory {
     wire.put("table_id", task.getTableId());
     wire.put("maintenance_type", task.getMaintenanceType());
     wire.put("policy_id", task.getPolicyId());
-    wire.put("action_id", actionId);
     Map<String, String> params = extractProcedureParams(task.getParameters());
     // Always set identity keys explicitly so a blank/missing value cannot slip through.
     params.put("catalog_name", catalogName);
