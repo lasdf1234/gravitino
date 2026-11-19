@@ -288,9 +288,10 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
     StringBuilder sql = IcebergJobUtils.beginSystemProcedureCall(catalogName, "expire_snapshots");
     IcebergJobUtils.appendSqlStringTableArg(sql, tableIdentifier);
 
-    if (olderThan != null && !olderThan.isEmpty()) {
+    String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan);
+    if (resolvedOlderThan != null && !resolvedOlderThan.isEmpty()) {
       sql.append(", older_than => TIMESTAMP '")
-          .append(IcebergJobUtils.escapeSqlString(olderThan))
+          .append(IcebergJobUtils.escapeSqlString(resolvedOlderThan))
           .append("'");
     }
 
@@ -360,7 +361,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
             "  --catalog <name>          Iceberg catalog name registered in Spark",
             "  --table <identifier>      Fully qualified table name (e.g., db.table_name)"),
         IcebergJobUtils.withSparkConfUsage(
-            "  --older-than <timestamp>  Expire snapshots older than this timestamp",
+            "  --older-than <timestamp|Nd>  Expire older than timestamp or relative days (e.g. 7d)",
             "                              Example: '2024-01-01 00:00:00'",
             "                              Default: 5 days ago (Iceberg default)",
             "  --retain-last <count>     Number of most recent snapshots to retain",

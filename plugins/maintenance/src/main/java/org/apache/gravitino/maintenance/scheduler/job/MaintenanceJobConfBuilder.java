@@ -26,11 +26,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.io.IOException;
-import java.time.Clock;
-import java.time.DateTimeException;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -71,9 +66,6 @@ import org.apache.gravitino.policy.PolicyExecutionSpec;
  * before submit.
  */
 public final class MaintenanceJobConfBuilder {
-
-  private static final DateTimeFormatter RETENTION_CUTOFF =
-      DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
 
   private static final String SPARK_SQL_CATALOG_PREFIX = "spark.sql.catalog.";
 
@@ -122,18 +114,12 @@ public final class MaintenanceJobConfBuilder {
           "spark_driver_memory");
 
   private final Config gravitinoConfig;
-  private final Clock clock;
 
   /**
    * @param gravitinoConfig server config for auth overlay and gravitino URI
    */
   public MaintenanceJobConfBuilder(Config gravitinoConfig) {
-    this(gravitinoConfig, Clock.systemUTC());
-  }
-
-  MaintenanceJobConfBuilder(Config gravitinoConfig, Clock clock) {
     this.gravitinoConfig = gravitinoConfig;
-    this.clock = clock;
   }
 
   /**
@@ -179,7 +165,8 @@ public final class MaintenanceJobConfBuilder {
       if (IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY.equals(key)) {
         long days = parsePositiveDays(value, IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY);
         IcebergSnapshotExpirationContent.validateOlderThanDays(days);
-        jobConf.put("older_than", retentionCutoff(days));
+        // Spark job expands Nd → timestamp at execute time.
+        jobConf.put("older_than", days + "d");
         continue;
       }
       routeJobOption(jobConf, sparkConf, catalogName, key, value);
@@ -512,7 +499,8 @@ public final class MaintenanceJobConfBuilder {
     if (content instanceof IcebergOrphanFileRemovalContent) {
       IcebergOrphanFileRemovalContent orphan = (IcebergOrphanFileRemovalContent) content;
       IcebergOrphanFileRemovalContent.validateOlderThanDays(orphan.olderThanDays());
-      jobConf.put("older_than", retentionCutoff(orphan.olderThanDays()));
+      // Spark job expands Nd → timestamp at execute time.
+      jobConf.put("older_than", orphan.olderThanDays() + "d");
       jobConf.put("dry_run", Boolean.toString(orphan.dryRun()));
       if (orphan.location() != null) {
         jobConf.put("location", orphan.location());
@@ -523,11 +511,12 @@ public final class MaintenanceJobConfBuilder {
       IcebergSnapshotExpirationContent expire = (IcebergSnapshotExpirationContent) content;
       IcebergSnapshotExpirationContent.validateOlderThanDays(expire.olderThanDays());
       IcebergSnapshotExpirationContent.validateRetainLast(expire.retainLast());
-      // putIfAbsent: jobOptions may already supply normalized older_than / retain_last.
+      // putIfAbsent: jobOptions may already supply older_than / retain_last.
+      // Default days → empty so Iceberg table history.expire.* stays authoritative.
       if (expire.olderThanDays() == IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
         jobConf.putIfAbsent("older_than", "");
       } else {
-        jobConf.putIfAbsent("older_than", retentionCutoff(expire.olderThanDays()));
+        jobConf.putIfAbsent("older_than", expire.olderThanDays() + "d");
       }
       if (expire.retainLast() == IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
         jobConf.putIfAbsent("retain_last", "");
@@ -543,15 +532,6 @@ public final class MaintenanceJobConfBuilder {
       return Long.parseLong(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(field + " must be an integer", e);
-    }
-  }
-
-  private String retentionCutoff(long days) {
-    try {
-      return RETENTION_CUTOFF.format(clock.instant().minus(days, ChronoUnit.DAYS));
-    } catch (DateTimeException | ArithmeticException e) {
-      throw new IllegalArgumentException(
-          "olderThanDays cannot be represented as a retention timestamp", e);
     }
   }
 

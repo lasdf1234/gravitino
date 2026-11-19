@@ -18,9 +18,7 @@
  */
 package org.apache.gravitino.maintenance.scheduler.job;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,7 +40,6 @@ import org.junit.jupiter.api.Test;
 class TestMaintenanceJobConfBuilder {
 
   private static final long POLICY_ID = 9L;
-  private static final Instant FIXED = Instant.parse("2024-06-15T12:00:00Z");
   private static final String GRAVITINO_URI = "http://localhost:8090";
 
   @Test
@@ -82,9 +79,7 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
-        new MaintenanceJobConfBuilder(config, Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+    Map<String, String> conf = new MaintenanceJobConfBuilder(config).build(policy, "iceberg");
 
     Assertions.assertEquals("sort", conf.get("strategy"));
     Assertions.assertEquals("id ASC NULLS LAST", conf.get("sort_order"));
@@ -109,9 +104,7 @@ class TestMaintenanceJobConfBuilder {
             .contains("\"gravitino_uri\":\"gravitino.maintenance.gravitinoAuth.uri\""));
     Assertions.assertFalse(conf.get("updater_options").contains(GRAVITINO_URI));
 
-    Map<String, String> resolved =
-        new MaintenanceJobConfBuilder(config, Clock.fixed(FIXED, ZoneOffset.UTC))
-            .resolveForSubmit(conf);
+    Map<String, String> resolved = new MaintenanceJobConfBuilder(config).resolveForSubmit(conf);
     Assertions.assertTrue(
         resolved.get("updater_options").contains("\"gravitino_uri\":\"" + GRAVITINO_URI + "\""));
     Assertions.assertTrue(
@@ -155,8 +148,7 @@ class TestMaintenanceJobConfBuilder {
             .build();
 
     Map<String, String> conf =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+        new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     Assertions.assertEquals("7g", conf.get("spark_executor_memory"));
     Assertions.assertEquals("4", conf.get("spark_executor_cores"));
@@ -180,15 +172,13 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+    Map<String, String> conf = new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
-    Assertions.assertEquals("rewrite_manifests", conf.get("maintenance_types"));
+    String policyTypeWire = Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS.policyType();
+    Assertions.assertEquals(policyTypeWire, conf.get("maintenance_types"));
     Assertions.assertEquals("0", conf.get("spec_id"));
     Assertions.assertEquals("false", conf.get("use_caching"));
-    Assertions.assertTrue(
-        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"rewrite_manifests\""));
+    Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"" + policyTypeWire + "\""));
     Assertions.assertTrue(
         conf.get(MaintenanceJobTemplates.RULES_KEY).contains("manifest_count_threshold"));
   }
@@ -207,17 +197,16 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+    Map<String, String> conf = new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
-    Assertions.assertEquals("rewrite_manifests", conf.get("maintenance_types"));
+    Assertions.assertEquals(
+        Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS.policyType(), conf.get("maintenance_types"));
     Assertions.assertFalse(conf.containsKey("spec_id"));
     Assertions.assertFalse(conf.containsKey("use_caching"));
   }
 
   @Test
-  void testOrphanMapsRetentionCutoff() {
+  void testOrphanMapsOlderThanDaysWire() {
     PolicyEntity policy =
         PolicyEntity.builder()
             .withId(POLICY_ID)
@@ -231,13 +220,12 @@ class TestMaintenanceJobConfBuilder {
             .build();
 
     Map<String, String> conf =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+        new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     Assertions.assertEquals("system_iceberg_orphan_file_removal", conf.get("maintenance_types"));
     Assertions.assertEquals(Long.toString(policy.id()), conf.get("policy_ids"));
     Assertions.assertEquals("false", conf.get("dry_run"));
-    Assertions.assertEquals("2024-06-08 12:00:00Z", conf.get("older_than"));
+    Assertions.assertEquals("7d", conf.get("older_than"));
   }
 
   @Test
@@ -255,10 +243,9 @@ class TestMaintenanceJobConfBuilder {
             .build();
 
     Map<String, String> typed =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(fromContent, "iceberg");
+        new MaintenanceJobConfBuilder(configWithUri()).build(fromContent, "iceberg");
     Assertions.assertEquals("system_iceberg_snapshot_expiration", typed.get("maintenance_types"));
-    Assertions.assertEquals("2024-06-08 12:00:00Z", typed.get("older_than"));
+    Assertions.assertEquals("7d", typed.get("older_than"));
     Assertions.assertEquals("10", typed.get("retain_last"));
     Assertions.assertEquals("true", typed.get("stream_results"));
   }
@@ -278,8 +265,7 @@ class TestMaintenanceJobConfBuilder {
             .build();
 
     Map<String, String> conf =
-        new MaintenanceJobConfBuilder(configWithUri(), Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+        new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     Assertions.assertEquals("system_iceberg_rewrite_manifests", conf.get("maintenance_types"));
     Assertions.assertEquals("2", conf.get(IcebergRewriteManifestsContent.SPEC_ID));
@@ -316,9 +302,7 @@ class TestMaintenanceJobConfBuilder {
             + "\"table_identifier\":\"db.t\",\"use_caching\":\"false\","
             + "\"warehouse_location\":\"gravitino.maintenance.gravitinoAuth.uri\"},\"rules\":{}}]");
 
-    Map<String, String> resolved =
-        new MaintenanceJobConfBuilder(config, Clock.fixed(FIXED, ZoneOffset.UTC))
-            .resolveForSubmit(jobConf);
+    Map<String, String> resolved = new MaintenanceJobConfBuilder(config).resolveForSubmit(jobConf);
 
     Assertions.assertTrue(
         resolved
@@ -347,10 +331,7 @@ class TestMaintenanceJobConfBuilder {
     IllegalArgumentException thrown =
         Assertions.assertThrows(
             IllegalArgumentException.class,
-            () ->
-                new MaintenanceJobConfBuilder(
-                        new Config(false) {}, Clock.fixed(FIXED, ZoneOffset.UTC))
-                    .build(policy, "iceberg"));
+            () -> new MaintenanceJobConfBuilder(new Config(false) {}).build(policy, "iceberg"));
     Assertions.assertTrue(thrown.getMessage().contains("gravitino_uri"));
   }
 
@@ -383,9 +364,7 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf =
-        new MaintenanceJobConfBuilder(config, Clock.fixed(FIXED, ZoneOffset.UTC))
-            .build(policy, "iceberg");
+    Map<String, String> conf = new MaintenanceJobConfBuilder(config).build(policy, "iceberg");
 
     Assertions.assertTrue(
         conf.get("updater_options").contains("\"gravitino_uri\":\"http://policy-uri:8090\""));

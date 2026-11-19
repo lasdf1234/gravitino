@@ -19,11 +19,6 @@
 package org.apache.gravitino.maintenance.optimizer.recommender.job;
 
 import com.google.common.base.Preconditions;
-import java.time.Clock;
-import java.time.DateTimeException;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.gravitino.maintenance.optimizer.api.recommender.JobExecutionContext;
@@ -31,24 +26,17 @@ import org.apache.gravitino.maintenance.optimizer.common.util.IdentifierUtils;
 import org.apache.gravitino.maintenance.optimizer.recommender.handler.snapshot.SnapshotExpirationJobContext;
 import org.apache.gravitino.policy.IcebergSnapshotExpirationContent;
 
-/** Converts snapshot-expiration options to the built-in Spark template configuration. */
+/**
+ * Converts snapshot-expiration options to the built-in Spark template configuration.
+ *
+ * <p>{@code older_than} is emitted as relative {@code Nd} (or empty for Iceberg defaults); the
+ * Spark job expands it to a timestamp at execute time.
+ */
 public class GravitinoSnapshotExpirationJobAdapter implements GravitinoJobAdapter {
   private static final String TABLE_IDENTIFIER_KEY = "table_identifier";
   private static final String OLDER_THAN_KEY = "older_than";
   private static final String RETAIN_LAST_KEY = "retain_last";
   private static final String STREAM_RESULTS_KEY = "stream_results";
-  private static final DateTimeFormatter TIMESTAMP =
-      DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
-  private final Clock clock;
-
-  /** Creates an adapter using the UTC system clock. */
-  public GravitinoSnapshotExpirationJobAdapter() {
-    this(Clock.systemUTC());
-  }
-
-  GravitinoSnapshotExpirationJobAdapter(Clock clock) {
-    this.clock = clock;
-  }
 
   @Override
   public Map<String, String> jobConfig(
@@ -99,7 +87,7 @@ public class GravitinoSnapshotExpirationJobAdapter implements GravitinoJobAdapte
     if (days == IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
       config.put(OLDER_THAN_KEY, "");
     } else {
-      config.put(OLDER_THAN_KEY, cutoff(days));
+      config.put(OLDER_THAN_KEY, days + "d");
     }
     if (retainLast == IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
       config.put(RETAIN_LAST_KEY, "");
@@ -108,14 +96,5 @@ public class GravitinoSnapshotExpirationJobAdapter implements GravitinoJobAdapte
     }
     config.put(STREAM_RESULTS_KEY, Boolean.toString(Boolean.parseBoolean(streamResults)));
     return Map.copyOf(config);
-  }
-
-  private String cutoff(long days) {
-    try {
-      return TIMESTAMP.format(clock.instant().minus(days, ChronoUnit.DAYS));
-    } catch (DateTimeException | ArithmeticException e) {
-      throw new IllegalArgumentException(
-          "olderThanDays cannot be represented as an expiration timestamp", e);
-    }
   }
 }
