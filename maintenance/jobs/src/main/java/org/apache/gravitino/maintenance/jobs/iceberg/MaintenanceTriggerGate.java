@@ -64,8 +64,46 @@ final class MaintenanceTriggerGate {
       return true;
     }
 
-    Map<String, Object> effectiveRules = effectiveRules(policyType, rules);
-    Map<String, Object> metrics = parseNumericMetrics(metricsJson);
+    Map<String, Object> effectiveRules;
+    if (rules != null && !rules.isEmpty()) {
+      effectiveRules = rules;
+    } else {
+      switch (policyType) {
+        case ICEBERG_COMPACTION:
+          effectiveRules = new HashMap<>(PolicyContents.icebergDataCompaction().rules());
+          break;
+        case ICEBERG_REWRITE_MANIFESTS:
+          effectiveRules = new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
+          break;
+        case ICEBERG_ORPHAN_FILE_REMOVAL:
+          effectiveRules = new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
+          break;
+        default:
+          effectiveRules = new HashMap<>();
+          effectiveRules.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
+          break;
+      }
+    }
+
+    Map<String, Object> metrics = new HashMap<>();
+    if (metricsJson != null && !metricsJson.trim().isEmpty()) {
+      try {
+        JsonNode root = JsonUtils.anyFieldMapper().readTree(metricsJson);
+        Iterator<Entry<String, JsonNode>> fields = root.fields();
+        while (fields.hasNext()) {
+          Entry<String, JsonNode> field = fields.next();
+          JsonNode value = field.getValue();
+          if (value == null || value.isNull() || !value.isNumber()) {
+            continue;
+          }
+          metrics.put(
+              field.getKey(), value.isIntegralNumber() ? value.longValue() : value.doubleValue());
+        }
+      } catch (IOException | RuntimeException e) {
+        LOG.warn("Failed to parse metrics JSON: {}", e.toString());
+      }
+    }
+
     // Compaction / manifest need some numeric metrics; do not require every known field — a custom
     // trigger-expr may reference only a subset. Empty metrics still skip (nothing to evaluate).
     if ((policyType == Policy.BuiltInType.ICEBERG_COMPACTION
@@ -91,47 +129,5 @@ final class MaintenanceTriggerGate {
         effectiveRules.get(triggerExprKey),
         maintain ? "MAINTAIN" : "SKIP");
     return maintain;
-  }
-
-  private static Map<String, Object> effectiveRules(
-      Policy.BuiltInType policyType, @Nullable Map<String, Object> rules) {
-    if (rules != null && !rules.isEmpty()) {
-      return rules;
-    }
-    switch (policyType) {
-      case ICEBERG_COMPACTION:
-        return new HashMap<>(PolicyContents.icebergDataCompaction().rules());
-      case ICEBERG_REWRITE_MANIFESTS:
-        return new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
-      case ICEBERG_ORPHAN_FILE_REMOVAL:
-        return new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
-      default:
-        Map<String, Object> empty = new HashMap<>();
-        empty.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
-        return empty;
-    }
-  }
-
-  private static Map<String, Object> parseNumericMetrics(@Nullable String metricsJson) {
-    Map<String, Object> metrics = new HashMap<>();
-    if (metricsJson == null || metricsJson.trim().isEmpty()) {
-      return metrics;
-    }
-    try {
-      JsonNode root = JsonUtils.anyFieldMapper().readTree(metricsJson);
-      Iterator<Entry<String, JsonNode>> fields = root.fields();
-      while (fields.hasNext()) {
-        Entry<String, JsonNode> field = fields.next();
-        JsonNode value = field.getValue();
-        if (value == null || value.isNull() || !value.isNumber()) {
-          continue;
-        }
-        metrics.put(
-            field.getKey(), value.isIntegralNumber() ? value.longValue() : value.doubleValue());
-      }
-    } catch (IOException | RuntimeException e) {
-      LOG.warn("Failed to parse metrics JSON: {}", e.toString());
-    }
-    return metrics;
   }
 }

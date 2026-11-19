@@ -18,13 +18,11 @@
  */
 package org.apache.gravitino.maintenance.scheduler.job;
 
-import java.util.Optional;
 import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.policy.Policy;
 
 /**
- * Shared TMS job template name, jobConf keys, and Iceberg-maintenance {@link Policy.BuiltInType}
- * helpers for cron and commit submits.
+ * Shared TMS job template name and jobConf keys for cron and commit submits.
  *
  * <p>TMS always submits {@link #ICEBERG_MAINTENANCE_TEMPLATE}; standalone {@code builtin-iceberg-*}
  * templates remain for CLI / optimizer.
@@ -46,9 +44,8 @@ public final class MaintenanceJobTemplates {
   public static final String TASKS_KEY = "tasks";
 
   /**
-   * Deprecated flat dispatch key retained for schedule-time parameter maps and tests that still
-   * assert wire type strings. Runtime Spark submits use {@link #TASKS_KEY} instead. Values are
-   * {@link Policy.BuiltInType#policyType()}.
+   * Deprecated flat dispatch key retained for schedule-time parameter maps and tests. Runtime Spark
+   * submits use {@link #TASKS_KEY} instead. Values are {@link Policy.BuiltInType#policyType()}.
    */
   public static final String MAINTENANCE_TYPES_KEY = "maintenance_types";
 
@@ -57,12 +54,6 @@ public final class MaintenanceJobTemplates {
    * #TASKS_KEY} element.
    */
   public static final String POLICY_IDS_KEY = "policy_ids";
-
-  /**
-   * Deprecated flat action-id list; {@link MaintenanceJobConfBuilder#applyActionIdsFromClaims}
-   * stamps {@code action_id} onto each {@link #TASKS_KEY} element from soft-slot claims.
-   */
-  public static final String ACTION_IDS_KEY = "action_ids";
 
   /** JobConf key for overlaid updater options (JSON object string). */
   public static final String UPDATER_OPTIONS_JOB_CONF_KEY = "updater_options";
@@ -77,32 +68,21 @@ public final class MaintenanceJobTemplates {
   private MaintenanceJobTemplates() {}
 
   /**
-   * @param builtInType maintenance policy type
-   * @return cron job template name when known
+   * @param builtInType policy type
+   * @return whether TMS Iceberg maintenance jobs handle this type
    */
-  public static Optional<String> templateName(Policy.BuiltInType builtInType) {
-    if (policyTypeWire(builtInType).isEmpty()) {
-      return Optional.empty();
-    }
-    return Optional.of(ICEBERG_MAINTENANCE_TEMPLATE);
-  }
-
-  /**
-   * @param builtInType maintenance policy type
-   * @return {@link Policy.BuiltInType#policyType()} when this is an Iceberg maintenance type
-   */
-  public static Optional<String> policyTypeWire(Policy.BuiltInType builtInType) {
+  public static boolean isIcebergMaintenance(Policy.BuiltInType builtInType) {
     if (builtInType == null) {
-      return Optional.empty();
+      return false;
     }
     switch (builtInType) {
       case ICEBERG_COMPACTION:
       case ICEBERG_REWRITE_MANIFESTS:
       case ICEBERG_SNAPSHOT_EXPIRATION:
       case ICEBERG_ORPHAN_FILE_REMOVAL:
-        return Optional.of(builtInType.policyType());
+        return true;
       default:
-        return Optional.empty();
+        return false;
     }
   }
 }

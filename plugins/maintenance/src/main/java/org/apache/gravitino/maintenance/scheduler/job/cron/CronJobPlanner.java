@@ -96,7 +96,7 @@ public class CronJobPlanner {
     if (policy == null || candidates == null || candidates.isEmpty()) {
       return 0;
     }
-    if (MaintenanceJobTemplates.templateName(policy.policyType()).isEmpty()) {
+    if (!MaintenanceJobTemplates.isIcebergMaintenance(policy.policyType())) {
       LOG.warn(
           "Skipping cron-job schedule for policy {} with unsupported type {}",
           policy.id(),
@@ -608,9 +608,7 @@ public class CronJobPlanner {
   }
 
   private static boolean isExpireSnapshots(MaintenanceJobSpec spec) {
-    String expireType =
-        MaintenanceJobTemplates.policyTypeWire(Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION)
-            .orElseThrow();
+    String expireType = Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION.policyType();
     return spec.getTasks().stream().anyMatch(t -> expireType.equals(t.getPolicyType()));
   }
 

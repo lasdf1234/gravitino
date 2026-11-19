@@ -20,7 +20,6 @@ package org.apache.gravitino.maintenance.jobs.iceberg;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -71,9 +70,6 @@ public class IcebergMaintenanceJob implements BuiltInJob {
   /** Bump when template behavior / args / class wiring changes. */
   private static final String VERSION = "v1";
 
-  /** JobConf / CLI: JSON array of per-work-item task objects. */
-  public static final String TASKS_KEY = "tasks";
-
   /**
    * Maps schedule/jobConf underscore param keys onto the hyphenated names {@link
    * IcebergMaintenanceAction} reads from {@code argsByName}.
@@ -92,46 +88,6 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           .put("location", "location")
           .put("dry_run", "dry-run")
           .build();
-
-  /**
-   * @param policyType Iceberg maintenance {@link Policy.BuiltInType}
-   * @return a fresh built-in job for this policy type (not a shared singleton — expire keeps
-   *     per-run {@code preExpireData} on the instance)
-   */
-  @VisibleForTesting
-  static IcebergMaintenanceAction actionFor(Policy.BuiltInType policyType) {
-    if (policyType == null) {
-      throw new IllegalArgumentException("policy_type is required");
-    }
-    switch (policyType) {
-      case ICEBERG_COMPACTION:
-        return new IcebergRewriteDataFilesJob();
-      case ICEBERG_REWRITE_MANIFESTS:
-        return new IcebergRewriteManifestsJob();
-      case ICEBERG_SNAPSHOT_EXPIRATION:
-        return new IcebergExpireSnapshotsJob();
-      case ICEBERG_ORPHAN_FILE_REMOVAL:
-        return new IcebergRemoveOrphanFilesJob();
-      default:
-        throw new IllegalArgumentException(
-            "Unsupported maintenance policy type: " + policyType.policyType());
-    }
-  }
-
-  /**
-   * @param raw {@link Policy.BuiltInType#policyType()} wire value
-   * @return Iceberg maintenance built-in type
-   */
-  @VisibleForTesting
-  static Policy.BuiltInType requireMaintenancePolicyType(@Nullable String raw) {
-    if (raw == null || raw.trim().isEmpty()) {
-      throw new IllegalArgumentException("policy_type is required");
-    }
-    Policy.BuiltInType type = Policy.BuiltInType.fromPolicyType(raw.trim());
-    // Reject non-maintenance built-ins (row_filter, custom, …) early.
-    actionFor(type);
-    return type;
-  }
 
   @Override
   public SparkJobTemplate jobTemplate() {
@@ -178,9 +134,19 @@ public class IcebergMaintenanceJob implements BuiltInJob {
     Map<String, String> updaterOptions;
     try {
       tasks = parseTasks(IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("tasks")));
-      updaterOptions =
-          parseUpdaterOptions(
-              IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("updater-options")));
+      String updaterJson =
+          IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("updater-options"));
+      if (updaterJson == null || updaterJson.trim().isEmpty()) {
+        updaterOptions = Collections.emptyMap();
+      } else {
+        try {
+          @SuppressWarnings("unchecked")
+          Map<String, String> parsed = JsonUtils.anyFieldMapper().readValue(updaterJson, Map.class);
+          updaterOptions = parsed == null ? Collections.emptyMap() : parsed;
+        } catch (JsonProcessingException e) {
+          throw new IllegalArgumentException("Invalid updater-options JSON: " + e.getMessage(), e);
+        }
+      }
     } catch (IllegalArgumentException | IllegalStateException e) {
       LOG.error("Invalid TMS maintenance arguments: {}", e.getMessage());
       return 1;
@@ -210,7 +176,17 @@ public class IcebergMaintenanceJob implements BuiltInJob {
             try {
               runMaintenanceForTask(spark, client, task);
             } finally {
-              finishMaintenanceAction(client, task.actionId, task.tableId, task.policyId);
+              try {
+                client.finish(
+                    task.actionId, new MaintenanceActionFinishRequest(task.tableId, task.policyId));
+              } catch (Exception e) {
+                LOG.warn(
+                    "Best-effort TMS finish failed for action_id {} table {} policy {}",
+                    task.actionId,
+                    task.tableId,
+                    task.policyId,
+                    e);
+              }
               finishedKeys.add(key);
             }
           }
@@ -222,7 +198,17 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           for (MaintenanceTask task : tasks) {
             String key = task.tableId + ":" + task.policyId + ":" + task.actionId;
             if (!finishedKeys.contains(key)) {
-              finishMaintenanceAction(client, task.actionId, task.tableId, task.policyId);
+              try {
+                client.finish(
+                    task.actionId, new MaintenanceActionFinishRequest(task.tableId, task.policyId));
+              } catch (Exception finishError) {
+                LOG.warn(
+                    "Best-effort TMS finish failed for action_id {} table {} policy {}",
+                    task.actionId,
+                    task.tableId,
+                    task.policyId,
+                    finishError);
+              }
             }
           }
         }
@@ -245,14 +231,53 @@ public class IcebergMaintenanceJob implements BuiltInJob {
     // does not inherit that resolution.
     String priorSpecId = task.procedureArgs.get("spec-id");
     try {
-      IcebergMaintenanceAction action = actionFor(task.policyType);
+      IcebergMaintenanceAction action;
+      switch (task.policyType) {
+        case ICEBERG_COMPACTION:
+          action = new IcebergRewriteDataFilesJob();
+          break;
+        case ICEBERG_REWRITE_MANIFESTS:
+          action = new IcebergRewriteManifestsJob();
+          break;
+        case ICEBERG_SNAPSHOT_EXPIRATION:
+          action = new IcebergExpireSnapshotsJob();
+          break;
+        case ICEBERG_ORPHAN_FILE_REMOVAL:
+          action = new IcebergRemoveOrphanFilesJob();
+          break;
+        default:
+          throw new IllegalArgumentException(
+              "Unsupported maintenance policy type: " + task.policyType.policyType());
+      }
+
       TableSnapshotMetrics before = null;
       if (action.hasBeforeMetrics()) {
         before =
             action.collectBeforeMetrics(
                 spark, task.catalogName, task.tableIdentifier, task.procedureArgs);
-        if (!reportBeforeMetricsOrStop(
-            client, task.actionId, task.tableId, task.policyId, before)) {
+        if (before.metricsJson() == null || before.metricsJson().trim().isEmpty()) {
+          LOG.info(
+              "TMS type {} stopped for action_id {} table {} policy {}: before-metrics failed"
+                  + " (abandoned or unbound)",
+              task.policyType.policyType(),
+              task.actionId,
+              task.tableId,
+              task.policyId);
+          return;
+        }
+        try {
+          client.reportBeforeMetrics(
+              task.actionId,
+              new MaintenanceActionMetricsRequest(
+                  task.tableId, task.policyId, before.snapshotId(), before.metricsJson()));
+        } catch (Exception e) {
+          LOG.warn(
+              "TMS before metrics failed for action_id {} table {} policy {} snapshot {}: {}",
+              task.actionId,
+              task.tableId,
+              task.policyId,
+              before.snapshotId(),
+              e.toString());
           LOG.info(
               "TMS type {} stopped for action_id {} table {} policy {}: before-metrics failed"
                   + " (abandoned or unbound)",
@@ -293,7 +318,28 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       TableSnapshotMetrics after =
           action.executeAndCollectAfter(
               spark, task.catalogName, task.tableIdentifier, task.procedureArgs, before);
-      reportAfterMetrics(client, task.actionId, task.tableId, task.policyId, after);
+      if (after.metricsJson() == null || after.metricsJson().trim().isEmpty()) {
+        LOG.warn(
+            "TMS after metrics skipped for action_id {} table {} policy {}: empty metrics JSON",
+            task.actionId,
+            task.tableId,
+            task.policyId);
+        return;
+      }
+      try {
+        client.reportAfterMetrics(
+            task.actionId,
+            new MaintenanceActionMetricsRequest(
+                task.tableId, task.policyId, after.snapshotId(), after.metricsJson()));
+      } catch (Exception e) {
+        LOG.warn(
+            "TMS after metrics failed for action_id {} table {} policy {} snapshot {}: {}",
+            task.actionId,
+            task.tableId,
+            task.policyId,
+            after.snapshotId(),
+            e.toString());
+      }
     } finally {
       if (priorSpecId == null) {
         task.procedureArgs.remove("spec-id");
@@ -303,8 +349,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
     }
   }
 
-  @VisibleForTesting
-  static List<MaintenanceTask> parseTasks(@Nullable String tasksJson) {
+  private static List<MaintenanceTask> parseTasks(@Nullable String tasksJson) {
     if (tasksJson == null || tasksJson.trim().isEmpty()) {
       throw new IllegalArgumentException("tasks JSON is required (non-empty array)");
     }
@@ -317,98 +362,87 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       }
       List<MaintenanceTask> tasks = new ArrayList<>(raw.size());
       for (Map<String, Object> entry : raw) {
-        tasks.add(parseTask(entry));
+        if (entry == null) {
+          throw new IllegalArgumentException("tasks entry must not be null");
+        }
+        long tableId = requirePositiveLong(entry.get("table_id"), "table_id");
+        Object policyTypeRaw = entry.get("policy_type");
+        if (policyTypeRaw == null || String.valueOf(policyTypeRaw).trim().isEmpty()) {
+          throw new IllegalArgumentException("policy_type is required");
+        }
+        Policy.BuiltInType policyType =
+            Policy.BuiltInType.fromPolicyType(String.valueOf(policyTypeRaw).trim());
+        switch (policyType) {
+          case ICEBERG_COMPACTION:
+          case ICEBERG_REWRITE_MANIFESTS:
+          case ICEBERG_SNAPSHOT_EXPIRATION:
+          case ICEBERG_ORPHAN_FILE_REMOVAL:
+            break;
+          default:
+            throw new IllegalArgumentException(
+                "Unsupported maintenance policy type: " + policyType.policyType());
+        }
+        long policyId = requirePositiveLong(entry.get("policy_id"), "policy_id");
+        long actionId = requirePositiveLong(entry.get("action_id"), "action_id");
+
+        Map<String, String> params = new LinkedHashMap<>();
+        Object paramsRaw = entry.get("params");
+        if (paramsRaw != null) {
+          if (!(paramsRaw instanceof Map)) {
+            throw new IllegalArgumentException("params must be a JSON object");
+          }
+          for (Map.Entry<?, ?> e : ((Map<?, ?>) paramsRaw).entrySet()) {
+            if (e.getKey() != null && e.getValue() != null) {
+              params.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+            }
+          }
+        }
+        String catalogName = requireNonBlank(params.get("catalog_name"), "params.catalog_name");
+        String tableIdentifier =
+            requireNonBlank(params.get("table_identifier"), "params.table_identifier");
+
+        Map<String, String> procedureArgs = new HashMap<>();
+        for (Map.Entry<String, String> e : params.entrySet()) {
+          String key = e.getKey();
+          if (key == null
+              || "catalog_name".equals(key)
+              || "table_identifier".equals(key)
+              || e.getValue() == null
+              || e.getValue().trim().isEmpty()) {
+            continue;
+          }
+          String argKey = PARAM_KEY_TO_ARG.get(key);
+          procedureArgs.put(argKey != null ? argKey : key.replace('_', '-'), e.getValue());
+        }
+
+        Map<String, Object> rules = new LinkedHashMap<>();
+        Object rulesRaw = entry.get("rules");
+        if (rulesRaw != null) {
+          if (!(rulesRaw instanceof Map)) {
+            throw new IllegalArgumentException("rules must be a JSON object");
+          }
+          for (Map.Entry<?, ?> e : ((Map<?, ?>) rulesRaw).entrySet()) {
+            if (e.getKey() != null) {
+              rules.put(String.valueOf(e.getKey()), e.getValue());
+            }
+          }
+        }
+
+        tasks.add(
+            new MaintenanceTask(
+                tableId,
+                catalogName,
+                tableIdentifier,
+                policyType,
+                policyId,
+                actionId,
+                procedureArgs,
+                rules));
       }
       return tasks;
     } catch (JsonProcessingException e) {
       throw new IllegalArgumentException("tasks must be valid JSON: " + e.getMessage(), e);
     }
-  }
-
-  private static MaintenanceTask parseTask(@Nullable Map<String, Object> entry) {
-    if (entry == null) {
-      throw new IllegalArgumentException("tasks entry must not be null");
-    }
-    long tableId = requirePositiveLong(entry.get("table_id"), "table_id");
-    Policy.BuiltInType policyType =
-        requireMaintenancePolicyType(stringOrNull(entry.get("policy_type")));
-    long policyId = requirePositiveLong(entry.get("policy_id"), "policy_id");
-    long actionId = requirePositiveLong(entry.get("action_id"), "action_id");
-    Map<String, String> params = asStringMap(entry.get("params"));
-    String catalogName = requireNonBlank(params.get("catalog_name"), "params.catalog_name");
-    String tableIdentifier =
-        requireNonBlank(params.get("table_identifier"), "params.table_identifier");
-    Map<String, String> procedureArgs = toProcedureArgMap(params);
-    Map<String, Object> rules = asObjectMap(entry.get("rules"));
-    return new MaintenanceTask(
-        tableId,
-        catalogName,
-        tableIdentifier,
-        policyType,
-        policyId,
-        actionId,
-        procedureArgs,
-        rules);
-  }
-
-  @VisibleForTesting
-  static Map<String, String> toProcedureArgMap(@Nullable Map<String, String> params) {
-    Map<String, String> args = new HashMap<>();
-    if (params == null || params.isEmpty()) {
-      return args;
-    }
-    for (Map.Entry<String, String> entry : params.entrySet()) {
-      String key = entry.getKey();
-      if (key == null
-          || "catalog_name".equals(key)
-          || "table_identifier".equals(key)
-          || entry.getValue() == null
-          || entry.getValue().trim().isEmpty()) {
-        continue;
-      }
-      String argKey = PARAM_KEY_TO_ARG.get(key);
-      if (argKey == null) {
-        argKey = key.replace('_', '-');
-      }
-      args.put(argKey, entry.getValue());
-    }
-    return args;
-  }
-
-  private static Map<String, String> asStringMap(@Nullable Object raw) {
-    Map<String, String> out = new LinkedHashMap<>();
-    if (raw == null) {
-      return out;
-    }
-    if (!(raw instanceof Map)) {
-      throw new IllegalArgumentException("params must be a JSON object");
-    }
-    Map<?, ?> map = (Map<?, ?>) raw;
-    for (Map.Entry<?, ?> entry : map.entrySet()) {
-      if (entry.getKey() == null || entry.getValue() == null) {
-        continue;
-      }
-      out.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
-    }
-    return out;
-  }
-
-  private static Map<String, Object> asObjectMap(@Nullable Object raw) {
-    Map<String, Object> out = new LinkedHashMap<>();
-    if (raw == null) {
-      return out;
-    }
-    if (!(raw instanceof Map)) {
-      throw new IllegalArgumentException("rules must be a JSON object");
-    }
-    Map<?, ?> map = (Map<?, ?>) raw;
-    for (Map.Entry<?, ?> entry : map.entrySet()) {
-      if (entry.getKey() == null) {
-        continue;
-      }
-      out.put(String.valueOf(entry.getKey()), entry.getValue());
-    }
-    return out;
   }
 
   private static long requirePositiveLong(@Nullable Object value, String field) {
@@ -427,108 +461,18 @@ public class IcebergMaintenanceJob implements BuiltInJob {
   }
 
   private static String requireNonBlank(@Nullable Object value, String field) {
-    String text = stringOrNull(value);
-    if (text == null || text.trim().isEmpty()) {
+    if (value == null) {
       throw new IllegalArgumentException(field + " must not be blank");
     }
-    return text.trim();
-  }
-
-  @Nullable
-  private static String stringOrNull(@Nullable Object value) {
-    return value == null ? null : String.valueOf(value);
-  }
-
-  private static void finishMaintenanceAction(
-      MaintenanceActionHttpClient client, long actionId, long tableId, long policyId) {
-    try {
-      client.finish(actionId, new MaintenanceActionFinishRequest(tableId, policyId));
-    } catch (Exception e) {
-      LOG.warn(
-          "Best-effort TMS finish failed for action_id {} table {} policy {}",
-          actionId,
-          tableId,
-          policyId,
-          e);
+    String text = String.valueOf(value).trim();
+    if (text.isEmpty()) {
+      throw new IllegalArgumentException(field + " must not be blank");
     }
-  }
-
-  /**
-   * Reports before-metrics. Failure means the TMS action is abandoned/unbound — do not run the
-   * procedure.
-   */
-  private static boolean reportBeforeMetricsOrStop(
-      MaintenanceActionHttpClient client,
-      long actionId,
-      long tableId,
-      long policyId,
-      TableSnapshotMetrics sample) {
-    if (sample.metricsJson() == null || sample.metricsJson().trim().isEmpty()) {
-      return false;
-    }
-    try {
-      client.reportBeforeMetrics(
-          actionId,
-          new MaintenanceActionMetricsRequest(
-              tableId, policyId, sample.snapshotId(), sample.metricsJson()));
-      return true;
-    } catch (Exception e) {
-      LOG.warn(
-          "TMS before metrics failed for action_id {} table {} policy {} snapshot {}: {}",
-          actionId,
-          tableId,
-          policyId,
-          sample.snapshotId(),
-          e.toString());
-      return false;
-    }
-  }
-
-  private static void reportAfterMetrics(
-      MaintenanceActionHttpClient client,
-      long actionId,
-      long tableId,
-      long policyId,
-      TableSnapshotMetrics sample) {
-    if (sample.metricsJson() == null || sample.metricsJson().trim().isEmpty()) {
-      LOG.warn(
-          "TMS after metrics skipped for action_id {} table {} policy {}: empty metrics JSON",
-          actionId,
-          tableId,
-          policyId);
-      return;
-    }
-    try {
-      client.reportAfterMetrics(
-          actionId,
-          new MaintenanceActionMetricsRequest(
-              tableId, policyId, sample.snapshotId(), sample.metricsJson()));
-    } catch (Exception e) {
-      LOG.warn(
-          "TMS after metrics failed for action_id {} table {} policy {} snapshot {}: {}",
-          actionId,
-          tableId,
-          policyId,
-          sample.snapshotId(),
-          e.toString());
-    }
-  }
-
-  private static Map<String, String> parseUpdaterOptions(@Nullable String json) {
-    if (json == null || json.trim().isEmpty()) {
-      return Collections.emptyMap();
-    }
-    try {
-      @SuppressWarnings("unchecked")
-      Map<String, String> parsed = JsonUtils.anyFieldMapper().readValue(json, Map.class);
-      return parsed == null ? Collections.emptyMap() : parsed;
-    } catch (JsonProcessingException e) {
-      throw new IllegalArgumentException("Invalid updater-options JSON: " + e.getMessage(), e);
-    }
+    return text;
   }
 
   /** One ordered maintenance work item inside this Spark job. */
-  static final class MaintenanceTask {
+  private static final class MaintenanceTask {
     final long tableId;
     final String catalogName;
     final String tableIdentifier;

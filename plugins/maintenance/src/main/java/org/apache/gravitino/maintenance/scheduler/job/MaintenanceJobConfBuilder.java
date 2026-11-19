@@ -36,7 +36,6 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import javax.annotation.Nullable;
@@ -189,18 +188,17 @@ public final class MaintenanceJobConfBuilder {
     fillPlaceholdersFromSparkConf(jobConf, sparkConf, catalogName);
     putTypedProcedureParams(jobConf, content);
 
-    Optional<String> policyType = MaintenanceJobTemplates.policyTypeWire(policy.policyType());
-    policyType.ifPresent(
-        type -> {
-          jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, type);
-          jobConf.put(MaintenanceJobTemplates.POLICY_IDS_KEY, Long.toString(policy.id()));
-        });
-    if (content != null && policyType.isPresent()) {
-      Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
-      rulesByType.put(policyType.get(), new LinkedHashMap<>(content.rules()));
-      jobConf.put(
-          MaintenanceJobTemplates.RULES_KEY,
-          writeJson(rulesByType, MaintenanceJobTemplates.RULES_KEY));
+    if (MaintenanceJobTemplates.isIcebergMaintenance(policy.policyType())) {
+      String policyType = policy.policyType().policyType();
+      jobConf.put(MaintenanceJobTemplates.MAINTENANCE_TYPES_KEY, policyType);
+      jobConf.put(MaintenanceJobTemplates.POLICY_IDS_KEY, Long.toString(policy.id()));
+      if (content != null) {
+        Map<String, Map<String, Object>> rulesByType = new LinkedHashMap<>();
+        rulesByType.put(policyType, new LinkedHashMap<>(content.rules()));
+        jobConf.put(
+            MaintenanceJobTemplates.RULES_KEY,
+            writeJson(rulesByType, MaintenanceJobTemplates.RULES_KEY));
+      }
     }
 
     jobConf.put(
