@@ -32,7 +32,6 @@ import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
@@ -115,7 +114,7 @@ public final class MaintenanceJobSpecFactory {
         MaintenanceJobConfBuilder.ScheduleConf built = jobConfBuilder.build(policy, catalogName);
         if (firstPolicy) {
           updaterOptions = built.updaterOptions();
-          if (StringUtils.isNotBlank(built.sparkConf())) {
+          if (built.sparkConf() != null && !built.sparkConf().isBlank()) {
             sparkConf.putAll(
                 IcebergSparkConfigUtils.parseFlatJsonMap(built.sparkConf(), "spark_conf"));
           }
@@ -159,7 +158,9 @@ public final class MaintenanceJobSpecFactory {
         identifier);
     String catalogName = namespace.level(1);
     Preconditions.checkArgument(
-        StringUtils.isNotBlank(catalogName), "catalog name must not be blank: %s", identifier);
+        catalogName != null && !catalogName.isBlank(),
+        "catalog name must not be blank: %s",
+        identifier);
     return catalogName;
   }
 
@@ -180,14 +181,14 @@ public final class MaintenanceJobSpecFactory {
     for (int i = 2; i < namespace.length(); i++) {
       String level = namespace.level(i);
       Preconditions.checkArgument(
-          StringUtils.isNotBlank(level), "blank namespace on %s", identifier);
+          level != null && !level.isBlank(), "blank namespace on %s", identifier);
       if (sparkTable.length() > 0) {
         sparkTable.append('.');
       }
       sparkTable.append(level);
     }
     Preconditions.checkArgument(
-        StringUtils.isNotBlank(identifier.name()), "table name must not be blank: %s", identifier);
+        !identifier.name().isBlank(), "table name must not be blank: %s", identifier);
     if (sparkTable.length() > 0) {
       sparkTable.append('.');
     }
@@ -246,7 +247,8 @@ public final class MaintenanceJobSpecFactory {
               || "catalog_name".equals(key)
               || "table_identifier".equals(key)
               || MaintenanceJobTemplates.RULES_KEY.equals(key)
-              || StringUtils.isBlank(value)) {
+              || value == null
+              || value.isBlank()) {
             continue;
           }
           params.put(key, value);
@@ -256,7 +258,7 @@ public final class MaintenanceJobSpecFactory {
       Map<String, Object> rules = Map.of();
       if (parameters != null && task.getPolicyType() != null) {
         String raw = parameters.get(MaintenanceJobTemplates.RULES_KEY);
-        if (StringUtils.isNotBlank(raw)) {
+        if (raw != null && !raw.trim().isEmpty()) {
           Map<String, Object> typed = parseRulesByType(raw).get(task.getPolicyType());
           if (typed != null && !typed.isEmpty()) {
             rules = new LinkedHashMap<>(typed);
@@ -276,17 +278,17 @@ public final class MaintenanceJobSpecFactory {
     Task first = tasks.get(0);
     String catalogName = first.catalogName();
     Preconditions.checkArgument(
-        StringUtils.isNotBlank(catalogName),
+        catalogName != null && !catalogName.isBlank(),
         "task tableId=%s is missing catalog_name",
         first.getTableId());
 
     Map<String, String> jobConf = new LinkedHashMap<>();
     // SparkJobTemplate.configs still use {{catalog_name}} / resource placeholders.
     jobConf.put("catalog_name", catalogName);
-    if (StringUtils.isNotBlank(spec.getUpdaterOptions())) {
+    if (spec.getUpdaterOptions() != null && !spec.getUpdaterOptions().isBlank()) {
       jobConf.put(MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY, spec.getUpdaterOptions());
     }
-    if (StringUtils.isNotBlank(spec.getSparkConf())) {
+    if (spec.getSparkConf() != null && !spec.getSparkConf().isBlank()) {
       jobConf.put("spark_conf", spec.getSparkConf());
     }
     jobConf.put(
@@ -311,7 +313,7 @@ public final class MaintenanceJobSpecFactory {
    * @param fromJson candidate {@code spark_conf} JSON, or null/blank
    */
   public static void mergeSparkConfMaps(Map<String, String> into, @Nullable String fromJson) {
-    if (StringUtils.isBlank(fromJson)) {
+    if (fromJson == null || fromJson.trim().isEmpty()) {
       return;
     }
     Map<String, String> later = IcebergSparkConfigUtils.parseFlatJsonMap(fromJson, "spark_conf");
@@ -400,7 +402,7 @@ public final class MaintenanceJobSpecFactory {
    */
   static void mergePolicyRulesByType(Map<String, String> into, Map<String, String> from) {
     String fromJson = from.get(MaintenanceJobTemplates.RULES_KEY);
-    if (StringUtils.isBlank(fromJson)) {
+    if (fromJson == null || fromJson.trim().isEmpty()) {
       return;
     }
     Map<String, Map<String, Object>> merged =
@@ -418,7 +420,7 @@ public final class MaintenanceJobSpecFactory {
   }
 
   private static Map<String, Map<String, Object>> parseRulesByType(@Nullable String json) {
-    if (StringUtils.isBlank(json)) {
+    if (json == null || json.trim().isEmpty()) {
       return Map.of();
     }
     try {

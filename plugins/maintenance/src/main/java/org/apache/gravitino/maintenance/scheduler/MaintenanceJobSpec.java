@@ -30,7 +30,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
 import org.apache.gravitino.policy.Policy;
@@ -133,14 +132,14 @@ public final class MaintenanceJobSpec {
   @JsonIgnore
   @Nullable
   public String metalake() {
-    if (StringUtils.isBlank(updaterOptions)) {
+    if (updaterOptions == null || updaterOptions.isBlank()) {
       return null;
     }
     Map<String, String> options =
         IcebergSparkConfigUtils.parseFlatJsonMap(
             updaterOptions, MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY);
     String metalake = options.get("metalake");
-    return StringUtils.isBlank(metalake) ? null : metalake.trim();
+    return metalake == null || metalake.isBlank() ? null : metalake.trim();
   }
 
   /**
@@ -149,23 +148,24 @@ public final class MaintenanceJobSpec {
   @JsonIgnore
   public boolean isValid() {
     return metalake() != null
-        && StringUtils.isNotBlank(updaterOptions)
+        && updaterOptions != null
+        && !updaterOptions.isBlank()
         && tasks != null
         && !tasks.isEmpty()
         && tasks.stream().allMatch(Task::isValid);
   }
 
   /**
-   * @return true when any task is Iceberg snapshot expiration ({@link
+   * @return true when every task is Iceberg snapshot expiration ({@link
    *     Policy.BuiltInType#ICEBERG_SNAPSHOT_EXPIRATION})
    */
   @JsonIgnore
-  public boolean containsSnapshotExpiration() {
+  public boolean isSnapshotExpiration() {
     if (tasks == null || tasks.isEmpty()) {
       return false;
     }
     String expireType = Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION.policyType();
-    return tasks.stream().anyMatch(t -> expireType.equals(t.getPolicyType()));
+    return tasks.stream().allMatch(t -> expireType.equals(t.getPolicyType()));
   }
 
   @Override
@@ -328,7 +328,8 @@ public final class MaintenanceJobSpec {
     boolean isValid() {
       return tableId > 0
           && policyId > 0
-          && StringUtils.isNotBlank(policyType)
+          && policyType != null
+          && !policyType.isBlank()
           && parameters != null
           && catalogName() != null
           && tableIdentifier() != null;
@@ -356,7 +357,7 @@ public final class MaintenanceJobSpec {
     }
 
     private static @Nullable String blankToNull(@Nullable String value) {
-      return StringUtils.isBlank(value) ? null : value.trim();
+      return value == null || value.isBlank() ? null : value.trim();
     }
   }
 }

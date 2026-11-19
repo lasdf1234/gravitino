@@ -32,7 +32,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.job.SparkJobTemplate;
 import org.apache.gravitino.json.JsonUtils;
@@ -150,7 +149,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
         SparkSession.builder().appName("Gravitino Iceberg Maintenance Task");
     String sparkConfJson =
         IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("spark-conf"));
-    if (StringUtils.isNotBlank(sparkConfJson)) {
+    if (sparkConfJson != null && !sparkConfJson.isEmpty()) {
       Map<String, String> sparkConfigs =
           new HashMap<>(IcebergJobUtils.parseCustomSparkConfigs(sparkConfJson));
       // Session defaultCatalog follows the first target table's catalog (single-catalog TMS path).
@@ -249,7 +248,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
         before =
             action.collectBeforeMetrics(
                 spark, task.catalogName, task.tableIdentifier, task.procedureArgs);
-        if (StringUtils.isBlank(before.metricsJson())) {
+        if (before.metricsJson() == null || before.metricsJson().trim().isEmpty()) {
           LOG.info(
               "TMS type {} stopped for action_id {} table {} policy {}: before-metrics failed"
                   + " (abandoned or unbound)",
@@ -311,7 +310,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       TableSnapshotMetrics after =
           action.executeAndCollectAfter(
               spark, task.catalogName, task.tableIdentifier, task.procedureArgs, before);
-      if (StringUtils.isBlank(after.metricsJson())) {
+      if (after.metricsJson() == null || after.metricsJson().trim().isEmpty()) {
         LOG.warn(
             "TMS after metrics skipped for action_id {} table {} policy {}: empty metrics JSON",
             task.actionId,
@@ -343,7 +342,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
   }
 
   private static List<MaintenanceTask> parseTasks(@Nullable String tasksJson) {
-    if (StringUtils.isBlank(tasksJson)) {
+    if (tasksJson == null || tasksJson.trim().isEmpty()) {
       throw new IllegalArgumentException("tasks JSON is required (non-empty array)");
     }
     try {
@@ -360,7 +359,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
         }
         long tableId = requirePositiveLong(entry.get("table_id"), "table_id");
         Object policyTypeRaw = entry.get("policy_type");
-        if (policyTypeRaw == null || StringUtils.isBlank(String.valueOf(policyTypeRaw))) {
+        if (policyTypeRaw == null || String.valueOf(policyTypeRaw).trim().isEmpty()) {
           throw new IllegalArgumentException("policy_type is required");
         }
         Policy.BuiltInType policyType =
@@ -400,7 +399,8 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           if (key == null
               || "catalog_name".equals(key)
               || "table_identifier".equals(key)
-              || StringUtils.isBlank(e.getValue())) {
+              || e.getValue() == null
+              || e.getValue().trim().isEmpty()) {
             continue;
           }
           String argKey = PARAM_KEY_TO_ARG.get(key);
@@ -457,7 +457,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       throw new IllegalArgumentException(field + " must not be blank");
     }
     String text = String.valueOf(value).trim();
-    if (StringUtils.isBlank(text)) {
+    if (text.isEmpty()) {
       throw new IllegalArgumentException(field + " must not be blank");
     }
     return text;

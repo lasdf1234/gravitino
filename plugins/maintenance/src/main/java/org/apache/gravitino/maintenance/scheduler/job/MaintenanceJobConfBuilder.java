@@ -34,7 +34,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.model.OccupancyClaim;
@@ -145,7 +144,7 @@ public final class MaintenanceJobConfBuilder {
     Map<String, String> sparkConf = new LinkedHashMap<>();
 
     String existingSparkConfJson = jobOptions.get("spark_conf");
-    if (StringUtils.isNotBlank(existingSparkConfJson)) {
+    if (existingSparkConfJson != null && !existingSparkConfJson.trim().isEmpty()) {
       sparkConf.putAll(
           IcebergSparkConfigUtils.parseFlatJsonMap(existingSparkConfJson, "spark_conf"));
     }
@@ -198,7 +197,7 @@ public final class MaintenanceJobConfBuilder {
     Preconditions.checkNotNull(jobConf, "jobConf");
     Preconditions.checkNotNull(catalogName, "catalogName");
     String sparkConfJson = jobConf.get("spark_conf");
-    if (StringUtils.isBlank(sparkConfJson)) {
+    if (sparkConfJson == null || sparkConfJson.trim().isEmpty()) {
       return;
     }
     Map<String, String> sparkConf =
@@ -234,7 +233,7 @@ public final class MaintenanceJobConfBuilder {
       String sparkKey = entry.getKey();
       String placeholder = entry.getValue();
       String value = jobConf.get(placeholder);
-      if (StringUtils.isNotBlank(value)) {
+      if (value != null && !value.isBlank()) {
         sparkConf.putIfAbsent(sparkKey, value);
       }
     }
@@ -255,7 +254,7 @@ public final class MaintenanceJobConfBuilder {
       String placeholder,
       String sparkKey) {
     String value = jobConf.get(placeholder);
-    if (StringUtils.isNotBlank(value)) {
+    if (value != null && !value.isBlank()) {
       sparkConf.putIfAbsent(sparkKey, value);
     }
   }
@@ -315,7 +314,7 @@ public final class MaintenanceJobConfBuilder {
     Preconditions.checkArgument(claims != null && !claims.isEmpty(), "claims must be non-empty");
     String tasksJson = jobConf.get(MaintenanceJobTemplates.TASKS_KEY);
     Preconditions.checkArgument(
-        StringUtils.isNotBlank(tasksJson),
+        tasksJson != null && !tasksJson.isBlank(),
         "jobConf.%s is required",
         MaintenanceJobTemplates.TASKS_KEY);
     try {
@@ -468,7 +467,7 @@ public final class MaintenanceJobConfBuilder {
     updaterOptions.put("metalake", metalake);
 
     String gravitinoUri = updaterOptions.get("gravitino_uri");
-    if (StringUtils.isBlank(gravitinoUri)) {
+    if (gravitinoUri == null || gravitinoUri.trim().isEmpty()) {
       throw new IllegalArgumentException(
           "updater_options.gravitino_uri is required for Spark submit; set policy "
               + "updaterOptions.gravitino_uri or gravitino.maintenance.gravitinoAuth.uri");
@@ -481,7 +480,7 @@ public final class MaintenanceJobConfBuilder {
     if (content instanceof IcebergDataCompactionContent) {
       IcebergDataCompactionContent compaction = (IcebergDataCompactionContent) content;
       parameters.put("strategy", compaction.rewriteStrategy());
-      if (StringUtils.isNotBlank(compaction.sortOrder())) {
+      if (compaction.sortOrder() != null && !compaction.sortOrder().isEmpty()) {
         parameters.put("sort_order", compaction.sortOrder());
       }
       if (!compaction.rewriteOptions().isEmpty()) {
@@ -599,7 +598,7 @@ public final class MaintenanceJobConfBuilder {
     public Map<String, String> asMap() {
       Map<String, String> out = new LinkedHashMap<>(parameters);
       out.put(MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY, updaterOptions);
-      if (StringUtils.isNotBlank(sparkConf)) {
+      if (sparkConf != null && !sparkConf.isBlank()) {
         out.put("spark_conf", sparkConf);
       }
       return out;

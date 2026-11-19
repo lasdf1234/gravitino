@@ -569,7 +569,7 @@ public class CronJobPlanner {
         client.getScheduledExecutionsForTask(
             MaintenanceSchedulerPools.CRON_JOB, MaintenanceJobSpec.class)) {
       MaintenanceJobSpec data = execution.getData();
-      if (data == null || !data.isValid() || !data.containsSnapshotExpiration()) {
+      if (data == null || !data.isValid() || !data.isSnapshotExpiration()) {
         continue;
       }
       String instanceId = execution.getTaskInstance().getId();
@@ -643,7 +643,7 @@ public class CronJobPlanner {
       MaintenanceJobSpec data = execution.getData();
       if (data != null
           && data.isValid()
-          && !data.containsSnapshotExpiration()
+          && !data.isSnapshotExpiration()
           && data.tableIds().contains(tableId)) {
         return true;
       }

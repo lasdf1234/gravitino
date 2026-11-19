@@ -132,7 +132,7 @@ public final class IcebergJobUtils {
       List<String> requiredLines,
       List<String> optionalLines,
       List<String> exampleLines) {
-    Preconditions.checkArgument(StringUtils.isNotBlank(jobSimpleName), "jobSimpleName");
+    Preconditions.checkArgument(jobSimpleName != null && !jobSimpleName.isEmpty(), "jobSimpleName");
     Preconditions.checkNotNull(requiredLines, "requiredLines");
     Preconditions.checkNotNull(optionalLines, "optionalLines");
     Preconditions.checkNotNull(exampleLines, "exampleLines");
@@ -353,7 +353,7 @@ public final class IcebergJobUtils {
         if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
           String value = args[i + 1];
           // Only add non-empty values
-          if (StringUtils.isNotBlank(value)) {
+          if (value != null && !value.trim().isEmpty()) {
             argMap.put(key, value);
           }
           i++; // Skip the value in next iteration
@@ -396,7 +396,7 @@ public final class IcebergJobUtils {
         throw new IllegalArgumentException("Duplicate argument: " + flag);
       }
       String value = nullIfUnresolvedPlaceholder(args[i + 1].trim());
-      parsed.put(key, StringUtils.isBlank(value) ? null : value);
+      parsed.put(key, value == null || value.isEmpty() ? null : value);
     }
     for (String required : requiredArguments) {
       if (parsed.get(required) == null) {
@@ -586,7 +586,7 @@ public final class IcebergJobUtils {
    * Clock#systemUTC()} in production.
    */
   public static String normalizeOlderThan(@Nullable String olderThan, Clock clock) {
-    if (StringUtils.isBlank(olderThan)) {
+    if (olderThan == null || olderThan.trim().isEmpty()) {
       return olderThan;
     }
     Preconditions.checkNotNull(clock, "clock");

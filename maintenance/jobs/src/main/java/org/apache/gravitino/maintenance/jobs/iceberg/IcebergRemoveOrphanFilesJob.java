@@ -39,7 +39,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.job.SparkJobTemplate;
 import org.apache.gravitino.maintenance.jobs.BuiltInJob;
@@ -291,10 +290,10 @@ public class IcebergRemoveOrphanFilesJob implements BuiltInJob, IcebergMaintenan
     StringBuilder sql = IcebergJobUtils.beginSystemProcedureCall(catalog, "remove_orphan_files");
     sql.append("table => ").append(lit(table).expr().sql());
     String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan, Clock.systemUTC());
-    if (StringUtils.isNotBlank(resolvedOlderThan)) {
+    if (resolvedOlderThan != null && !resolvedOlderThan.isEmpty()) {
       sql.append(", older_than => TIMESTAMP ").append(lit(resolvedOlderThan).expr().sql());
     }
-    if (StringUtils.isNotBlank(location)) {
+    if (location != null && !location.isEmpty()) {
       sql.append(", location => ").append(lit(location).expr().sql());
     }
     return sql.append(", dry_run => ").append(dryRun).append(")").toString();

@@ -25,7 +25,6 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.optimizer.recommender.handler.compaction.CompactionTriggerEvaluator;
 import org.apache.gravitino.maintenance.optimizer.recommender.handler.manifest.ManifestRewriteTriggerEvaluator;
@@ -87,7 +86,7 @@ final class MaintenanceTriggerGate {
     }
 
     Map<String, Object> metrics = new HashMap<>();
-    if (StringUtils.isNotBlank(metricsJson)) {
+    if (metricsJson != null && !metricsJson.trim().isEmpty()) {
       try {
         JsonNode root = JsonUtils.anyFieldMapper().readTree(metricsJson);
         Iterator<Entry<String, JsonNode>> fields = root.fields();

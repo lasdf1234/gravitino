@@ -24,7 +24,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.UserPrincipal;
 import org.apache.gravitino.job.JobHandle;
 import org.apache.gravitino.job.JobOperationDispatcher;
@@ -103,7 +102,7 @@ public class MaintenanceJobManager {
     this.authorizationEnabled = authorizationEnabled;
     if (authorizationEnabled) {
       Preconditions.checkArgument(
-          StringUtils.isNotBlank(jobSubmitter),
+          jobSubmitter != null && !jobSubmitter.trim().isEmpty(),
           "jobSubmitter is required when authorization is enabled");
       this.jobSubmitter = jobSubmitter.trim();
     } else {
