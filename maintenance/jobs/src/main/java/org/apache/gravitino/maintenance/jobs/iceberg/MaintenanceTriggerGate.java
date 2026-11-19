@@ -78,8 +78,7 @@ final class MaintenanceTriggerGate {
     }
     if (type == MaintenanceType.REWRITE_MANIFESTS
         && (metrics.isEmpty()
-            || !metrics.containsKey(IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC)
-            || !metrics.containsKey(IcebergRewriteManifestsContent.AVG_MANIFEST_SIZE_METRIC))) {
+            || !metrics.containsKey(IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC))) {
       LOG.warn("Manifest rewrite recommend skip: metrics JSON missing manifest fields");
       return false;
     }

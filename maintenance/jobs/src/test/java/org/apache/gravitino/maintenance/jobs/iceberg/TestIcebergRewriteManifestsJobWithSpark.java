@@ -170,7 +170,7 @@ public class TestIcebergRewriteManifestsJobWithSpark {
             .withPolicyType("system_iceberg_rewrite_manifests")
             .withContent(
                 DTOConverters.toDTO(
-                    PolicyContents.icebergRewriteManifests(3L, 3L, null, resolvedSpecId, false)))
+                    PolicyContents.icebergRewriteManifests(3L, resolvedSpecId, false)))
             .build();
     List<StatisticEntry<?>> measurements =
         IcebergUpdateManifestStatsJob.collectManifestStatistics(
@@ -232,8 +232,7 @@ public class TestIcebergRewriteManifestsJobWithSpark {
             .withName("rewrite")
             .withPolicyType("system_iceberg_rewrite_manifests")
             .withContent(
-                DTOConverters.toDTO(
-                    PolicyContents.icebergRewriteManifests(3L, 3L, null, null, false)))
+                DTOConverters.toDTO(PolicyContents.icebergRewriteManifests(3L, null, false)))
             .build();
     ManifestRewriteStrategyHandler handler = new ManifestRewriteStrategyHandler();
     handler.initialize(

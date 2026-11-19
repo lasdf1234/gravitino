@@ -59,7 +59,7 @@ class TestManifestRewriteRecommendation {
     Policy policy = Mockito.mock(Policy.class);
     Mockito.when(policy.name()).thenReturn("rewrite");
     Mockito.when(policy.content())
-        .thenReturn(PolicyContents.icebergRewriteManifests(null, null, null, 7, false));
+        .thenReturn(PolicyContents.icebergRewriteManifests(null, 7, false));
     GravitinoStrategy strategy = new GravitinoStrategy(policy);
     StrategyProvider strategies = Mockito.mock(StrategyProvider.class);
     Mockito.when(strategies.strategies(identifier)).thenReturn(List.of(strategy));
@@ -98,7 +98,7 @@ class TestManifestRewriteRecommendation {
         Mockito.when(policy.content())
             .thenReturn(
                 PolicyContents.custom(
-                    Map.of("spec_id", 7, "manifest_count_critical", invalid),
+                    Map.of("spec_id", 7, "manifest_count_threshold", invalid),
                     validContent.supportedObjectTypes(),
                     validContent.properties()));
         Assertions.assertTrue(
@@ -307,8 +307,7 @@ class TestManifestRewriteRecommendation {
   }
 
   private static StrategyProvider manifestStrategies(NameIdentifier... identifiers) {
-    return manifestStrategies(
-        PolicyContents.icebergRewriteManifests(null, null, null, 7, null), identifiers);
+    return manifestStrategies(PolicyContents.icebergRewriteManifests(null, 7, null), identifiers);
   }
 
   private static StrategyProvider manifestStrategies(
