@@ -54,6 +54,7 @@ class TestMaintenanceJobSpecFactory {
                 candidate(11L, "iceberg", "db.t2", policy)));
 
     Assertions.assertTrue(spec.isValid());
+    Assertions.assertFalse(spec.containsSnapshotExpiration());
     Assertions.assertEquals("ml", spec.metalake());
     Assertions.assertEquals(List.of(10L, 11L), spec.tableIds());
     Assertions.assertEquals(2, spec.getTasks().size());
@@ -126,6 +127,7 @@ class TestMaintenanceJobSpecFactory {
                     Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
             "{}",
             null);
+    Assertions.assertTrue(spec.containsSnapshotExpiration());
     Assertions.assertThrows(
         IllegalArgumentException.class, () -> MaintenanceJobSpecFactory.jobConfForSpec(spec));
   }

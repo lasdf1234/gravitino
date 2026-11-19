@@ -65,11 +65,13 @@ public final class IcebergJobUtils {
    */
   private static final Pattern UNRESOLVED_PLACEHOLDER_PATTERN = Pattern.compile("^\\{\\{[^{}]*}}$");
 
-  /** Matches relative day wire values such as {@code 7d} / {@code 7D}. */
+  /**
+   * Matches relative day wire values: a bare integer ({@code 7}) or legacy {@code 7d}/{@code 7D}.
+   */
   private static final Pattern OLDER_THAN_RELATIVE_DAYS =
-      Pattern.compile("^(\\d+)d$", Pattern.CASE_INSENSITIVE);
+      Pattern.compile("^(\\d+)d?$", Pattern.CASE_INSENSITIVE);
 
-  /** Formats {@code now - Nd} as the Iceberg {@code older_than} timestamp string. */
+  /** Formats {@code now - days} as the Iceberg {@code older_than} timestamp string. */
   private static final DateTimeFormatter OLDER_THAN_TIMESTAMP =
       DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
 
@@ -130,7 +132,7 @@ public final class IcebergJobUtils {
       List<String> requiredLines,
       List<String> optionalLines,
       List<String> exampleLines) {
-    Preconditions.checkArgument(jobSimpleName != null && !jobSimpleName.isEmpty(), "jobSimpleName");
+    Preconditions.checkArgument(StringUtils.isNotBlank(jobSimpleName), "jobSimpleName");
     Preconditions.checkNotNull(requiredLines, "requiredLines");
     Preconditions.checkNotNull(optionalLines, "optionalLines");
     Preconditions.checkNotNull(exampleLines, "exampleLines");
@@ -351,7 +353,7 @@ public final class IcebergJobUtils {
         if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
           String value = args[i + 1];
           // Only add non-empty values
-          if (value != null && !value.trim().isEmpty()) {
+          if (StringUtils.isNotBlank(value)) {
             argMap.put(key, value);
           }
           i++; // Skip the value in next iteration
@@ -394,7 +396,7 @@ public final class IcebergJobUtils {
         throw new IllegalArgumentException("Duplicate argument: " + flag);
       }
       String value = nullIfUnresolvedPlaceholder(args[i + 1].trim());
-      parsed.put(key, value == null || value.isEmpty() ? null : value);
+      parsed.put(key, StringUtils.isBlank(value) ? null : value);
     }
     for (String required : requiredArguments) {
       if (parsed.get(required) == null) {
@@ -579,11 +581,12 @@ public final class IcebergJobUtils {
   }
 
   /**
-   * Expands {@code Nd} (e.g. {@code 7d}) to a UTC Iceberg {@code older_than} timestamp; absolute
-   * timestamps pass through. Null/blank stay as-is. Pass {@link Clock#systemUTC()} in production.
+   * Expands relative day counts (bare {@code 7}, or legacy {@code 7d}) to a UTC Iceberg {@code
+   * older_than} timestamp; absolute timestamps pass through. Null/blank stay as-is. Pass {@link
+   * Clock#systemUTC()} in production.
    */
   public static String normalizeOlderThan(@Nullable String olderThan, Clock clock) {
-    if (olderThan == null || olderThan.trim().isEmpty()) {
+    if (StringUtils.isBlank(olderThan)) {
       return olderThan;
     }
     Preconditions.checkNotNull(clock, "clock");

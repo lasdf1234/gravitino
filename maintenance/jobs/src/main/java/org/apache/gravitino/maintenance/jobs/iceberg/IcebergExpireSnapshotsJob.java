@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.job.SparkJobTemplate;
 import org.apache.gravitino.maintenance.jobs.BuiltInJob;
@@ -149,7 +150,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
         SparkSession.builder().appName("Gravitino Built-in Iceberg Expire Snapshots");
 
     // Apply custom Spark configurations if provided
-    if (sparkConfJson != null && !sparkConfJson.isEmpty()) {
+    if (StringUtils.isNotBlank(sparkConfJson)) {
       try {
         Map<String, String> customConfigs = IcebergJobUtils.parseCustomSparkConfigs(sparkConfJson);
         for (Map.Entry<String, String> entry : customConfigs.entrySet()) {
@@ -290,13 +291,13 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
     IcebergJobUtils.appendSqlStringTableArg(sql, tableIdentifier);
 
     String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan, Clock.systemUTC());
-    if (resolvedOlderThan != null && !resolvedOlderThan.isEmpty()) {
+    if (StringUtils.isNotBlank(resolvedOlderThan)) {
       sql.append(", older_than => TIMESTAMP '")
           .append(IcebergJobUtils.escapeSqlString(resolvedOlderThan))
           .append("'");
     }
 
-    if (retainLast != null && !retainLast.isEmpty()) {
+    if (StringUtils.isNotBlank(retainLast)) {
       sql.append(", retain_last => ").append(Integer.parseInt(retainLast));
     }
 
@@ -317,7 +318,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
    * @throws IllegalArgumentException if the value is neither true nor false
    */
   static boolean parseStreamResults(String value) {
-    if (value == null || value.trim().isEmpty()) {
+    if (StringUtils.isBlank(value)) {
       return false;
     }
     String trimmed = value.trim();
@@ -338,7 +339,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
    * @throws IllegalArgumentException if the value is invalid
    */
   static void validateRetainLast(String retainLast) {
-    if (retainLast == null || retainLast.isEmpty()) {
+    if (StringUtils.isBlank(retainLast)) {
       return; // retain-last is optional
     }
 
@@ -362,7 +363,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
             "  --catalog <name>          Iceberg catalog name registered in Spark",
             "  --table <identifier>      Fully qualified table name (e.g., db.table_name)"),
         IcebergJobUtils.withSparkConfUsage(
-            "  --older-than <timestamp|Nd>  Expire older than timestamp or relative days (e.g. 7d)",
+            "  --older-than <timestamp|days>  Expire older than timestamp or relative day count",
             "                              Example: '2024-01-01 00:00:00'",
             "                              Default: 5 days ago (Iceberg default)",
             "  --retain-last <count>     Number of most recent snapshots to retain",
@@ -481,7 +482,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
     Map<String, Long> fileSizesByPath = new HashMap<>(rows.size());
     for (Row row : rows) {
       String path = row.getAs("file-path");
-      if (path == null || path.isEmpty()) {
+      if (StringUtils.isBlank(path)) {
         continue;
       }
       Number size = row.getAs("file-size");

@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.model.OccupancyClaim;
@@ -144,7 +145,7 @@ public final class MaintenanceJobConfBuilder {
     Map<String, String> sparkConf = new LinkedHashMap<>();
 
     String existingSparkConfJson = jobOptions.get("spark_conf");
-    if (existingSparkConfJson != null && !existingSparkConfJson.trim().isEmpty()) {
+    if (StringUtils.isNotBlank(existingSparkConfJson)) {
       sparkConf.putAll(
           IcebergSparkConfigUtils.parseFlatJsonMap(existingSparkConfJson, "spark_conf"));
     }
@@ -161,8 +162,8 @@ public final class MaintenanceJobConfBuilder {
       if (IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY.equals(key)) {
         long days = parsePositiveDays(value, IcebergSnapshotExpirationContent.OLDER_THAN_DAYS_KEY);
         IcebergSnapshotExpirationContent.validateOlderThanDays(days);
-        // Spark job expands Nd → timestamp at execute time.
-        parameters.put("older_than", days + "d");
+        // Spark job expands day count → timestamp at execute time.
+        parameters.put("older_than", Long.toString(days));
         continue;
       }
       routeJobOption(parameters, sparkConf, catalogName, key, value);
@@ -197,7 +198,7 @@ public final class MaintenanceJobConfBuilder {
     Preconditions.checkNotNull(jobConf, "jobConf");
     Preconditions.checkNotNull(catalogName, "catalogName");
     String sparkConfJson = jobConf.get("spark_conf");
-    if (sparkConfJson == null || sparkConfJson.trim().isEmpty()) {
+    if (StringUtils.isBlank(sparkConfJson)) {
       return;
     }
     Map<String, String> sparkConf =
@@ -233,7 +234,7 @@ public final class MaintenanceJobConfBuilder {
       String sparkKey = entry.getKey();
       String placeholder = entry.getValue();
       String value = jobConf.get(placeholder);
-      if (value != null && !value.isBlank()) {
+      if (StringUtils.isNotBlank(value)) {
         sparkConf.putIfAbsent(sparkKey, value);
       }
     }
@@ -254,7 +255,7 @@ public final class MaintenanceJobConfBuilder {
       String placeholder,
       String sparkKey) {
     String value = jobConf.get(placeholder);
-    if (value != null && !value.isBlank()) {
+    if (StringUtils.isNotBlank(value)) {
       sparkConf.putIfAbsent(sparkKey, value);
     }
   }
@@ -314,7 +315,7 @@ public final class MaintenanceJobConfBuilder {
     Preconditions.checkArgument(claims != null && !claims.isEmpty(), "claims must be non-empty");
     String tasksJson = jobConf.get(MaintenanceJobTemplates.TASKS_KEY);
     Preconditions.checkArgument(
-        tasksJson != null && !tasksJson.isBlank(),
+        StringUtils.isNotBlank(tasksJson),
         "jobConf.%s is required",
         MaintenanceJobTemplates.TASKS_KEY);
     try {
@@ -467,7 +468,7 @@ public final class MaintenanceJobConfBuilder {
     updaterOptions.put("metalake", metalake);
 
     String gravitinoUri = updaterOptions.get("gravitino_uri");
-    if (gravitinoUri == null || gravitinoUri.trim().isEmpty()) {
+    if (StringUtils.isBlank(gravitinoUri)) {
       throw new IllegalArgumentException(
           "updater_options.gravitino_uri is required for Spark submit; set policy "
               + "updaterOptions.gravitino_uri or gravitino.maintenance.gravitinoAuth.uri");
@@ -480,7 +481,7 @@ public final class MaintenanceJobConfBuilder {
     if (content instanceof IcebergDataCompactionContent) {
       IcebergDataCompactionContent compaction = (IcebergDataCompactionContent) content;
       parameters.put("strategy", compaction.rewriteStrategy());
-      if (compaction.sortOrder() != null && !compaction.sortOrder().isEmpty()) {
+      if (StringUtils.isNotBlank(compaction.sortOrder())) {
         parameters.put("sort_order", compaction.sortOrder());
       }
       if (!compaction.rewriteOptions().isEmpty()) {
@@ -501,8 +502,8 @@ public final class MaintenanceJobConfBuilder {
     if (content instanceof IcebergOrphanFileRemovalContent) {
       IcebergOrphanFileRemovalContent orphan = (IcebergOrphanFileRemovalContent) content;
       IcebergOrphanFileRemovalContent.validateOlderThanDays(orphan.olderThanDays());
-      // Spark job expands Nd → timestamp at execute time.
-      parameters.put("older_than", orphan.olderThanDays() + "d");
+      // Spark job expands day count → timestamp at execute time.
+      parameters.put("older_than", Long.toString(orphan.olderThanDays()));
       parameters.put("dry_run", Boolean.toString(orphan.dryRun()));
       if (orphan.location() != null) {
         parameters.put("location", orphan.location());
@@ -518,7 +519,7 @@ public final class MaintenanceJobConfBuilder {
       if (expire.olderThanDays() == IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
         parameters.putIfAbsent("older_than", "");
       } else {
-        parameters.putIfAbsent("older_than", expire.olderThanDays() + "d");
+        parameters.putIfAbsent("older_than", Long.toString(expire.olderThanDays()));
       }
       if (expire.retainLast() == IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
         parameters.putIfAbsent("retain_last", "");
@@ -598,7 +599,7 @@ public final class MaintenanceJobConfBuilder {
     public Map<String, String> asMap() {
       Map<String, String> out = new LinkedHashMap<>(parameters);
       out.put(MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY, updaterOptions);
-      if (sparkConf != null && !sparkConf.isBlank()) {
+      if (StringUtils.isNotBlank(sparkConf)) {
         out.put("spark_conf", sparkConf);
       }
       return out;

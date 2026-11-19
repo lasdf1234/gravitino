@@ -263,6 +263,7 @@ public class TestIcebergExpireSnapshotsJob {
             + "older_than => TIMESTAMP '2024-01-01 00:00:00')",
         sql);
     Clock fixed = Clock.fixed(Instant.parse("2024-06-15T12:00:00Z"), ZoneOffset.UTC);
+    assertEquals("2024-06-08 12:00:00Z", IcebergJobUtils.normalizeOlderThan("7", fixed));
     assertEquals("2024-06-08 12:00:00Z", IcebergJobUtils.normalizeOlderThan("7d", fixed));
     assertEquals(
         "2024-01-01 00:00:00", IcebergJobUtils.normalizeOlderThan("2024-01-01 00:00:00", fixed));

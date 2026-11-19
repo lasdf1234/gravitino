@@ -90,7 +90,7 @@ class TestGravitinoSnapshotExpirationJobAdapter {
     Assertions.assertEquals("", job.get("older_than"));
     Assertions.assertEquals("", job.get("retain_last"));
     Assertions.assertEquals("false", job.get("stream_results"));
-    Assertions.assertEquals("1d", jobConf(context(Map.of("olderThanDays", "1"))).get("older_than"));
+    Assertions.assertEquals("1", jobConf(context(Map.of("olderThanDays", "1"))).get("older_than"));
   }
 
   @Test
@@ -111,7 +111,7 @@ class TestGravitinoSnapshotExpirationJobAdapter {
   void validatesRetentionRange() {
     long maximum = IcebergSnapshotExpirationContent.MAX_OLDER_THAN_DAYS;
     Assertions.assertEquals(
-        maximum + "d",
+        Long.toString(maximum),
         jobConf(context(Map.of("olderThanDays", String.valueOf(maximum)))).get("older_than"));
     for (String days :
         new String[] {

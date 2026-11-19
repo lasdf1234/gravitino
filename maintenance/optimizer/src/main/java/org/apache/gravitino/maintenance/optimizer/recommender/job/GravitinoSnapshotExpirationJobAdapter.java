@@ -29,7 +29,7 @@ import org.apache.gravitino.policy.IcebergSnapshotExpirationContent;
 /**
  * Converts snapshot-expiration options to the built-in Spark template configuration.
  *
- * <p>{@code older_than} is emitted as relative {@code Nd} (or empty for Iceberg defaults); the
+ * <p>{@code older_than} is emitted as a relative day count (or empty for Iceberg defaults); the
  * Spark job expands it to a timestamp at execute time.
  */
 public class GravitinoSnapshotExpirationJobAdapter implements GravitinoJobAdapter {
@@ -87,7 +87,7 @@ public class GravitinoSnapshotExpirationJobAdapter implements GravitinoJobAdapte
     if (days == IcebergSnapshotExpirationContent.DEFAULT_OLDER_THAN_DAYS) {
       config.put(OLDER_THAN_KEY, "");
     } else {
-      config.put(OLDER_THAN_KEY, days + "d");
+      config.put(OLDER_THAN_KEY, Long.toString(days));
     }
     if (retainLast == IcebergSnapshotExpirationContent.DEFAULT_RETAIN_LAST) {
       config.put(RETAIN_LAST_KEY, "");

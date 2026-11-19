@@ -60,7 +60,7 @@ class TestCommitJobSpecFactory {
     Assertions.assertEquals(
         "system_iceberg_snapshot_expiration", spec.getTasks().get(1).getPolicyType());
     String olderThan = spec.getTasks().get(1).getParameters().get("older_than");
-    Assertions.assertEquals("7d", olderThan);
+    Assertions.assertEquals("7", olderThan);
     Assertions.assertEquals("10", spec.getTasks().get(1).getParameters().get("retain_last"));
     Assertions.assertTrue(spec.getUpdaterOptions().contains("metalake"));
     Assertions.assertTrue(spec.getSparkConf().contains("spark.executor.memory"));

@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.job.JobTemplateProvider;
 import org.apache.gravitino.job.SparkJobTemplate;
 import org.apache.gravitino.maintenance.jobs.BuiltInJob;
@@ -290,10 +291,10 @@ public class IcebergRemoveOrphanFilesJob implements BuiltInJob, IcebergMaintenan
     StringBuilder sql = IcebergJobUtils.beginSystemProcedureCall(catalog, "remove_orphan_files");
     sql.append("table => ").append(lit(table).expr().sql());
     String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan, Clock.systemUTC());
-    if (resolvedOlderThan != null && !resolvedOlderThan.isEmpty()) {
+    if (StringUtils.isNotBlank(resolvedOlderThan)) {
       sql.append(", older_than => TIMESTAMP ").append(lit(resolvedOlderThan).expr().sql());
     }
-    if (location != null && !location.isEmpty()) {
+    if (StringUtils.isNotBlank(location)) {
       sql.append(", location => ").append(lit(location).expr().sql());
     }
     return sql.append(", dry_run => ").append(dryRun).append(")").toString();
@@ -396,7 +397,7 @@ public class IcebergRemoveOrphanFilesJob implements BuiltInJob, IcebergMaintenan
             "  --catalog <name>          Iceberg catalog name registered in Spark",
             "  --table <identifier>      Fully qualified table name (e.g., db.table_name)"),
         IcebergJobUtils.withSparkConfUsage(
-            "  --older-than <timestamp|Nd>  Remove orphans older than timestamp or relative days (e.g. 7d)",
+            "  --older-than <timestamp|days>  Remove orphans older than timestamp or relative day count",
             "                              Example: '2024-01-01 00:00:00'",
             "  --location <path>         Orphan scan root location",
             "  --dry-run <bool>          List orphans without deleting (true or false)"),

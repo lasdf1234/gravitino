@@ -231,7 +231,7 @@ class TestMaintenanceJobConfBuilder {
         new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     Assertions.assertEquals("false", conf.parameters().get("dry_run"));
-    Assertions.assertEquals("7d", conf.parameters().get("older_than"));
+    Assertions.assertEquals("7", conf.parameters().get("older_than"));
   }
 
   @Test
@@ -250,7 +250,7 @@ class TestMaintenanceJobConfBuilder {
 
     MaintenanceJobConfBuilder.ScheduleConf typed =
         new MaintenanceJobConfBuilder(configWithUri()).build(fromContent, "iceberg");
-    Assertions.assertEquals("7d", typed.parameters().get("older_than"));
+    Assertions.assertEquals("7", typed.parameters().get("older_than"));
     Assertions.assertEquals("10", typed.parameters().get("retain_last"));
     Assertions.assertEquals("true", typed.parameters().get("stream_results"));
   }

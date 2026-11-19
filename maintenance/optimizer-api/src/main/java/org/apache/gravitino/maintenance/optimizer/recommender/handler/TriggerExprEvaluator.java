@@ -21,6 +21,7 @@ package org.apache.gravitino.maintenance.optimizer.recommender.handler;
 import com.google.common.base.Preconditions;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.maintenance.optimizer.recommender.util.ExpressionEvaluator;
 import org.apache.gravitino.maintenance.optimizer.recommender.util.QLExpressionEvaluator;
 import org.slf4j.Logger;
@@ -76,10 +77,8 @@ public final class TriggerExprEvaluator {
     context.putAll(metricValues);
 
     Object trigger = rules.get(TRIGGER_EXPR_KEY);
-    String expression =
-        trigger == null || trigger.toString().trim().isEmpty()
-            ? "false"
-            : trigger.toString().trim();
+    String triggerText = trigger == null ? null : trigger.toString().trim();
+    String expression = StringUtils.isBlank(triggerText) ? "false" : triggerText;
     try {
       return EVALUATOR.evaluateBool(expression, context);
     } catch (RuntimeException e) {

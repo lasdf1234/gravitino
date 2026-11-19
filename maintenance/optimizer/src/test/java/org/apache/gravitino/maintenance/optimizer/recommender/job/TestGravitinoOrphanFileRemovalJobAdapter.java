@@ -78,7 +78,7 @@ class TestGravitinoOrphanFileRemovalJobAdapter {
               config, context, adapter, IdentifierUtils.DEFAULT_SCHEMA_SEPARATOR);
       Assertions.assertEquals("spark_catalog", job.get("catalog_name"));
       Assertions.assertEquals("db.table", job.get("table_identifier"));
-      Assertions.assertEquals("3d", job.get("older_than"));
+      Assertions.assertEquals("3", job.get("older_than"));
       Assertions.assertEquals("true", job.get("dry_run"));
       Assertions.assertEquals("s3://bucket/table/data", job.get("location"));
     }
@@ -89,9 +89,9 @@ class TestGravitinoOrphanFileRemovalJobAdapter {
     Map<String, String> job = jobConf(context(Map.of(), null));
     Assertions.assertEquals("", job.get("location"));
     Assertions.assertEquals("false", job.get("dry_run"));
-    Assertions.assertEquals("3d", job.get("older_than"));
+    Assertions.assertEquals("3", job.get("older_than"));
     Assertions.assertEquals(
-        "1d", jobConf(context(Map.of("olderThanDays", "1"), null)).get("older_than"));
+        "1", jobConf(context(Map.of("olderThanDays", "1"), null)).get("older_than"));
   }
 
   @Test
@@ -125,7 +125,7 @@ class TestGravitinoOrphanFileRemovalJobAdapter {
   void validatesRetentionRange() {
     long maximum = IcebergOrphanFileRemovalContent.MAX_OLDER_THAN_DAYS;
     Assertions.assertEquals(
-        maximum + "d",
+        Long.toString(maximum),
         jobConf(context(Map.of("olderThanDays", String.valueOf(maximum)), null)).get("older_than"));
     for (String days :
         new String[] {

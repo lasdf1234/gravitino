@@ -29,7 +29,7 @@ import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
 /**
  * Converts orphan cleanup options to the existing Spark template's configuration.
  *
- * <p>{@code older_than} is emitted as relative {@code Nd}; the Spark job expands it to a timestamp
+ * <p>{@code older_than} is emitted as a relative day count; the Spark job expands it to a timestamp
  * at execute time.
  */
 public class GravitinoOrphanFileRemovalJobAdapter implements GravitinoJobAdapter {
@@ -75,7 +75,7 @@ public class GravitinoOrphanFileRemovalJobAdapter implements GravitinoJobAdapter
         TABLE_IDENTIFIER_KEY,
         IdentifierUtils.toSparkTableIdentifier(orphan.nameIdentifier(), schemaSeparator),
         OLDER_THAN_KEY,
-        days + "d",
+        Long.toString(days),
         LOCATION_KEY,
         location,
         DRY_RUN_KEY,

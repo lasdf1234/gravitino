@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.maintenance.optimizer.common.util.IcebergSparkConfigUtils;
 import org.apache.gravitino.maintenance.scheduler.job.MaintenanceJobTemplates;
 import org.apache.gravitino.policy.Policy;
@@ -132,14 +133,14 @@ public final class MaintenanceJobSpec {
   @JsonIgnore
   @Nullable
   public String metalake() {
-    if (updaterOptions == null || updaterOptions.isBlank()) {
+    if (StringUtils.isBlank(updaterOptions)) {
       return null;
     }
     Map<String, String> options =
         IcebergSparkConfigUtils.parseFlatJsonMap(
             updaterOptions, MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY);
     String metalake = options.get("metalake");
-    return metalake == null || metalake.isBlank() ? null : metalake.trim();
+    return StringUtils.isBlank(metalake) ? null : metalake.trim();
   }
 
   /**
@@ -148,8 +149,7 @@ public final class MaintenanceJobSpec {
   @JsonIgnore
   public boolean isValid() {
     return metalake() != null
-        && updaterOptions != null
-        && !updaterOptions.isBlank()
+        && StringUtils.isNotBlank(updaterOptions)
         && tasks != null
         && !tasks.isEmpty()
         && tasks.stream().allMatch(Task::isValid);
@@ -328,8 +328,7 @@ public final class MaintenanceJobSpec {
     boolean isValid() {
       return tableId > 0
           && policyId > 0
-          && policyType != null
-          && !policyType.isBlank()
+          && StringUtils.isNotBlank(policyType)
           && parameters != null
           && catalogName() != null
           && tableIdentifier() != null;
@@ -357,7 +356,7 @@ public final class MaintenanceJobSpec {
     }
 
     private static @Nullable String blankToNull(@Nullable String value) {
-      return value == null || value.isBlank() ? null : value.trim();
+      return StringUtils.isBlank(value) ? null : value.trim();
     }
   }
 }
