@@ -19,6 +19,7 @@
 package org.apache.gravitino.maintenance.jobs.iceberg;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
@@ -134,6 +135,15 @@ public class TestMaintenanceTriggerGate {
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
             Policy.BuiltInType.ICEBERG_COMPACTION, new HashMap<>(), onlyMse));
+  }
+
+  @Test
+  public void testUnsupportedPolicyTypeThrows() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            MaintenanceTriggerGate.shouldMaintain(
+                Policy.BuiltInType.CUSTOM, new HashMap<>(), "{}"));
   }
 
   @Test
