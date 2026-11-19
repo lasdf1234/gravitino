@@ -23,7 +23,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -84,30 +83,6 @@ public final class MaintenanceJobConfBuilder {
           "location",
           "dry_run");
 
-  /** Underscore session placeholders → Spark conf keys (same as update-stats). */
-  private static final Map<String, String> SPARK_KEY_TO_PLACEHOLDER =
-      ImmutableMap.of(
-          "spark.master",
-          "spark_master",
-          "spark.executor.instances",
-          "spark_executor_instances",
-          "spark.executor.cores",
-          "spark_executor_cores",
-          "spark.executor.memory",
-          "spark_executor_memory",
-          "spark.driver.memory",
-          "spark_driver_memory");
-
-  private static final Map<String, String> PLACEHOLDER_TO_SPARK_KEY;
-
-  static {
-    Map<String, String> reverse = new LinkedHashMap<>();
-    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
-      reverse.put(entry.getValue(), entry.getKey());
-    }
-    PLACEHOLDER_TO_SPARK_KEY = ImmutableMap.copyOf(reverse);
-  }
-
   private final Config gravitinoConfig;
 
   /**
@@ -142,6 +117,7 @@ public final class MaintenanceJobConfBuilder {
 
     Map<String, String> parameters = new LinkedHashMap<>();
     Map<String, String> sparkConf = new LinkedHashMap<>();
+    Map<String, String> flatResourceKeys = new LinkedHashMap<>();
 
     String existingSparkConfJson = jobOptions.get("spark_conf");
     if (existingSparkConfJson != null && !existingSparkConfJson.trim().isEmpty()) {
@@ -165,8 +141,19 @@ public final class MaintenanceJobConfBuilder {
         parameters.put("older_than", Long.toString(days));
         continue;
       }
-      routeJobOption(parameters, sparkConf, catalogName, key, value);
+      if (PROCEDURE_PARAMETER_KEYS.contains(key)) {
+        parameters.put(key, value);
+        continue;
+      }
+      // Same priority as update-stats templates: collect flat keys, overlay after nested JSON.
+      if (IcebergSparkConfigUtils.isFlatResourceOrCatalogKey(key)) {
+        flatResourceKeys.put(key, value);
+        continue;
+      }
+      routeOtherJobOption(sparkConf, catalogName, key, value);
     }
+    IcebergSparkConfigUtils.overlayFlatResourceAndCatalogKeys(
+        sparkConf, flatResourceKeys, catalogName);
 
     putTypedProcedureParams(parameters, content);
     ensureIcebergCatalogImpl(sparkConf, catalogName);
@@ -184,79 +171,6 @@ public final class MaintenanceJobConfBuilder {
     String sparkConfJson =
         sparkConf.isEmpty() ? null : writeJson(new TreeMap<>(sparkConf), "spark_conf");
     return new ScheduleConf(parameters, updaterJson, sparkConfJson);
-  }
-
-  /**
-   * Re-derives flat template placeholders ({@code spark_executor_memory}, {@code catalog_type}, …)
-   * from nested {@code spark_conf} onto a submit {@code runJob} map (Spark template configs).
-   *
-   * @param jobConf mutable runJob map that already contains {@code spark_conf}
-   * @param catalogName Spark catalog alias for IRC property scoping
-   */
-  public static void applySparkConfPlaceholders(Map<String, String> jobConf, String catalogName) {
-    Preconditions.checkNotNull(jobConf, "jobConf");
-    Preconditions.checkNotNull(catalogName, "catalogName");
-    String sparkConfJson = jobConf.get("spark_conf");
-    if (sparkConfJson == null || sparkConfJson.trim().isEmpty()) {
-      return;
-    }
-    Map<String, String> sparkConf =
-        IcebergSparkConfigUtils.parseFlatJsonMap(sparkConfJson, "spark_conf");
-    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
-      String sparkKey = entry.getKey();
-      String placeholder = entry.getValue();
-      if (!jobConf.containsKey(placeholder) && sparkConf.containsKey(sparkKey)) {
-        jobConf.put(placeholder, sparkConf.get(sparkKey));
-      }
-    }
-    String catalogPrefix = SPARK_SQL_CATALOG_PREFIX + catalogName;
-    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_type", catalogPrefix + ".type");
-    putIfAbsentFromSpark(jobConf, sparkConf, "catalog_uri", catalogPrefix + ".uri");
-    putIfAbsentFromSpark(jobConf, sparkConf, "warehouse_location", catalogPrefix + ".warehouse");
-  }
-
-  /**
-   * Folds flat session placeholders ({@code spark_executor_memory}, {@code catalog_type}, …) into
-   * nested {@code spark_conf}.
-   *
-   * @param jobConf mutable map that may carry flat placeholders plus optional {@code spark_conf}
-   * @param catalogName Spark catalog alias for IRC property scoping
-   */
-  public static void foldPlaceholdersIntoSparkConf(
-      Map<String, String> jobConf, String catalogName) {
-    Preconditions.checkNotNull(jobConf, "jobConf");
-    Preconditions.checkNotNull(catalogName, "catalogName");
-    Map<String, String> sparkConf =
-        new TreeMap<>(
-            IcebergSparkConfigUtils.parseFlatJsonMap(jobConf.get("spark_conf"), "spark_conf"));
-    for (Map.Entry<String, String> entry : SPARK_KEY_TO_PLACEHOLDER.entrySet()) {
-      String sparkKey = entry.getKey();
-      String placeholder = entry.getValue();
-      String value = jobConf.get(placeholder);
-      if (value != null && !value.isBlank()) {
-        sparkConf.putIfAbsent(sparkKey, value);
-      }
-    }
-    String catalogPrefix = SPARK_SQL_CATALOG_PREFIX + catalogName;
-    putIfAbsentSparkFromPlaceholder(jobConf, sparkConf, "catalog_type", catalogPrefix + ".type");
-    putIfAbsentSparkFromPlaceholder(jobConf, sparkConf, "catalog_uri", catalogPrefix + ".uri");
-    putIfAbsentSparkFromPlaceholder(
-        jobConf, sparkConf, "warehouse_location", catalogPrefix + ".warehouse");
-    ensureIcebergCatalogImpl(sparkConf, catalogName);
-    if (!sparkConf.isEmpty()) {
-      jobConf.put("spark_conf", writeJson(sparkConf, "spark_conf"));
-    }
-  }
-
-  private static void putIfAbsentSparkFromPlaceholder(
-      Map<String, String> jobConf,
-      Map<String, String> sparkConf,
-      String placeholder,
-      String sparkKey) {
-    String value = jobConf.get(placeholder);
-    if (value != null && !value.isBlank()) {
-      sparkConf.putIfAbsent(sparkKey, value);
-    }
   }
 
   private static void ensureIcebergCatalogImpl(Map<String, String> sparkConf, String catalogName) {
@@ -398,37 +312,9 @@ public final class MaintenanceJobConfBuilder {
     }
   }
 
-  private static void routeJobOption(
-      Map<String, String> parameters,
-      Map<String, String> sparkConf,
-      String catalogName,
-      String key,
-      String value) {
-    if (PROCEDURE_PARAMETER_KEYS.contains(key)) {
-      parameters.put(key, value);
-      return;
-    }
-    String sparkKey = PLACEHOLDER_TO_SPARK_KEY.get(key);
-    if (sparkKey != null) {
-      sparkConf.put(sparkKey, value);
-      return;
-    }
-    if (SPARK_KEY_TO_PLACEHOLDER.containsKey(key)) {
-      sparkConf.put(key, value);
-      return;
-    }
-    if ("catalog_type".equals(key)) {
-      sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + ".type", value);
-      return;
-    }
-    if ("catalog_uri".equals(key)) {
-      sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + ".uri", value);
-      return;
-    }
-    if ("warehouse_location".equals(key)) {
-      sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + ".warehouse", value);
-      return;
-    }
+  /** Routes non-procedure, non-flat-resource jobOptions into nested {@code spark_conf}. */
+  private static void routeOtherJobOption(
+      Map<String, String> sparkConf, String catalogName, String key, String value) {
     if (key.startsWith("spark.")) {
       // Spark session / SQL settings stay as full keys in spark_conf (never catalog-prefixed).
       sparkConf.put(key, value);
@@ -440,16 +326,6 @@ public final class MaintenanceJobConfBuilder {
     }
     // IRC / Iceberg catalog props from jobOptions / ircAuth (short names).
     sparkConf.put(SPARK_SQL_CATALOG_PREFIX + catalogName + "." + key, value);
-  }
-
-  private static void putIfAbsentFromSpark(
-      Map<String, String> jobConf,
-      Map<String, String> sparkConf,
-      String placeholder,
-      String sparkKey) {
-    if (!jobConf.containsKey(placeholder) && sparkConf.containsKey(sparkKey)) {
-      jobConf.put(placeholder, sparkConf.get(sparkKey));
-    }
   }
 
   /**

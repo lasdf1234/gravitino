@@ -24,7 +24,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.Config;
-import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.maintenance.model.OccupancyClaim;
 import org.apache.gravitino.maintenance.policy.MaintenanceAuthConfigs;
 import org.apache.gravitino.meta.AuditInfo;
@@ -380,24 +379,47 @@ class TestMaintenanceJobConfBuilder {
   }
 
   @Test
-  void testFoldPlaceholdersFillsIcebergCatalogImpl() throws Exception {
-    Map<String, String> jobConf = new HashMap<>();
-    jobConf.put("catalog_type", "rest");
-    jobConf.put("catalog_uri", "http://localhost:9001/iceberg");
-    jobConf.put("warehouse_location", "wh");
-    jobConf.put("spark_conf", "{}");
+  void testFlatResourceKeysWinOverNestedSparkConf() {
+    Map<String, String> jobOptions = new HashMap<>();
+    jobOptions.put(
+        "spark_conf", "{\"spark.executor.memory\":\"4g\",\"spark.executor.cores\":\"2\"}");
+    jobOptions.put("spark_executor_memory", "7g");
+    jobOptions.put("catalog_type", "rest");
 
-    MaintenanceJobConfBuilder.foldPlaceholdersIntoSparkConf(jobConf, "iceberg");
+    PolicyEntity policy =
+        PolicyEntity.builder()
+            .withId(POLICY_ID)
+            .withName("c")
+            .withNamespace(NamespaceUtil.ofPolicy("ml"))
+            .withPolicyType(Policy.BuiltInType.ICEBERG_COMPACTION)
+            .withEnabled(true)
+            .withContent(
+                PolicyContents.icebergDataCompaction(
+                    IcebergDataCompactionContent.DEFAULT_MIN_DATA_FILE_MSE,
+                    IcebergDataCompactionContent.DEFAULT_MIN_DELETE_FILE_NUMBER,
+                    IcebergDataCompactionContent.DEFAULT_DATA_FILE_MSE_WEIGHT,
+                    IcebergDataCompactionContent.DEFAULT_DELETE_FILE_NUMBER_WEIGHT,
+                    IcebergDataCompactionContent.DEFAULT_MAX_PARTITION_NUM,
+                    IcebergDataCompactionContent.DEFAULT_REWRITE_STRATEGY,
+                    IcebergDataCompactionContent.DEFAULT_SORT_ORDER,
+                    null,
+                    null,
+                    null,
+                    null,
+                    jobOptions,
+                    Map.of()))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
+            .build();
 
-    @SuppressWarnings("unchecked")
-    Map<String, String> sparkConf =
-        JsonUtils.anyFieldMapper().readValue(jobConf.get("spark_conf"), Map.class);
-    Assertions.assertEquals(
-        "org.apache.iceberg.spark.SparkCatalog", sparkConf.get("spark.sql.catalog.iceberg"));
-    Assertions.assertEquals("rest", sparkConf.get("spark.sql.catalog.iceberg.type"));
-    Assertions.assertEquals(
-        "http://localhost:9001/iceberg", sparkConf.get("spark.sql.catalog.iceberg.uri"));
-    Assertions.assertTrue(sparkConf.containsKey("spark.sql.extensions"));
+    MaintenanceJobConfBuilder.ScheduleConf conf =
+        new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
+
+    // Same priority as update-stats templates: flat wins over nested spark_conf.
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.executor.memory\":\"7g\""));
+    Assertions.assertFalse(conf.sparkConf().contains("\"spark.executor.memory\":\"4g\""));
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.executor.cores\":\"2\""));
+    Assertions.assertTrue(conf.sparkConf().contains("\"spark.sql.catalog.iceberg.type\":\"rest\""));
   }
 
   private static Config configWithUri() {
