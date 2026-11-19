@@ -65,11 +65,12 @@ public final class IcebergJobUtils {
    */
   private static final Pattern UNRESOLVED_PLACEHOLDER_PATTERN = Pattern.compile("^\\{\\{[^{}]*}}$");
 
-  /** Relative day forms such as {@code 7d} for expire / orphan {@code older_than}. */
-  private static final Pattern OLDER_THAN_DAYS_SUFFIX =
+  /** Matches relative day wire values such as {@code 7d} / {@code 7D}. */
+  private static final Pattern OLDER_THAN_RELATIVE_DAYS =
       Pattern.compile("^(\\d+)d$", Pattern.CASE_INSENSITIVE);
 
-  private static final DateTimeFormatter RETENTION_CUTOFF =
+  /** Formats {@code now - Nd} as the Iceberg {@code older_than} timestamp string. */
+  private static final DateTimeFormatter OLDER_THAN_TIMESTAMP =
       DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ssXXX").withZone(ZoneOffset.UTC);
 
   /**
@@ -578,42 +579,32 @@ public final class IcebergJobUtils {
   }
 
   /**
-   * Expands relative day forms such as {@code 7d} to a UTC timestamp string for Iceberg {@code
-   * TIMESTAMP '...'} procedure args. Absolute timestamps are returned unchanged. Null/blank stay
-   * as-is. Called at Spark job execute time (CLI, TMS, or optimizer submit).
-   *
-   * @param olderThan raw {@code older_than} / {@code --older-than} value
-   * @param clock clock for computing the retention cutoff
-   * @return normalized timestamp, or the original value when not a {@code Nd} form
+   * Expands {@code Nd} (e.g. {@code 7d}) to a UTC Iceberg {@code older_than} timestamp; absolute
+   * timestamps pass through. Null/blank stay as-is.
    */
-  public static String normalizeOlderThan(@Nullable String olderThan, Clock clock) {
+  public static String normalizeOlderThan(@Nullable String olderThan) {
+    return normalizeOlderThan(olderThan, Clock.systemUTC());
+  }
+
+  /** Package-visible for tests with a fixed clock. */
+  static String normalizeOlderThan(@Nullable String olderThan, Clock clock) {
     if (olderThan == null || olderThan.trim().isEmpty()) {
       return olderThan;
     }
     Preconditions.checkNotNull(clock, "clock");
     String trimmed = olderThan.trim();
-    Matcher matcher = OLDER_THAN_DAYS_SUFFIX.matcher(trimmed);
+    Matcher matcher = OLDER_THAN_RELATIVE_DAYS.matcher(trimmed);
     if (!matcher.matches()) {
       return olderThan;
     }
     long days = Long.parseLong(matcher.group(1));
     IcebergSnapshotExpirationContent.validateOlderThanDays(days);
     try {
-      return RETENTION_CUTOFF.format(clock.instant().minus(days, ChronoUnit.DAYS));
+      return OLDER_THAN_TIMESTAMP.format(clock.instant().minus(days, ChronoUnit.DAYS));
     } catch (DateTimeException | ArithmeticException e) {
       throw new IllegalArgumentException(
           "older_than days cannot be represented as a retention timestamp", e);
     }
-  }
-
-  /**
-   * Same as {@link #normalizeOlderThan(String, Clock)} using {@link Clock#systemUTC()}.
-   *
-   * @param olderThan raw older-than value
-   * @return normalized timestamp or original value
-   */
-  public static String normalizeOlderThan(@Nullable String olderThan) {
-    return normalizeOlderThan(olderThan, Clock.systemUTC());
   }
 
   /** Visible for unit tests that assert the missing-class error message. */

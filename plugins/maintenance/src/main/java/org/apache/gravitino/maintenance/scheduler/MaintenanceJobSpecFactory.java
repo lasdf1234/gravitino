@@ -79,31 +79,6 @@ public final class MaintenanceJobSpecFactory {
           "warehouse_location",
           "gravitino_job_id");
 
-  /**
-   * Procedure / CALL placeholders stored on a schedule {@link Task} and projected into each Spark
-   * {@code tasks[]} element's {@code params} object.
-   */
-  /**
-   * Keys projected into each Spark {@code tasks[].params} object. Includes table identity keys
-   * ({@code catalog_name}, {@code table_identifier}) plus Iceberg procedure placeholders — same
-   * peer layout as the standalone builtin job CLIs.
-   */
-  private static final Set<String> PROCEDURE_PARAM_KEYS =
-      ImmutableSet.of(
-          "catalog_name",
-          "table_identifier",
-          "strategy",
-          "sort_order",
-          "where_clause",
-          "options",
-          "use_caching",
-          "spec_id",
-          "older_than",
-          "retain_last",
-          "stream_results",
-          "location",
-          "dry_run");
-
   private final MaintenanceJobConfBuilder jobConfBuilder;
 
   /**
@@ -286,19 +261,27 @@ public final class MaintenanceJobSpecFactory {
           "task tableId=%s is missing catalog_name/table_identifier in parameters",
           task.getTableId());
 
+      // Identity first so wire JSON keeps a stable params prefix for readers/tests.
       Map<String, String> params = new LinkedHashMap<>();
-      Map<String, String> parameters = task.getParameters();
-      if (parameters != null) {
-        for (String key : PROCEDURE_PARAM_KEYS) {
-          String value = parameters.get(key);
-          if (value != null && !value.isBlank()) {
-            params.put(key, value);
-          }
-        }
-      }
-      // Always set identity keys explicitly so a blank/missing value cannot slip through.
       params.put("catalog_name", catalogName);
       params.put("table_identifier", tableIdentifier);
+      Map<String, String> parameters = task.getParameters();
+      if (parameters != null) {
+        for (Map.Entry<String, String> entry : parameters.entrySet()) {
+          String key = entry.getKey();
+          String value = entry.getValue();
+          // rules stay on the wire task object, not inside params.
+          if (key == null
+              || "catalog_name".equals(key)
+              || "table_identifier".equals(key)
+              || MaintenanceJobTemplates.RULES_KEY.equals(key)
+              || value == null
+              || value.isBlank()) {
+            continue;
+          }
+          params.put(key, value);
+        }
+      }
 
       Map<String, Object> rules = Map.of();
       if (parameters != null && task.getPolicyType() != null) {
