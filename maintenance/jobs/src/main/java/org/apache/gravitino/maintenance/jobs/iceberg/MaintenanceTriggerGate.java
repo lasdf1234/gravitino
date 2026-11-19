@@ -26,8 +26,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import javax.annotation.Nullable;
 import org.apache.gravitino.json.JsonUtils;
-import org.apache.gravitino.maintenance.optimizer.recommender.handler.compaction.CompactionTriggerEvaluator;
-import org.apache.gravitino.maintenance.optimizer.recommender.handler.manifest.ManifestRewriteTriggerEvaluator;
+import org.apache.gravitino.maintenance.optimizer.recommender.handler.TriggerExprEvaluator;
 import org.apache.gravitino.policy.IcebergDataCompactionContent;
 import org.apache.gravitino.policy.IcebergOrphanFileRemovalContent;
 import org.apache.gravitino.policy.IcebergRewriteManifestsContent;
@@ -39,10 +38,9 @@ import org.slf4j.LoggerFactory;
 /**
  * In-Spark maintain-or-skip gate after S0 metrics (§5.2.2).
  *
- * <p>Evaluates enqueue-time policy rules locally with the same QL stack as the optimizer. Does not
- * call Gravitino. Snapshot expiry always maintains (optimizer-only scheduling for that type).
- * Compaction uses {@code CompactionTriggerEvaluator}; manifest rewrite uses {@code
- * ManifestRewriteTriggerEvaluator}.
+ * <p>Evaluates enqueue-time policy rules locally via {@link TriggerExprEvaluator}. Does not call
+ * Gravitino. Snapshot expiry always maintains (optimizer-only scheduling for that type). Compaction
+ * / rewrite-manifests require their S0 numeric fields before evaluation.
  */
 final class MaintenanceTriggerGate {
 
@@ -64,56 +62,65 @@ final class MaintenanceTriggerGate {
       return true;
     }
 
-    Map<String, Object> effectiveRules;
-    if (rules != null && !rules.isEmpty()) {
-      effectiveRules = rules;
-    } else {
-      switch (policyType) {
-        case ICEBERG_COMPACTION:
-          effectiveRules = new HashMap<>(PolicyContents.icebergDataCompaction().rules());
-          break;
-        case ICEBERG_REWRITE_MANIFESTS:
-          effectiveRules = new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
-          break;
-        case ICEBERG_ORPHAN_FILE_REMOVAL:
-          effectiveRules = new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
-          break;
-        default:
-          effectiveRules = new HashMap<>();
-          effectiveRules.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
-          break;
-      }
-    }
-
+    Map<String, Object> effectiveRules = effectiveRules(policyType, rules);
     Map<String, Object> metrics = parseNumericMetrics(metricsJson);
-    if (policyType == Policy.BuiltInType.ICEBERG_COMPACTION
-        && (metrics.isEmpty()
-            || !metrics.containsKey(IcebergDataCompactionContent.DATA_FILE_MSE_METRIC)
-            || !metrics.containsKey(IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC))) {
-      LOG.warn("Compaction recommend skip: metrics JSON missing compaction fields");
-      return false;
-    }
-    if (policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS
-        && (metrics.isEmpty()
-            || !metrics.containsKey(IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC))) {
-      LOG.warn("Manifest rewrite recommend skip: metrics JSON missing manifest fields");
+    if (!hasRequiredMetrics(policyType, metrics)) {
       return false;
     }
 
-    boolean maintain =
-        policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS
-            ? ManifestRewriteTriggerEvaluator.shouldMaintain(effectiveRules, metrics)
-            : CompactionTriggerEvaluator.shouldMaintain(effectiveRules, metrics);
-    String triggerExprKey =
-        policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS
-            ? IcebergRewriteManifestsContent.TRIGGER_EXPR_KEY
-            : IcebergDataCompactionContent.TRIGGER_EXPR_KEY;
+    boolean maintain = TriggerExprEvaluator.evaluate(effectiveRules, metrics);
     LOG.info(
         "In-Spark recommend type={} expr={} -> {}",
         policyType.policyType(),
-        effectiveRules.get(triggerExprKey),
+        effectiveRules.get(TriggerExprEvaluator.TRIGGER_EXPR_KEY),
         maintain ? "MAINTAIN" : "SKIP");
     return maintain;
+  }
+
+  private static Map<String, Object> effectiveRules(
+      Policy.BuiltInType policyType, @Nullable Map<String, Object> rules) {
+    if (rules != null && !rules.isEmpty()) {
+      return rules;
+    }
+    switch (policyType) {
+      case ICEBERG_COMPACTION:
+        return new HashMap<>(PolicyContents.icebergDataCompaction().rules());
+      case ICEBERG_REWRITE_MANIFESTS:
+        return new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
+      case ICEBERG_ORPHAN_FILE_REMOVAL:
+        return new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
+      default:
+        Map<String, Object> fallback = new HashMap<>();
+        fallback.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
+        return fallback;
+    }
+  }
+
+  /**
+   * Compaction needs mse + delete-file-number; rewrite-manifests needs manifest-number. Other types
+   * (orphan) evaluate without S0 metrics.
+   */
+  private static boolean hasRequiredMetrics(
+      Policy.BuiltInType policyType, Map<String, Object> metrics) {
+    switch (policyType) {
+      case ICEBERG_COMPACTION:
+        if (metrics.isEmpty()
+            || !metrics.containsKey(IcebergDataCompactionContent.DATA_FILE_MSE_METRIC)
+            || !metrics.containsKey(IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC)) {
+          LOG.warn("Compaction recommend skip: metrics JSON missing compaction fields");
+          return false;
+        }
+        return true;
+      case ICEBERG_REWRITE_MANIFESTS:
+        if (metrics.isEmpty()
+            || !metrics.containsKey(IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC)) {
+          LOG.warn("Manifest rewrite recommend skip: metrics JSON missing manifest fields");
+          return false;
+        }
+        return true;
+      default:
+        return true;
+    }
   }
 
   private static Map<String, Object> parseNumericMetrics(@Nullable String metricsJson) {
