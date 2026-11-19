@@ -580,14 +580,9 @@ public final class IcebergJobUtils {
 
   /**
    * Expands {@code Nd} (e.g. {@code 7d}) to a UTC Iceberg {@code older_than} timestamp; absolute
-   * timestamps pass through. Null/blank stay as-is.
+   * timestamps pass through. Null/blank stay as-is. Pass {@link Clock#systemUTC()} in production.
    */
-  public static String normalizeOlderThan(@Nullable String olderThan) {
-    return normalizeOlderThan(olderThan, Clock.systemUTC());
-  }
-
-  /** Package-visible for tests with a fixed clock. */
-  static String normalizeOlderThan(@Nullable String olderThan, Clock clock) {
+  public static String normalizeOlderThan(@Nullable String olderThan, Clock clock) {
     if (olderThan == null || olderThan.trim().isEmpty()) {
       return olderThan;
     }

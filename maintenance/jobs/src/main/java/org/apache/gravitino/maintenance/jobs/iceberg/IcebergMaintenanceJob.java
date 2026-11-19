@@ -136,17 +136,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
       tasks = parseTasks(IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("tasks")));
       String updaterJson =
           IcebergJobUtils.nullIfUnresolvedPlaceholder(argsByName.get("updater-options"));
-      if (updaterJson == null || updaterJson.trim().isEmpty()) {
-        updaterOptions = Collections.emptyMap();
-      } else {
-        try {
-          @SuppressWarnings("unchecked")
-          Map<String, String> parsed = JsonUtils.anyFieldMapper().readValue(updaterJson, Map.class);
-          updaterOptions = parsed == null ? Collections.emptyMap() : parsed;
-        } catch (JsonProcessingException e) {
-          throw new IllegalArgumentException("Invalid updater-options JSON: " + e.getMessage(), e);
-        }
-      }
+      updaterOptions = IcebergSparkConfigUtils.parseFlatJsonMap(updaterJson, "updater-options");
     } catch (IllegalArgumentException | IllegalStateException e) {
       LOG.error("Invalid TMS maintenance arguments: {}", e.getMessage());
       return 1;
@@ -288,8 +278,7 @@ public class IcebergMaintenanceJob implements BuiltInJob {
           return;
         }
         long headSnapshotId =
-            IcebergJobUtils.requireCurrentSnapshotId(
-                spark, task.catalogName, task.tableIdentifier);
+            IcebergJobUtils.requireCurrentSnapshotId(spark, task.catalogName, task.tableIdentifier);
         if (action.shouldCheckSnapshotDrift() && before.snapshotId() != headSnapshotId) {
           LOG.info(
               "TMS type {} skipped for action_id {} table {} policy {}: snapshot drifted"

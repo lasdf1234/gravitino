@@ -20,6 +20,7 @@ package org.apache.gravitino.maintenance.jobs.iceberg;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import java.time.Clock;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -288,7 +289,7 @@ public class IcebergExpireSnapshotsJob implements BuiltInJob, IcebergMaintenance
     StringBuilder sql = IcebergJobUtils.beginSystemProcedureCall(catalogName, "expire_snapshots");
     IcebergJobUtils.appendSqlStringTableArg(sql, tableIdentifier);
 
-    String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan);
+    String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan, Clock.systemUTC());
     if (resolvedOlderThan != null && !resolvedOlderThan.isEmpty()) {
       sql.append(", older_than => TIMESTAMP '")
           .append(IcebergJobUtils.escapeSqlString(resolvedOlderThan))

@@ -172,13 +172,15 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf = new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
+    Map<String, String> conf =
+        new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     String policyTypeWire = Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS.policyType();
     Assertions.assertEquals(policyTypeWire, conf.get("maintenance_types"));
     Assertions.assertEquals("0", conf.get("spec_id"));
     Assertions.assertEquals("false", conf.get("use_caching"));
-    Assertions.assertTrue(conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"" + policyTypeWire + "\""));
+    Assertions.assertTrue(
+        conf.get(MaintenanceJobTemplates.RULES_KEY).contains("\"" + policyTypeWire + "\""));
     Assertions.assertTrue(
         conf.get(MaintenanceJobTemplates.RULES_KEY).contains("manifest_count_threshold"));
   }
@@ -197,7 +199,8 @@ class TestMaintenanceJobConfBuilder {
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();
 
-    Map<String, String> conf = new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
+    Map<String, String> conf =
+        new MaintenanceJobConfBuilder(configWithUri()).build(policy, "iceberg");
 
     Assertions.assertEquals(
         Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS.policyType(), conf.get("maintenance_types"));
@@ -259,7 +262,7 @@ class TestMaintenanceJobConfBuilder {
             .withNamespace(NamespaceUtil.ofPolicy("ml"))
             .withPolicyType(Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
             .withEnabled(true)
-            .withContent(PolicyContents.icebergRewriteManifests(null, null, null, 2, false))
+            .withContent(PolicyContents.icebergRewriteManifests(null, 2, false))
             .withAuditInfo(
                 AuditInfo.builder().withCreator("t").withCreateTime(Instant.now()).build())
             .build();

@@ -29,6 +29,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -288,7 +289,7 @@ public class IcebergRemoveOrphanFilesJob implements BuiltInJob, IcebergMaintenan
     // Render string literals using Spark so quotes and backslashes round-trip correctly.
     StringBuilder sql = IcebergJobUtils.beginSystemProcedureCall(catalog, "remove_orphan_files");
     sql.append("table => ").append(lit(table).expr().sql());
-    String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan);
+    String resolvedOlderThan = IcebergJobUtils.normalizeOlderThan(olderThan, Clock.systemUTC());
     if (resolvedOlderThan != null && !resolvedOlderThan.isEmpty()) {
       sql.append(", older_than => TIMESTAMP ").append(lit(resolvedOlderThan).expr().sql());
     }
