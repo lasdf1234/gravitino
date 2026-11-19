@@ -208,7 +208,8 @@ public class IcebergMaintenanceJob implements BuiltInJob {
 
   /**
    * Shared S0 → gate → procedure → S1 pipeline. Types without S0 (orphan cleanup) skip the before
-   * half, still evaluate {@code trigger-expr}, then report after-metrics when the procedure runs.
+   * half; expiry / orphan always pass the in-job gate, then report after-metrics when the procedure
+   * runs.
    *
    * <p>Early returns (before-metrics failure, snapshot drift, trigger skip) still {@code finish}
    * the soft-slot in the caller {@code finally} so the action does not stay in-flight;

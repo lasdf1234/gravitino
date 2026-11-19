@@ -39,8 +39,8 @@ import org.slf4j.LoggerFactory;
  * In-Spark maintain-or-skip gate after S0 metrics (§5.2.2).
  *
  * <p>Evaluates enqueue-time policy rules locally via {@link TriggerExprEvaluator}. Does not call
- * Gravitino. Snapshot expiry always maintains (optimizer-only scheduling for that type). Compaction
- * / rewrite-manifests require their S0 numeric fields before evaluation.
+ * Gravitino. Snapshot expiry and orphan cleanup always maintain (no in-job {@code trigger-expr}
+ * skip). Compaction / rewrite-manifests require their S0 numeric fields before evaluation.
  */
 final class MaintenanceTriggerGate {
 
@@ -58,7 +58,9 @@ final class MaintenanceTriggerGate {
       Policy.BuiltInType policyType,
       @Nullable Map<String, Object> rules,
       @Nullable String metricsJson) {
-    if (policyType == Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION) {
+    // Expiry / orphan: optimizer schedules them; in-job gate does not re-evaluate trigger-expr.
+    if (policyType == Policy.BuiltInType.ICEBERG_SNAPSHOT_EXPIRATION
+        || policyType == Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL) {
       return true;
     }
 
@@ -87,8 +89,6 @@ final class MaintenanceTriggerGate {
         return new HashMap<>(PolicyContents.icebergDataCompaction().rules());
       case ICEBERG_REWRITE_MANIFESTS:
         return new HashMap<>(PolicyContents.icebergRewriteManifests().rules());
-      case ICEBERG_ORPHAN_FILE_REMOVAL:
-        return new HashMap<>(PolicyContents.icebergOrphanFileRemoval().rules());
       default:
         Map<String, Object> fallback = new HashMap<>();
         fallback.put(IcebergOrphanFileRemovalContent.TRIGGER_EXPR_KEY, "false");
@@ -96,10 +96,7 @@ final class MaintenanceTriggerGate {
     }
   }
 
-  /**
-   * Compaction needs mse + delete-file-number; rewrite-manifests needs manifest-number. Other types
-   * (orphan) evaluate without S0 metrics.
-   */
+  /** Compaction needs mse + delete-file-number; rewrite-manifests needs manifest-number. */
   private static boolean hasRequiredMetrics(
       Policy.BuiltInType policyType, Map<String, Object> metrics) {
     switch (policyType) {

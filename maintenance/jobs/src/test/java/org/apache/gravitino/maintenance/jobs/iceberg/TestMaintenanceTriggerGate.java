@@ -111,14 +111,14 @@ public class TestMaintenanceTriggerGate {
   }
 
   @Test
-  public void testOrphanEvaluatesTriggerExprWithoutBeforeMetrics() {
+  public void testOrphanAlwaysMaintain() {
     assertTrue(
         MaintenanceTriggerGate.shouldMaintain(
             Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL, new HashMap<>(), null));
 
     Map<String, Object> skip = new HashMap<>();
     skip.put("trigger-expr", "false");
-    assertFalse(
+    assertTrue(
         MaintenanceTriggerGate.shouldMaintain(
             Policy.BuiltInType.ICEBERG_ORPHAN_FILE_REMOVAL, skip, null));
   }
