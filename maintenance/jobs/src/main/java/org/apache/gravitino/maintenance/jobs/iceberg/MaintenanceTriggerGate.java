@@ -85,33 +85,18 @@ final class MaintenanceTriggerGate {
       }
     }
 
-    Map<String, Object> metrics = new HashMap<>();
-    if (metricsJson != null && !metricsJson.trim().isEmpty()) {
-      try {
-        JsonNode root = JsonUtils.anyFieldMapper().readTree(metricsJson);
-        Iterator<Entry<String, JsonNode>> fields = root.fields();
-        while (fields.hasNext()) {
-          Entry<String, JsonNode> field = fields.next();
-          JsonNode value = field.getValue();
-          if (value == null || value.isNull() || !value.isNumber()) {
-            continue;
-          }
-          metrics.put(
-              field.getKey(), value.isIntegralNumber() ? value.longValue() : value.doubleValue());
-        }
-      } catch (IOException | RuntimeException e) {
-        LOG.warn("Failed to parse metrics JSON: {}", e.toString());
-      }
+    Map<String, Object> metrics = parseNumericMetrics(metricsJson);
+    if (policyType == Policy.BuiltInType.ICEBERG_COMPACTION
+        && (metrics.isEmpty()
+            || !metrics.containsKey(IcebergDataCompactionContent.DATA_FILE_MSE_METRIC)
+            || !metrics.containsKey(IcebergDataCompactionContent.DELETE_FILE_NUMBER_METRIC))) {
+      LOG.warn("Compaction recommend skip: metrics JSON missing compaction fields");
+      return false;
     }
-
-    // Compaction / manifest need some numeric metrics; do not require every known field — a custom
-    // trigger-expr may reference only a subset. Empty metrics still skip (nothing to evaluate).
-    if ((policyType == Policy.BuiltInType.ICEBERG_COMPACTION
-            || policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS)
-        && metrics.isEmpty()) {
-      LOG.warn(
-          "{} recommend skip: metrics JSON empty or non-numeric",
-          policyType == Policy.BuiltInType.ICEBERG_COMPACTION ? "Compaction" : "Manifest rewrite");
+    if (policyType == Policy.BuiltInType.ICEBERG_REWRITE_MANIFESTS
+        && (metrics.isEmpty()
+            || !metrics.containsKey(IcebergRewriteManifestsContent.MANIFEST_NUMBER_METRIC))) {
+      LOG.warn("Manifest rewrite recommend skip: metrics JSON missing manifest fields");
       return false;
     }
 
@@ -129,5 +114,28 @@ final class MaintenanceTriggerGate {
         effectiveRules.get(triggerExprKey),
         maintain ? "MAINTAIN" : "SKIP");
     return maintain;
+  }
+
+  private static Map<String, Object> parseNumericMetrics(@Nullable String metricsJson) {
+    Map<String, Object> metrics = new HashMap<>();
+    if (metricsJson == null || metricsJson.trim().isEmpty()) {
+      return metrics;
+    }
+    try {
+      JsonNode root = JsonUtils.anyFieldMapper().readTree(metricsJson);
+      Iterator<Entry<String, JsonNode>> fields = root.fields();
+      while (fields.hasNext()) {
+        Entry<String, JsonNode> field = fields.next();
+        JsonNode value = field.getValue();
+        if (value == null || value.isNull() || !value.isNumber()) {
+          continue;
+        }
+        metrics.put(
+            field.getKey(), value.isIntegralNumber() ? value.longValue() : value.doubleValue());
+      }
+    } catch (IOException | RuntimeException e) {
+      LOG.warn("Failed to parse metrics JSON: {}", e.toString());
+    }
+    return metrics;
   }
 }

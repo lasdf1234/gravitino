@@ -124,25 +124,12 @@ public class TestMaintenanceTriggerGate {
   }
 
   @Test
-  public void testCompactionAllowsPartialMetricsWhenExprOnlyNeedsOne() {
-    Map<String, Object> rules = new HashMap<>();
-    rules.put("trigger-expr", "custom-data-file-mse >= 10");
-    String onlyMse = "{\"" + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC + "\":15}";
-    assertTrue(
-        MaintenanceTriggerGate.shouldMaintain(
-            Policy.BuiltInType.ICEBERG_COMPACTION, rules, onlyMse));
-  }
-
-  @Test
-  public void testCompactionSkipsWhenMetricsEmpty() {
+  public void testCompactionSkipsWhenMetricsMissing() {
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
             Policy.BuiltInType.ICEBERG_COMPACTION, new HashMap<>(), "{}"));
-  }
 
-  @Test
-  public void testDefaultCompactionPartialMetricsSkipsNotThrows() {
-    // Default trigger-expr references both mse and delete-file-number; partial S0 must skip.
+    // Gate requires both compaction S0 fields even if custom expr only names one.
     String onlyMse = "{\"" + IcebergDataCompactionContent.DATA_FILE_MSE_METRIC + "\":15}";
     assertFalse(
         MaintenanceTriggerGate.shouldMaintain(
