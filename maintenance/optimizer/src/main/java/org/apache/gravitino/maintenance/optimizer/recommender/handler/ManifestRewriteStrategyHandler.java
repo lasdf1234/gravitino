@@ -82,9 +82,7 @@ public final class ManifestRewriteStrategyHandler implements StrategyHandler {
     }
     IcebergRewriteManifestsContent content =
         PolicyContents.icebergRewriteManifests(
-            longRule(rules, IcebergRewriteManifestsContent.MANIFEST_COUNT_CRITICAL),
-            longRule(rules, IcebergRewriteManifestsContent.MANIFEST_COUNT_WARNING),
-            longRule(rules, IcebergRewriteManifestsContent.AVG_MANIFEST_SIZE_THRESHOLD_BYTES),
+            longRule(rules, IcebergRewriteManifestsContent.MANIFEST_COUNT_THRESHOLD),
             requestedSpec,
             booleanRule(rules, IcebergRewriteManifestsContent.USE_CACHING));
     content.validate();
@@ -111,9 +109,7 @@ public final class ManifestRewriteStrategyHandler implements StrategyHandler {
       return;
     }
     IcebergManifestStatistics values = measurement.get();
-    if (values.count() >= content.manifestCountCritical()
-        || (values.count() >= content.manifestCountWarning()
-            && values.averageSize() < content.avgManifestSizeThresholdBytes())) {
+    if (values.count() >= content.manifestCountThreshold()) {
       evaluation =
           new StrategyEvaluationImpl(
               values.count(),

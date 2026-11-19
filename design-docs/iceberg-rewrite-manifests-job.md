@@ -81,25 +81,22 @@ The initial implementation enters at the jobs API. A future policy-driven flow w
 
 The follow-up `system_iceberg_rewrite_manifests` policy uses the following configurable thresholds. No policy type is added by #12937.
 
-| Policy setting                      | Default           | Meaning                                                           |
-| ----------------------------------- | ----------------- | ----------------------------------------------------------------- |
-| `manifest_count_critical`           | `500`             | Trigger at or above this count, regardless of average size        |
-| `manifest_count_warning`            | `100`             | Minimum count for the size-based trigger                          |
-| `avg_manifest_size_threshold_bytes` | `8388608` (8 MiB) | Trigger below this average size when the warning count is reached |
+| Policy setting             | Default | Meaning                                                                                    |
+| -------------------------- | ------- | ------------------------------------------------------------------------------------------ |
+| `manifest_count_threshold` | `100`   | Trigger at or above this count (Iceberg `commit.manifest.min-count-to-merge` default)      |
 
 Evaluate the following expression using statistics for the resolved target spec only:
 
 ```text
-IF manifest_count >= manifest_count_critical:
-    trigger
-ELSE IF manifest_count >= manifest_count_warning
-        AND avg_manifest_size_bytes < avg_manifest_size_threshold_bytes:
+IF manifest_count >= manifest_count_threshold:
     trigger
 ELSE:
     do not trigger
 ```
 
-Count comparisons are inclusive; the size comparison is strict. For example, 500 manifests trigger regardless of size, 100 manifests averaging less than 8 MiB trigger, and 100 manifests averaging exactly 8 MiB do not. Counts below 100 do not trigger under these defaults.
+Count comparisons are inclusive. Average manifest size is collected for observability but
+does not affect the trigger. At the default threshold, 99 manifests do not trigger and 100 or
+more trigger regardless of average size.
 
 ### 5.3 Layer 2 - Strategy Handler (`maintenance/optimizer/`, follow-up)
 
