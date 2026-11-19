@@ -97,21 +97,18 @@ public class IcebergMaintenanceJob implements BuiltInJob {
             "TMS Iceberg maintenance (before metrics, gate, procedure, after metrics, finish)")
         .withExecutable(resolveExecutable(IcebergMaintenanceJob.class))
         .withClassName(IcebergMaintenanceJob.class.getName())
-        .withArguments(templateArguments())
+        .withArguments(
+            Arrays.asList(
+                "--tasks",
+                "{{tasks}}",
+                "--updater-options",
+                "{{updater_options:-}}",
+                "--spark-conf",
+                "{{spark_conf:-}}"))
         .withConfigs(IcebergSparkConfigUtils.buildTemplateSparkConfigs())
         .withCustomFields(
             Collections.singletonMap(JobTemplateProvider.PROPERTY_VERSION_KEY, VERSION))
         .build();
-  }
-
-  private static List<String> templateArguments() {
-    return Arrays.asList(
-        "--tasks",
-        "{{tasks}}",
-        "--updater-options",
-        "{{updater_options:-}}",
-        "--spark-conf",
-        "{{spark_conf:-}}");
   }
 
   /**
