@@ -69,9 +69,9 @@ class TestCommitJobSpecFactory {
         IcebergSparkConfigUtils.parseFlatJsonMap(spec.getSparkConf(), "spark_conf");
     Assertions.assertEquals("4g", spark.get("spark.executor.memory"));
 
-    MaintenanceJobSpecFactory.applyActionIds(
-        spec, List.of(new OccupancyClaim(1L, 1L), new OccupancyClaim(2L, 2L)));
-    Map<String, String> runJob = MaintenanceJobSpecFactory.jobConfForSpec(spec);
+    Map<String, String> runJob =
+        MaintenanceJobSpecFactory.jobConfForSpec(
+            spec, List.of(new OccupancyClaim(1L, 1L), new OccupancyClaim(2L, 2L)));
     String tasksJson = runJob.get(MaintenanceJobTemplates.TASKS_KEY);
     Assertions.assertNotNull(tasksJson);
     Assertions.assertTrue(tasksJson.contains("rewrite_data_files"));

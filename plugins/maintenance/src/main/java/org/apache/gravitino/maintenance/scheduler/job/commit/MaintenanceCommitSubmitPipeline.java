@@ -141,8 +141,9 @@ public final class MaintenanceCommitSubmitPipeline {
 
     Map<String, String> jobConf;
     try {
-      MaintenanceJobSpecFactory.applyActionIds(spec, claims.get());
-      jobConf = jobConfBuilder.resolveForSubmit(MaintenanceJobSpecFactory.jobConfForSpec(spec));
+      jobConf =
+          jobConfBuilder.resolveForSubmit(
+              MaintenanceJobSpecFactory.jobConfForSpec(spec, claims.get()));
     } catch (RuntimeException e) {
       actionMetaService.deleteClaims(claims.get());
       LOG.warn(

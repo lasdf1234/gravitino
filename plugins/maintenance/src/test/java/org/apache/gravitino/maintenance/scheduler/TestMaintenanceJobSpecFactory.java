@@ -76,8 +76,7 @@ class TestMaintenanceJobSpecFactory {
     MaintenanceJobSpec one =
         new MaintenanceJobSpec(
             List.of(spec.getTasks().get(0)), spec.getUpdaterOptions(), spec.getSparkConf());
-    withActionIds(one, 9001L);
-    Map<String, String> perTable = MaintenanceJobSpecFactory.jobConfForSpec(one);
+    Map<String, String> perTable = MaintenanceJobSpecFactory.jobConfForSpec(one, claims(9001L));
     Assertions.assertTrue(perTable.containsKey(MaintenanceJobTemplates.TASKS_KEY));
     String tasksJson = perTable.get(MaintenanceJobTemplates.TASKS_KEY);
     Assertions.assertTrue(tasksJson.contains("\"table_id\":10"));
@@ -92,8 +91,8 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertTrue(perTable.containsKey("updater_options"));
     Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
 
-    withActionIds(spec, 9001L, 9002L);
-    Map<String, String> batch = MaintenanceJobSpecFactory.jobConfForSpec(spec);
+    Map<String, String> batch =
+        MaintenanceJobSpecFactory.jobConfForSpec(spec, claims(9001L, 9002L));
     Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));
     Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":11"));
     Assertions.assertThrows(
@@ -109,7 +108,8 @@ class TestMaintenanceJobSpecFactory {
                             null,
                             Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
                     spec.getUpdaterOptions(),
-                    spec.getSparkConf())));
+                    spec.getSparkConf()),
+                List.of()));
 
     MaintenanceJobSpec mixedPolicies =
         factory.forCron(
@@ -121,7 +121,7 @@ class TestMaintenanceJobSpecFactory {
   }
 
   @Test
-  void testApplyActionIdsThenJobConfIncludesActionId() {
+  void testJobConfForSpecEmbedsActionIdsFromClaims() {
     MaintenanceJobSpecFactory factory = new MaintenanceJobSpecFactory(configWithUri());
     MaintenanceJobSpec spec =
         factory.forCron(
@@ -130,26 +130,26 @@ class TestMaintenanceJobSpecFactory {
                 candidate(11L, "iceberg", "db.t2", compaction(202L))));
     Assertions.assertNull(spec.getTasks().get(0).getActionId());
 
-    withActionIds(spec, 101L, 102L);
-    Assertions.assertEquals(101L, spec.getTasks().get(0).getActionId());
-    Assertions.assertEquals(102L, spec.getTasks().get(1).getActionId());
-
     String tasksJson =
-        MaintenanceJobSpecFactory.jobConfForSpec(spec).get(MaintenanceJobTemplates.TASKS_KEY);
+        MaintenanceJobSpecFactory.jobConfForSpec(spec, claims(101L, 102L))
+            .get(MaintenanceJobTemplates.TASKS_KEY);
     Assertions.assertTrue(tasksJson.contains("\"action_id\":101"));
     Assertions.assertTrue(tasksJson.contains("\"action_id\":102"));
+    // Spec tasks stay unchanged; action ids live only on the wire jobConf.
+    Assertions.assertNull(spec.getTasks().get(0).getActionId());
+    Assertions.assertNull(spec.getTasks().get(1).getActionId());
   }
 
-  private static void withActionIds(MaintenanceJobSpec spec, long... actionIds) {
+  private static List<OccupancyClaim> claims(long... actionIds) {
     ArrayList<OccupancyClaim> claims = new ArrayList<>(actionIds.length);
     for (int i = 0; i < actionIds.length; i++) {
       claims.add(new OccupancyClaim(actionIds[i], i + 1L));
     }
-    MaintenanceJobSpecFactory.applyActionIds(spec, claims);
+    return claims;
   }
 
   @Test
-  void testApplyActionIdsRejectsDuplicateTablePolicy() {
+  void testJobConfForSpecRejectsDuplicateTablePolicy() {
     MaintenanceJobSpec spec =
         new MaintenanceJobSpec(
             List.of(
@@ -167,7 +167,9 @@ class TestMaintenanceJobSpecFactory {
                     Map.of("catalog_name", "iceberg", "table_identifier", "db.t1"))),
             "{}",
             null);
-    Assertions.assertThrows(IllegalArgumentException.class, () -> withActionIds(spec, 1L, 2L));
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> MaintenanceJobSpecFactory.jobConfForSpec(spec, claims(1L, 2L)));
   }
 
   @Test

@@ -248,26 +248,33 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * Sets each schedule {@link Task#setActionId} from {@code claims} in order. Call after soft-slot
-   * acquire and before {@link #jobConfForSpec} so wire {@code tasks[]} includes {@code action_id}.
+   * Assembles the Spark {@code runJob} map for every task in {@code spec} (cron single-table, cron
+   * snapshot-expiry batch, or commit chain): shared {@code updater_options}/{@code spark_conf} plus
+   * a {@link MaintenanceJobTemplates#TASKS_KEY} JSON array. Each task keeps its own {@code params}
+   * and {@code rules}; procedure arguments are not flattened across tasks.
    *
-   * <p>{@code claims.size()} must equal {@code spec.getTasks().size()} (one claim per task). Commit
-   * chains must not list the same policy twice; batch acquire dedupes policy ids and would
-   * otherwise shrink the claim list.
+   * <p>Soft-slot {@code claims} supply {@code action_id} for the wire {@code tasks[]} (one claim
+   * per task, same order). Commit chains must not list the same policy twice; batch acquire dedupes
+   * policy ids and would otherwise shrink the claim list.
    *
-   * @param spec schedule spec (mutated in place)
+   * @param spec schedule spec (non-empty tasks)
    * @param claims soft-slot claims parallel to {@code spec.getTasks()}
+   * @return mutable jobConf (caller resolves secrets)
    */
-  public static void applyActionIds(MaintenanceJobSpec spec, List<OccupancyClaim> claims) {
+  public static Map<String, String> jobConfForSpec(
+      MaintenanceJobSpec spec, List<OccupancyClaim> claims) {
     Preconditions.checkNotNull(spec, "spec");
     Preconditions.checkArgument(claims != null && !claims.isEmpty(), "claims must be non-empty");
     List<Task> tasks = spec.getTasks();
+    Preconditions.checkArgument(tasks != null && !tasks.isEmpty(), "tasks must not be empty");
     Preconditions.checkArgument(
-        tasks != null && tasks.size() == claims.size(),
+        tasks.size() == claims.size(),
         "tasks size %s must match claims size %s",
-        tasks == null ? 0 : tasks.size(),
+        tasks.size(),
         claims.size());
+
     HashSet<String> seen = new HashSet<>();
+    List<Map<String, Object>> wireTasks = new ArrayList<>(tasks.size());
     for (int i = 0; i < tasks.size(); i++) {
       Task task = tasks.get(i);
       Preconditions.checkNotNull(task, "tasks[%s] must not be null", i);
@@ -277,44 +284,18 @@ public final class MaintenanceJobSpecFactory {
               + " align 1:1",
           task.getTableId(),
           task.getPolicyId());
-      task.setActionId(claims.get(i).actionId());
-    }
-  }
-
-  /**
-   * Assembles the Spark {@code runJob} map for every task in {@code spec} (cron single-table, cron
-   * snapshot-expiry batch, or commit chain): shared {@code updater_options}/{@code spark_conf} plus
-   * a {@link MaintenanceJobTemplates#TASKS_KEY} JSON array. Each task keeps its own {@code params}
-   * and {@code rules}; procedure arguments are not flattened across tasks.
-   *
-   * @param spec schedule spec (non-empty tasks; every task must already have {@code actionId} via
-   *     {@link #applyActionIds})
-   * @return mutable jobConf (caller resolves secrets)
-   */
-  public static Map<String, String> jobConfForSpec(MaintenanceJobSpec spec) {
-    Preconditions.checkNotNull(spec, "spec");
-    Preconditions.checkArgument(
-        spec.getTasks() != null && !spec.getTasks().isEmpty(), "tasks must not be empty");
-    for (int i = 0; i < spec.getTasks().size(); i++) {
-      Task task = spec.getTasks().get(i);
-      Preconditions.checkNotNull(task, "tasks[%s] must not be null", i);
+      long actionId = claims.get(i).actionId();
       Preconditions.checkArgument(
-          task.getActionId() != null && task.getActionId() > 0,
-          "tasks[%s].actionId is required before jobConfForSpec (call applyActionIds after soft-slot"
-              + " acquire)",
-          i);
+          actionId > 0, "claims[%s].actionId must be positive, got %s", i, actionId);
+      wireTasks.add(toWireTask(task, actionId));
     }
-    Task first = spec.getTasks().get(0);
+
+    Task first = tasks.get(0);
     String catalogName = first.catalogName();
     Preconditions.checkArgument(
         catalogName != null && !catalogName.isBlank(),
         "task tableId=%s is missing catalog_name",
         first.getTableId());
-
-    List<Map<String, Object>> wireTasks = new ArrayList<>(spec.getTasks().size());
-    for (Task task : spec.getTasks()) {
-      wireTasks.add(toWireTask(task));
-    }
 
     Map<String, String> jobConf = new LinkedHashMap<>();
     // SparkJobTemplate.configs still use {{catalog_name}} / resource placeholders.
@@ -327,42 +308,16 @@ public final class MaintenanceJobSpecFactory {
   }
 
   /**
-   * @param spec schedule spec
-   * @param task single task to submit
-   * @return jobConf with a one-element {@link MaintenanceJobTemplates#TASKS_KEY} array
-   * @deprecated use {@link #jobConfForSpec(MaintenanceJobSpec)} for cron and commit
-   */
-  @Deprecated
-  public static Map<String, String> jobConfForTask(MaintenanceJobSpec spec, Task task) {
-    Preconditions.checkNotNull(spec, "spec");
-    Preconditions.checkNotNull(task, "task");
-    return jobConfForSpec(
-        new MaintenanceJobSpec(List.of(task), spec.getUpdaterOptions(), spec.getSparkConf()));
-  }
-
-  /**
-   * Assembles one Spark {@code runJob} for the commit chain (same shape as cron batch: {@link
-   * MaintenanceJobTemplates#TASKS_KEY}).
-   *
-   * @param spec commit-chain spec
-   * @return mutable jobConf
-   */
-  public static Map<String, String> jobConfForCommitChain(MaintenanceJobSpec spec) {
-    return jobConfForSpec(spec);
-  }
-
-  /**
    * Projects a schedule {@link Task} into the Spark {@code tasks[]} wire object.
    *
-   * @param task schedule task with a positive {@code actionId}
+   * @param task schedule task
+   * @param actionId soft-slot action id for this work item
    * @return mutable wire map including {@code action_id}
    */
-  public static Map<String, Object> toWireTask(Task task) {
+  public static Map<String, Object> toWireTask(Task task, long actionId) {
     Preconditions.checkNotNull(task, "task");
     Preconditions.checkArgument(
-        task.getActionId() != null && task.getActionId() > 0,
-        "task tableId=%s is missing actionId",
-        task.getTableId());
+        actionId > 0, "task tableId=%s is missing actionId", task.getTableId());
     String catalogName = task.catalogName();
     String tableIdentifier = task.tableIdentifier();
     Preconditions.checkArgument(
@@ -374,7 +329,7 @@ public final class MaintenanceJobSpecFactory {
     wire.put("table_id", task.getTableId());
     wire.put("maintenance_type", task.getMaintenanceType());
     wire.put("policy_id", task.getPolicyId());
-    wire.put("action_id", task.getActionId());
+    wire.put("action_id", actionId);
     Map<String, String> params = extractProcedureParams(task.getParameters());
     // Always set identity keys explicitly so a blank/missing value cannot slip through.
     params.put("catalog_name", catalogName);
