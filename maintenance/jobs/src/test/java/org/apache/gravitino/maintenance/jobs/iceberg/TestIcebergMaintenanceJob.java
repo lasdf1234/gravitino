@@ -43,6 +43,8 @@ public class TestIcebergMaintenanceJob {
     assertFalse(args.contains("--policy-ids"));
     assertFalse(args.contains("--tables"));
     assertFalse(args.contains("--strategy"));
+    // Spark settings come from --spark-conf only; template carries no Spark configs.
+    assertTrue(template.configs().isEmpty());
   }
 
   @Test

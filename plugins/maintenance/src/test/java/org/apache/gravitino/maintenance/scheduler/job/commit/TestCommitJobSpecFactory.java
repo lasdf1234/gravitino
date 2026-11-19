@@ -80,7 +80,8 @@ class TestCommitJobSpecFactory {
     Assertions.assertFalse(tasksJson.contains("\"action_id\""));
     Assertions.assertTrue(tasksJson.contains("trigger-expr"));
     Assertions.assertNull(runJob.get("older_than"));
-    Assertions.assertEquals("4g", runJob.get("spark_executor_memory"));
+    Assertions.assertFalse(runJob.containsKey("spark_executor_memory"));
+    Assertions.assertTrue(runJob.get("spark_conf").contains("spark.executor.memory"));
   }
 
   @Test

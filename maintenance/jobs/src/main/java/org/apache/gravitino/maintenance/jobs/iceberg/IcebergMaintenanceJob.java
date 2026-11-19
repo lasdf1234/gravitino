@@ -104,7 +104,8 @@ public class IcebergMaintenanceJob implements BuiltInJob {
                 "{{updater_options:-}}",
                 "--spark-conf",
                 "{{spark_conf:-}}"))
-        .withConfigs(IcebergSparkConfigUtils.buildTemplateSparkConfigs())
+        // Session Spark settings come from jobConf spark_conf / --spark-conf, not template configs.
+        .withConfigs(Collections.emptyMap())
         .withCustomFields(
             Collections.singletonMap(JobTemplateProvider.PROPERTY_VERSION_KEY, VERSION))
         .build();

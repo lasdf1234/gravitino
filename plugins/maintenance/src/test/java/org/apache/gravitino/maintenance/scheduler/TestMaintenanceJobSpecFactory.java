@@ -88,7 +88,9 @@ class TestMaintenanceJobSpecFactory {
     Assertions.assertFalse(tasksJson.contains("\"action_id\""));
     Assertions.assertTrue(tasksJson.contains("system_iceberg_compaction"));
     Assertions.assertTrue(perTable.containsKey("updater_options"));
-    Assertions.assertEquals("4g", perTable.get("spark_executor_memory"));
+    Assertions.assertFalse(perTable.containsKey("catalog_name"));
+    Assertions.assertFalse(perTable.containsKey("spark_executor_memory"));
+    Assertions.assertTrue(perTable.get("spark_conf").contains("spark.executor.memory"));
 
     Map<String, String> batch = MaintenanceJobSpecFactory.jobConfForSpec(spec);
     Assertions.assertTrue(batch.get(MaintenanceJobTemplates.TASKS_KEY).contains("\"table_id\":10"));

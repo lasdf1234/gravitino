@@ -283,8 +283,7 @@ public final class MaintenanceJobSpecFactory {
         first.getTableId());
 
     Map<String, String> jobConf = new LinkedHashMap<>();
-    // SparkJobTemplate.configs still use {{catalog_name}} / resource placeholders.
-    jobConf.put("catalog_name", catalogName);
+    // catalog_name lives only under tasks[].params; Spark settings live in spark_conf only.
     if (spec.getUpdaterOptions() != null && !spec.getUpdaterOptions().isBlank()) {
       jobConf.put(MaintenanceJobTemplates.UPDATER_OPTIONS_JOB_CONF_KEY, spec.getUpdaterOptions());
     }
@@ -293,7 +292,6 @@ public final class MaintenanceJobSpecFactory {
     }
     jobConf.put(
         MaintenanceJobTemplates.TASKS_KEY, writeJson(wireTasks, MaintenanceJobTemplates.TASKS_KEY));
-    MaintenanceJobConfBuilder.applySparkConfPlaceholders(jobConf, catalogName);
     return jobConf;
   }
 
