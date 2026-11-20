@@ -25,6 +25,7 @@ import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import org.apache.commons.lang3.reflect.FieldUtils;
@@ -50,6 +51,8 @@ import org.apache.gravitino.meta.DomainEntity;
 import org.apache.gravitino.meta.ModelEntity;
 import org.apache.gravitino.meta.TagEntity;
 import org.apache.gravitino.meta.TopicEntity;
+import org.apache.gravitino.storage.relational.session.SqlSessions;
+import org.apache.gravitino.storage.relational.session.TransactionSynchronization;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.utils.NamespaceUtil;
 import org.junit.jupiter.api.Assertions;
@@ -69,7 +72,6 @@ public class TestRelationalEntityStore {
 
   @BeforeEach
   void setUp() throws IllegalAccessException {
-    DeferredEntityCacheOps.clearForTesting();
     store = new RelationalEntityStore();
     backend = Mockito.mock(RelationalBackend.class);
 
@@ -165,40 +167,57 @@ public class TestRelationalEntityStore {
   }
 
   @Test
-  void testUpdateDefersInvalidateWhileOuterTransactionOpen() throws Exception {
+  void testUpdateRegistersAfterCommitInvalidateWhileOuterTransactionOpen() throws Exception {
     NameIdentifier ident = NameIdentifier.of("metalake", "catalog");
     NoOpsCache cache = (NoOpsCache) FieldUtils.readField(store, "cache", true);
     Mockito.when(backend.update(eq(ident), eq(Entity.EntityType.CATALOG), any(Function.class)))
         .thenReturn(null);
+    AtomicReference<TransactionSynchronization> registered = new AtomicReference<>();
 
     try (MockedStatic<SessionUtils> sessions =
-        Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS)) {
+            Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS);
+        MockedStatic<SqlSessions> sqlSessions = Mockito.mockStatic(SqlSessions.class)) {
       sessions.when(SessionUtils::isInTransaction).thenReturn(true);
+      sqlSessions
+          .when(() -> SqlSessions.registerSynchronization(any(TransactionSynchronization.class)))
+          .thenAnswer(
+              invocation -> {
+                registered.set(invocation.getArgument(0));
+                return null;
+              });
       store.update(ident, null, Entity.EntityType.CATALOG, entity -> entity);
       Mockito.verify(cache, Mockito.never()).invalidate(ident, Entity.EntityType.CATALOG);
-      Assertions.assertEquals(1, DeferredEntityCacheOps.pendingCountForTesting());
-      DeferredEntityCacheOps.flush();
+      Assertions.assertNotNull(registered.get());
+      registered.get().afterCommit();
     }
 
     Mockito.verify(cache).invalidate(ident, Entity.EntityType.CATALOG);
   }
 
   @Test
-  void testDeferredInvalidateDiscardedOnRollback() throws Exception {
+  void testUpdateInvalidateSkippedOnRollbackSynchronization() throws Exception {
     NameIdentifier ident = NameIdentifier.of("metalake", "catalog");
     NoOpsCache cache = (NoOpsCache) FieldUtils.readField(store, "cache", true);
     Mockito.when(backend.update(eq(ident), eq(Entity.EntityType.CATALOG), any(Function.class)))
         .thenReturn(null);
+    AtomicReference<TransactionSynchronization> registered = new AtomicReference<>();
 
     try (MockedStatic<SessionUtils> sessions =
-        Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS)) {
+            Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS);
+        MockedStatic<SqlSessions> sqlSessions = Mockito.mockStatic(SqlSessions.class)) {
       sessions.when(SessionUtils::isInTransaction).thenReturn(true);
+      sqlSessions
+          .when(() -> SqlSessions.registerSynchronization(any(TransactionSynchronization.class)))
+          .thenAnswer(
+              invocation -> {
+                registered.set(invocation.getArgument(0));
+                return null;
+              });
       store.update(ident, null, Entity.EntityType.CATALOG, entity -> entity);
-      DeferredEntityCacheOps.discard();
+      registered.get().afterRollback();
     }
 
     Mockito.verify(cache, Mockito.never()).invalidate(ident, Entity.EntityType.CATALOG);
-    Assertions.assertEquals(0, DeferredEntityCacheOps.pendingCountForTesting());
   }
 
   @Test

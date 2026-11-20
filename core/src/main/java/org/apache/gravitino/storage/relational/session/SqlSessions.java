@@ -20,8 +20,11 @@
 package org.apache.gravitino.storage.relational.session;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.TransactionIsolationLevel;
@@ -38,8 +41,28 @@ public final class SqlSessions {
   private static final ThreadLocal<SqlSession> sessions = new ThreadLocal<>();
   private static final ThreadLocal<AtomicInteger> sessionCount =
       ThreadLocal.withInitial(() -> new AtomicInteger(0));
+  private static final ThreadLocal<List<TransactionSynchronization>> synchronizations =
+      ThreadLocal.withInitial(ArrayList::new);
 
   private SqlSessions() {}
+
+  /**
+   * Registers a synchronization for the current thread's outermost SQL session.
+   *
+   * <p>Callbacks run once when {@code sessionCount} reaches zero, after the JDBC commit or
+   * rollback. Nested session open/close pairs do not fire callbacks.
+   *
+   * @param synchronization the synchronization to register
+   * @throws IllegalStateException if the current thread has no open SQL session
+   */
+  public static void registerSynchronization(TransactionSynchronization synchronization) {
+    Preconditions.checkArgument(synchronization != null, "synchronization cannot be null");
+    if (sessions.get() == null) {
+      throw new IllegalStateException(
+          "No active SQL session on the current thread; cannot register synchronization");
+    }
+    synchronizations.get().add(synchronization);
+  }
 
   @VisibleForTesting
   static ThreadLocal<SqlSession> getSessions() {
@@ -157,6 +180,8 @@ public final class SqlSessions {
           // Ensure ThreadLocal is always cleaned up
           sessions.remove();
           sessionCount.remove();
+          // After JDBC commit/rollback so cache side effects see committed state.
+          notifySynchronizations(commit);
         }
       }
     } else if (count < 0) {
@@ -166,6 +191,26 @@ public final class SqlSessions {
           "Session count is negative: {}. Resetting session count and removing session.", count);
       sessions.remove();
       sessionCount.remove();
+      synchronizations.remove();
+    }
+  }
+
+  private static void notifySynchronizations(boolean committed) {
+    List<TransactionSynchronization> registered = synchronizations.get();
+    synchronizations.remove();
+    if (registered == null || registered.isEmpty()) {
+      return;
+    }
+    for (TransactionSynchronization synchronization : registered) {
+      try {
+        if (committed) {
+          synchronization.afterCommit();
+        } else {
+          synchronization.afterRollback();
+        }
+      } catch (RuntimeException e) {
+        LOG.warn("Transaction synchronization failed", e);
+      }
     }
   }
 }

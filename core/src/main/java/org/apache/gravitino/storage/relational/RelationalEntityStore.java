@@ -72,6 +72,8 @@ import org.apache.gravitino.metrics.MetricsSystem;
 import org.apache.gravitino.metrics.source.EntityChangeLogMetricsSource;
 import org.apache.gravitino.semantic.SemanticModelMetric;
 import org.apache.gravitino.storage.relational.service.EntityIdService;
+import org.apache.gravitino.storage.relational.session.SqlSessions;
+import org.apache.gravitino.storage.relational.session.TransactionSynchronization;
 import org.apache.gravitino.storage.relational.utils.ExceptionUtils;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.tag.TagValue;
@@ -870,17 +872,26 @@ public class RelationalEntityStore
   }
 
   private void invalidateCache(NameIdentifier ident, Entity.EntityType type) {
-    // Under an outer SQL session the row change is not committed yet. Keep the previous cache
-    // entry until the outermost commit flushes this invalidation (or rollback discards it), so
-    // peers cannot refill a pre-commit snapshot into a hole.
-    DeferredEntityCacheOps.runOrDefer(
-        SessionUtils.isInTransaction(),
-        () -> {
-          // Advance before removing, so a batchGet() that samples the epoch after this point reads
-          // the backend after the change that triggered the invalidation is visible.
-          cacheInvalidationEpoch.incrementAndGet();
-          cache.invalidate(ident, type);
-        });
+    if (SessionUtils.isInTransaction()) {
+      // Keep the previous cache entry until the outermost JDBC commit. Peers must not refill a
+      // pre-commit snapshot into an early hole; rollback leaves the cache untouched.
+      SqlSessions.registerSynchronization(
+          new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+              doInvalidateCache(ident, type);
+            }
+          });
+      return;
+    }
+    doInvalidateCache(ident, type);
+  }
+
+  private void doInvalidateCache(NameIdentifier ident, Entity.EntityType type) {
+    // Advance before removing, so a batchGet() that samples the epoch after this point reads the
+    // backend after the change that triggered the invalidation is visible.
+    cacheInvalidationEpoch.incrementAndGet();
+    cache.invalidate(ident, type);
   }
 
   @VisibleForTesting
