@@ -20,6 +20,7 @@ package org.apache.gravitino.storage.relational;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -49,11 +50,13 @@ import org.apache.gravitino.meta.DomainEntity;
 import org.apache.gravitino.meta.ModelEntity;
 import org.apache.gravitino.meta.TagEntity;
 import org.apache.gravitino.meta.TopicEntity;
+import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.utils.NamespaceUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 public class TestRelationalEntityStore {
@@ -66,6 +69,7 @@ public class TestRelationalEntityStore {
 
   @BeforeEach
   void setUp() throws IllegalAccessException {
+    DeferredEntityCacheOps.clearForTesting();
     store = new RelationalEntityStore();
     backend = Mockito.mock(RelationalBackend.class);
 
@@ -138,6 +142,63 @@ public class TestRelationalEntityStore {
     inOrder.verify(backend).insert(topic, true);
     inOrder.verify(cache).invalidate(ident, Entity.EntityType.TOPIC);
     Mockito.verify(cache, Mockito.never()).put(topic);
+  }
+
+  @Test
+  void testPutSkipsPublishWhileOuterTransactionOpen() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog", "schema", "topic");
+    TopicEntity topic = Mockito.mock(TopicEntity.class);
+    Mockito.when(topic.nameIdentifier()).thenReturn(ident);
+    Mockito.when(topic.type()).thenReturn(Entity.EntityType.TOPIC);
+    EntityCache cache = Mockito.mock(EntityCache.class);
+    FieldUtils.writeField(store, "cache", cache, true);
+
+    try (MockedStatic<SessionUtils> sessions =
+        Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS)) {
+      sessions.when(SessionUtils::isInTransaction).thenReturn(true);
+      store.put(topic, false);
+    }
+
+    Mockito.verify(backend).insert(topic, false);
+    Mockito.verify(cache).invalidateOnKeyChange(topic);
+    Mockito.verify(cache, Mockito.never()).put(topic);
+  }
+
+  @Test
+  void testUpdateDefersInvalidateWhileOuterTransactionOpen() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog");
+    NoOpsCache cache = (NoOpsCache) FieldUtils.readField(store, "cache", true);
+    Mockito.when(backend.update(eq(ident), eq(Entity.EntityType.CATALOG), any(Function.class)))
+        .thenReturn(null);
+
+    try (MockedStatic<SessionUtils> sessions =
+        Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS)) {
+      sessions.when(SessionUtils::isInTransaction).thenReturn(true);
+      store.update(ident, null, Entity.EntityType.CATALOG, entity -> entity);
+      Mockito.verify(cache, Mockito.never()).invalidate(ident, Entity.EntityType.CATALOG);
+      Assertions.assertEquals(1, DeferredEntityCacheOps.pendingCountForTesting());
+      DeferredEntityCacheOps.flush();
+    }
+
+    Mockito.verify(cache).invalidate(ident, Entity.EntityType.CATALOG);
+  }
+
+  @Test
+  void testDeferredInvalidateDiscardedOnRollback() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog");
+    NoOpsCache cache = (NoOpsCache) FieldUtils.readField(store, "cache", true);
+    Mockito.when(backend.update(eq(ident), eq(Entity.EntityType.CATALOG), any(Function.class)))
+        .thenReturn(null);
+
+    try (MockedStatic<SessionUtils> sessions =
+        Mockito.mockStatic(SessionUtils.class, CALLS_REAL_METHODS)) {
+      sessions.when(SessionUtils::isInTransaction).thenReturn(true);
+      store.update(ident, null, Entity.EntityType.CATALOG, entity -> entity);
+      DeferredEntityCacheOps.discard();
+    }
+
+    Mockito.verify(cache, Mockito.never()).invalidate(ident, Entity.EntityType.CATALOG);
+    Assertions.assertEquals(0, DeferredEntityCacheOps.pendingCountForTesting());
   }
 
   @Test

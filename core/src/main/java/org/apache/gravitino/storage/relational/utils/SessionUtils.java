@@ -22,6 +22,7 @@ package org.apache.gravitino.storage.relational.utils;
 import java.util.Arrays;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import org.apache.gravitino.storage.relational.DeferredEntityCacheOps;
 import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.ibatis.session.SqlSession;
 
@@ -41,8 +42,10 @@ public class SessionUtils {
       T mapper = SqlSessions.getMapper(mapperClazz);
       consumer.accept(mapper);
       SqlSessions.commitAndCloseSqlSession();
+      flushDeferredEntityCacheIfOutermost();
     } catch (Throwable t) {
       SqlSessions.rollbackAndCloseSqlSession();
+      discardDeferredEntityCacheIfOutermost();
       throw t;
     }
   }
@@ -56,9 +59,11 @@ public class SessionUtils {
       T mapper = SqlSessions.getMapper(mapperClazz);
       R result = func.apply(mapper);
       SqlSessions.commitAndCloseSqlSession();
+      flushDeferredEntityCacheIfOutermost();
       return result;
     } catch (Throwable t) {
       SqlSessions.rollbackAndCloseSqlSession();
+      discardDeferredEntityCacheIfOutermost();
       throw t;
     }
   }
@@ -128,8 +133,10 @@ public class SessionUtils {
     try {
       Arrays.stream(operations).forEach(Runnable::run);
       SqlSessions.commitAndCloseSqlSession();
+      flushDeferredEntityCacheIfOutermost();
     } catch (Throwable t) {
       SqlSessions.rollbackAndCloseSqlSession();
+      discardDeferredEntityCacheIfOutermost();
       throw t;
     }
   }
@@ -163,9 +170,31 @@ public class SessionUtils {
 
   public static void commitTransaction() {
     SqlSessions.commitAndCloseSqlSession();
+    flushDeferredEntityCacheIfOutermost();
   }
 
   public static void rollbackTransaction() {
     SqlSessions.rollbackAndCloseSqlSession();
+    discardDeferredEntityCacheIfOutermost();
+  }
+
+  /**
+   * Applies deferred entity-cache invalidations only when this thread no longer holds a SQL
+   * session, i.e. the outermost commit just completed.
+   */
+  private static void flushDeferredEntityCacheIfOutermost() {
+    if (!SqlSessions.hasActiveSession()) {
+      DeferredEntityCacheOps.flush();
+    }
+  }
+
+  /**
+   * Drops deferred entity-cache invalidations only when this thread no longer holds a SQL session,
+   * i.e. the outermost rollback just completed.
+   */
+  private static void discardDeferredEntityCacheIfOutermost() {
+    if (!SqlSessions.hasActiveSession()) {
+      DeferredEntityCacheOps.discard();
+    }
   }
 }
