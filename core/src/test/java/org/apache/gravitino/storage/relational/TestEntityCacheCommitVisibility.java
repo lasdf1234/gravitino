@@ -427,6 +427,52 @@ public class TestEntityCacheCommitVisibility {
   }
 
   @Test
+  void standaloneUpdateDropsTheCacheBeforeJdbcCommit() throws Exception {
+    cache.put(topic());
+    Mockito.doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              ThreadLocal<SqlSession> sessions =
+                  (ThreadLocal<SqlSession>)
+                      FieldUtils.readStaticField(SqlSessions.class, "sessions", true);
+              SqlSession spy = Mockito.spy(sessions.get());
+              Mockito.doAnswer(
+                      commit -> {
+                        Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+                        return commit.callRealMethod();
+                      })
+                  .when(spy)
+                  .commit();
+              sessions.set(spy);
+              return topic();
+            })
+        .when(backend)
+        .update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+
+    store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic());
+
+    Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
+  }
+
+  @Test
+  void standaloneUpdateFailureKeepsTheCommittedEntry() throws Exception {
+    TopicEntity committed = topic();
+    cache.put(committed);
+    Mockito.doThrow(new RuntimeException("update failed"))
+        .when(backend)
+        .update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+
+    Assertions.assertThrows(
+        RuntimeException.class,
+        () -> store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic()));
+
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
+    Assertions.assertSame(committed, store.get(IDENT, Entity.EntityType.TOPIC, TopicEntity.class));
+    Mockito.verify(backend, Mockito.never()).get(IDENT, Entity.EntityType.TOPIC);
+  }
+
+  @Test
   void deleteInsideATransactionKeepsTheCommittedEntryUntilCommit() throws Exception {
     cache.put(topic());
     Mockito.when(backend.delete(IDENT, Entity.EntityType.TOPIC, true)).thenReturn(true);
