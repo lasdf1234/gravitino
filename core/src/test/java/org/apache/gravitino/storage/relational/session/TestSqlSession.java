@@ -264,11 +264,16 @@ public class TestSqlSession {
   }
 
   @Test
-  public void testAfterSuccessfulCommitRunsOnlyOnOutermostCommit() {
+  public void testWrapOutermostCommitRunsOnlyOnOutermostCommit() {
     AtomicInteger runs = new AtomicInteger();
     SqlSessions.getSqlSession();
     SqlSessions.getSqlSession();
-    SqlSessions.afterSuccessfulCommit(runs::incrementAndGet);
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          runs.incrementAndGet();
+          jdbcCommit.run();
+        },
+        () -> {});
     SqlSessions.commitAndCloseSqlSession();
     assertEquals(0, runs.get());
     assertTrue(SqlSessions.hasActiveSession());
@@ -278,73 +283,131 @@ public class TestSqlSession {
   }
 
   @Test
-  public void testAfterSuccessfulCommitSeesClosedSession() {
-    AtomicBoolean openDuringCallback = new AtomicBoolean(true);
+  public void testWrapOutermostCommitSeesTheOpenSession() {
+    AtomicBoolean openDuringCommit = new AtomicBoolean();
     SqlSessions.getSqlSession();
-    SqlSessions.afterSuccessfulCommit(() -> openDuringCallback.set(SqlSessions.hasActiveSession()));
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          openDuringCommit.set(SqlSessions.hasActiveSession());
+          jdbcCommit.run();
+          assertTrue(SqlSessions.hasActiveSession());
+        },
+        () -> {});
     SqlSessions.commitAndCloseSqlSession();
-    assertFalse(openDuringCallback.get());
+    assertTrue(openDuringCommit.get());
+    assertFalse(SqlSessions.hasActiveSession());
   }
 
   @Test
-  public void testAfterSuccessfulCommitSkippedOnRollbackCloseAndFailedCommit() {
-    AtomicBoolean ran = new AtomicBoolean();
+  public void testWrapOutermostCommitAbortsOnRollbackCloseAndFailedCommit() {
+    AtomicBoolean committed = new AtomicBoolean();
+    AtomicInteger aborts = new AtomicInteger();
     SqlSessions.getSqlSession();
-    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          committed.set(true);
+          jdbcCommit.run();
+        },
+        aborts::incrementAndGet);
     SqlSessions.rollbackAndCloseSqlSession();
-    assertFalse(ran.get());
+    assertFalse(committed.get());
+    assertEquals(1, aborts.get());
 
     SqlSessions.getSqlSession();
-    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          committed.set(true);
+          jdbcCommit.run();
+        },
+        aborts::incrementAndGet);
     SqlSessions.closeSqlSession();
-    assertFalse(ran.get());
+    assertFalse(committed.get());
+    assertEquals(2, aborts.get());
 
     SqlSession real = SqlSessions.getSqlSession();
     SqlSession spy = Mockito.spy(real);
     Mockito.doThrow(new IllegalStateException("commit failed")).when(spy).commit();
     SqlSessions.getSessions().set(spy);
-    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          jdbcCommit.run();
+          committed.set(true);
+        },
+        aborts::incrementAndGet);
     assertThrows(IllegalStateException.class, SqlSessions::commitAndCloseSqlSession);
-    assertFalse(ran.get());
+    assertFalse(committed.get());
+    assertEquals(3, aborts.get());
     assertFalse(SqlSessions.hasActiveSession());
 
-    // A discarded action must not attach to the next session on this thread.
+    // A discarded wrapper must not attach to the next session on this thread.
     SqlSessions.getSqlSession();
     SqlSessions.commitAndCloseSqlSession();
-    assertFalse(ran.get());
+    assertFalse(committed.get());
+    assertEquals(3, aborts.get());
   }
 
   @Test
-  public void testAfterSuccessfulCommitContinuesAfterCallbackFailure() {
-    AtomicBoolean second = new AtomicBoolean();
+  public void testWrapOutermostCommitDoesNotAbortAfterJdbcCommit() {
+    AtomicBoolean aborted = new AtomicBoolean();
     SqlSessions.getSqlSession();
-    SqlSessions.afterSuccessfulCommit(
-        () -> {
-          throw new IllegalStateException("callback failed");
-        });
-    SqlSessions.afterSuccessfulCommit(() -> second.set(true));
-    SqlSessions.commitAndCloseSqlSession();
-    assertTrue(second.get());
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          jdbcCommit.run();
+          throw new IllegalStateException("after commit");
+        },
+        () -> aborted.set(true));
+    assertThrows(IllegalStateException.class, SqlSessions::commitAndCloseSqlSession);
+    assertFalse(aborted.get());
     assertFalse(SqlSessions.hasActiveSession());
   }
 
   @Test
-  public void testAfterSuccessfulCommitRequiresAnOpenSession() {
+  public void testWrapOutermostCommitDoesNotCommitWhenHookThrowsFirst() {
+    AtomicBoolean aborted = new AtomicBoolean();
+    SqlSession real = SqlSessions.getSqlSession();
+    SqlSession spy = Mockito.spy(real);
+    SqlSessions.getSessions().set(spy);
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          throw new IllegalStateException("before commit");
+        },
+        () -> aborted.set(true));
+    assertThrows(IllegalStateException.class, SqlSessions::commitAndCloseSqlSession);
+    Mockito.verify(spy, Mockito.never()).commit();
+    assertTrue(aborted.get());
     assertFalse(SqlSessions.hasActiveSession());
-    assertThrows(IllegalStateException.class, () -> SqlSessions.afterSuccessfulCommit(() -> {}));
+  }
+
+  @Test
+  public void testWrapOutermostCommitRequiresAnOpenSession() {
+    assertFalse(SqlSessions.hasActiveSession());
+    assertThrows(
+        IllegalStateException.class, () -> SqlSessions.wrapOutermostCommit(jdbc -> {}, () -> {}));
     SqlSessions.getSqlSession();
     try {
-      assertThrows(IllegalArgumentException.class, () -> SqlSessions.afterSuccessfulCommit(null));
+      assertThrows(
+          IllegalArgumentException.class, () -> SqlSessions.wrapOutermostCommit(null, () -> {}));
+      assertThrows(
+          IllegalArgumentException.class, () -> SqlSessions.wrapOutermostCommit(jdbc -> {}, null));
+      SqlSessions.wrapOutermostCommit(jdbcCommit -> jdbcCommit.run(), () -> {});
+      assertThrows(
+          IllegalStateException.class,
+          () -> SqlSessions.wrapOutermostCommit(jdbcCommit -> jdbcCommit.run(), () -> {}));
     } finally {
       SqlSessions.rollbackAndCloseSqlSession();
     }
   }
 
   @Test
-  public void testAfterSuccessfulCommitIsThreadLocal() throws Exception {
+  public void testWrapOutermostCommitIsThreadLocal() throws Exception {
     AtomicBoolean ran = new AtomicBoolean();
     SqlSessions.getSqlSession();
-    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    SqlSessions.wrapOutermostCommit(
+        jdbcCommit -> {
+          ran.set(true);
+          jdbcCommit.run();
+        },
+        () -> {});
     Thread other =
         new Thread(
             () -> {

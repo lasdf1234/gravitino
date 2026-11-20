@@ -51,6 +51,7 @@ import org.apache.gravitino.meta.TopicEntity;
 import org.apache.gravitino.storage.relational.session.SqlSessionFactoryHelper;
 import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
+import org.apache.ibatis.session.SqlSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
@@ -305,6 +306,124 @@ public class TestEntityCacheCommitVisibility {
     Assertions.assertTrue(cache.contains(IDENT, Entity.EntityType.TOPIC));
     SessionUtils.commitTransaction();
     Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+  }
+
+  @Test
+  void failedUpdateThenCommitDropsTheOldEntry() throws Exception {
+    cache.put(topic());
+    Mockito.doThrow(new RuntimeException("update failed"))
+        .when(backend)
+        .update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+    SessionUtils.beginTransaction();
+    Assertions.assertThrows(
+        RuntimeException.class,
+        () -> store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic()));
+    Assertions.assertTrue(cache.contains(IDENT, Entity.EntityType.TOPIC));
+    SessionUtils.commitTransaction();
+    Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+  }
+
+  @Test
+  void failedUpdateThenRollbackKeepsTheOldEntry() throws Exception {
+    TopicEntity committed = topic();
+    cache.put(committed);
+    Mockito.doThrow(new RuntimeException("update failed"))
+        .when(backend)
+        .update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+    SessionUtils.beginTransaction();
+    Assertions.assertThrows(
+        RuntimeException.class,
+        () -> store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic()));
+    SessionUtils.rollbackTransaction();
+    Assertions.assertSame(committed, store.get(IDENT, Entity.EntityType.TOPIC, TopicEntity.class));
+    Mockito.verify(backend, Mockito.never()).get(IDENT, Entity.EntityType.TOPIC);
+  }
+
+  @Test
+  void keyIsGoneBeforeJdbcCommit() throws Exception {
+    TopicEntity committed = topic();
+    cache.put(committed);
+    Mockito.doReturn(topic()).when(backend).update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+    Mockito.when(backend.get(IDENT, Entity.EntityType.TOPIC)).thenReturn(committed);
+    SessionUtils.beginTransaction();
+    store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic());
+    @SuppressWarnings("unchecked")
+    ThreadLocal<SqlSession> sessions =
+        (ThreadLocal<SqlSession>) FieldUtils.readStaticField(SqlSessions.class, "sessions", true);
+    SqlSession spy = Mockito.spy(sessions.get());
+    Mockito.doAnswer(
+            invocation -> {
+              Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+              // This thread still has the session, so the read must not refill the cache.
+              store.get(IDENT, Entity.EntityType.TOPIC, TopicEntity.class);
+              Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+              return invocation.callRealMethod();
+            })
+        .when(spy)
+        .commit();
+    sessions.set(spy);
+    SessionUtils.commitTransaction();
+    Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+  }
+
+  @Test
+  void preCommitReadIsNotPublishedAfterCommit() throws Exception {
+    TopicEntity committed = topic();
+    CountDownLatch readEntered = new CountDownLatch(1);
+    CountDownLatch finishRead = new CountDownLatch(1);
+    AtomicReference<Throwable> peerFailure = new AtomicReference<>();
+    Mockito.when(backend.get(IDENT, Entity.EntityType.TOPIC))
+        .thenAnswer(
+            invocation -> {
+              readEntered.countDown();
+              if (!finishRead.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("timed out waiting for the commit");
+              }
+              return committed;
+            });
+    Thread peer =
+        new Thread(
+            () -> {
+              try {
+                store.get(IDENT, Entity.EntityType.TOPIC, TopicEntity.class);
+              } catch (Throwable failure) {
+                peerFailure.set(failure);
+              }
+            });
+    peer.start();
+    Assertions.assertTrue(readEntered.await(10, TimeUnit.SECONDS));
+
+    Mockito.doReturn(topic()).when(backend).update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+    SessionUtils.beginTransaction();
+    store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic());
+    SessionUtils.commitTransaction();
+    finishRead.countDown();
+    peer.join(10_000);
+    Assertions.assertFalse(peer.isAlive());
+    Assertions.assertNull(peerFailure.get());
+    Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+  }
+
+  @Test
+  void failedJdbcCommitLeavesTheCacheEmpty() throws Exception {
+    cache.put(topic());
+    Mockito.doReturn(topic()).when(backend).update(eq(IDENT), eq(Entity.EntityType.TOPIC), any());
+    SessionUtils.beginTransaction();
+    store.update(IDENT, TopicEntity.class, Entity.EntityType.TOPIC, entity -> topic());
+    @SuppressWarnings("unchecked")
+    ThreadLocal<SqlSession> sessions =
+        (ThreadLocal<SqlSession>) FieldUtils.readStaticField(SqlSessions.class, "sessions", true);
+    SqlSession spy = Mockito.spy(sessions.get());
+    Mockito.doThrow(new IllegalStateException("commit failed")).when(spy).commit();
+    sessions.set(spy);
+    Assertions.assertThrows(IllegalStateException.class, SessionUtils::commitTransaction);
+    Assertions.assertFalse(cache.contains(IDENT, Entity.EntityType.TOPIC));
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
+
+    TopicEntity reloaded = topic();
+    Mockito.when(backend.get(IDENT, Entity.EntityType.TOPIC)).thenReturn(reloaded);
+    Assertions.assertSame(reloaded, store.get(IDENT, Entity.EntityType.TOPIC, TopicEntity.class));
+    Assertions.assertTrue(cache.contains(IDENT, Entity.EntityType.TOPIC));
   }
 
   @Test
