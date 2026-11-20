@@ -20,9 +20,12 @@
 package org.apache.gravitino.storage.relational.session;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.TransactionIsolationLevel;
 import org.slf4j.Logger;
@@ -32,14 +35,48 @@ import org.slf4j.LoggerFactory;
  * SqlSessions is a utility class to maintain the MyBatis's {@link SqlSession} object. It is a
  * thread local class and should be used to get the {@link SqlSession} object. It also provides the
  * methods to commit, rollback and close the {@link SqlSession} object.
+ *
+ * <p>{@link #wrapOutermostCommit(Consumer, Runnable)} runs only when this thread's outermost
+ * session commits or aborts. Nested boundaries do not run it.
  */
 public final class SqlSessions {
   private static final Logger LOG = LoggerFactory.getLogger(SqlSessions.class);
   private static final ThreadLocal<SqlSession> sessions = new ThreadLocal<>();
   private static final ThreadLocal<AtomicInteger> sessionCount =
       ThreadLocal.withInitial(() -> new AtomicInteger(0));
+  private static final ThreadLocal<Consumer<Runnable>> outermostCommit = new ThreadLocal<>();
+  private static final ThreadLocal<Runnable> outermostAbort = new ThreadLocal<>();
 
   private SqlSessions() {}
+
+  /**
+   * Wraps the JDBC commit of the current thread's outermost SQL session.
+   *
+   * <p>{@code commit} is called only when that session commits. It is given the JDBC commit and
+   * must call it once. Cache entries that the commit must not leave behind are removed before that
+   * call, so they are gone before the database change is visible. Nested commits do not call {@code
+   * commit}. Rollback, a plain close, and a failure before the JDBC commit call {@code abort} and
+   * do not commit.
+   *
+   * @param commit wraps the JDBC commit of the outermost session
+   * @param abort drops work that must not be applied when the session does not commit
+   * @throws IllegalArgumentException if either argument is null
+   * @throws IllegalStateException if the current thread has no open SQL session, or a wrapper is
+   *     already registered
+   */
+  public static void wrapOutermostCommit(Consumer<Runnable> commit, Runnable abort) {
+    Preconditions.checkArgument(commit != null, "commit cannot be null");
+    Preconditions.checkArgument(abort != null, "abort cannot be null");
+    if (sessions.get() == null) {
+      throw new IllegalStateException(
+          "No active SQL session on the current thread; cannot wrap its commit");
+    }
+    if (outermostCommit.get() != null) {
+      throw new IllegalStateException("An outermost commit wrapper is already registered");
+    }
+    outermostCommit.set(commit);
+    outermostAbort.set(abort);
+  }
 
   @VisibleForTesting
   static ThreadLocal<SqlSession> getSessions() {
@@ -134,30 +171,49 @@ public final class SqlSessions {
   private static void handleSessionClose(boolean commit, boolean rollback) {
     SqlSession sqlSession = sessions.get();
     if (sqlSession == null) {
+      // Nothing committed. Drop queued work so it cannot attach to a later session on this thread.
+      abortOutermost();
       return;
     }
 
     int count = sessionCount.get().decrementAndGet();
     if (count == 0) {
+      AtomicBoolean committed = new AtomicBoolean(false);
+      RuntimeException failure = null;
       try {
         if (commit) {
-          sqlSession.commit();
+          failure = commitOutermost(sqlSession, committed);
         } else if (rollback) {
           // Force the JDBC rollback. A policy lifecycle hook can write on this connection without
-          // going
-          // through a mapped statement, and MyBatis skips rollback when the session looks clean.
-          // Closing that session then turns auto-commit back on, which would commit the hook write.
+          // going through a mapped statement, and MyBatis skips rollback when the session looks
+          // clean. Closing that session then turns auto-commit back on, which would commit the
+          // hook write.
           sqlSession.rollback(true);
         }
       } finally {
         try {
-          // Ensure the session is always closed
+          // Ensure the session is always closed. A plain close rolls the connection back
+          // (auto-commit is off).
           sqlSession.close();
+        } catch (RuntimeException closeFailure) {
+          if (failure == null) {
+            failure = closeFailure;
+          } else {
+            failure.addSuppressed(closeFailure);
+          }
         } finally {
-          // Ensure ThreadLocal is always cleaned up
           sessions.remove();
           sessionCount.remove();
+          if (committed.get()) {
+            outermostCommit.remove();
+            outermostAbort.remove();
+          } else {
+            abortOutermost();
+          }
         }
+      }
+      if (failure != null) {
+        throw failure;
       }
     } else if (count < 0) {
       // This should not happen if the session management is correct.
@@ -166,6 +222,55 @@ public final class SqlSessions {
           "Session count is negative: {}. Resetting session count and removing session.", count);
       sessions.remove();
       sessionCount.remove();
+      abortOutermost();
+    }
+  }
+
+  private static RuntimeException commitOutermost(SqlSession sqlSession, AtomicBoolean committed) {
+    Consumer<Runnable> hook = outermostCommit.get();
+    try {
+      if (hook != null) {
+        hook.accept(
+            () -> {
+              sqlSession.commit();
+              committed.set(true);
+            });
+        // Returning without calling the JDBC commit leaves the transaction uncommitted.
+        if (!committed.get()) {
+          rollbackQuietly(sqlSession);
+        }
+      } else {
+        sqlSession.commit();
+        committed.set(true);
+      }
+      return null;
+    } catch (RuntimeException failure) {
+      if (!committed.get()) {
+        rollbackQuietly(sqlSession);
+      }
+      return failure;
+    }
+  }
+
+  private static void rollbackQuietly(SqlSession sqlSession) {
+    try {
+      sqlSession.rollback(true);
+    } catch (RuntimeException rollbackFailure) {
+      LOG.warn("Rollback after a failed SQL commit failed", rollbackFailure);
+    }
+  }
+
+  private static void abortOutermost() {
+    Runnable abort = outermostAbort.get();
+    outermostCommit.remove();
+    outermostAbort.remove();
+    if (abort == null) {
+      return;
+    }
+    try {
+      abort.run();
+    } catch (RuntimeException failure) {
+      LOG.error("Failed to discard cache work for an aborted SQL transaction", failure);
     }
   }
 }

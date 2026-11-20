@@ -26,11 +26,13 @@ import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -72,7 +74,10 @@ import org.apache.gravitino.metrics.MetricsSystem;
 import org.apache.gravitino.metrics.source.EntityChangeLogMetricsSource;
 import org.apache.gravitino.semantic.SemanticModelMetric;
 import org.apache.gravitino.storage.relational.service.EntityIdService;
+import org.apache.gravitino.storage.relational.session.SqlSessionFactoryHelper;
+import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.gravitino.storage.relational.utils.ExceptionUtils;
+import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.tag.TagValue;
 import org.apache.gravitino.utils.Executable;
 import org.slf4j.Logger;
@@ -113,6 +118,16 @@ public class RelationalEntityStore
   // change log. A shared cache without a local change-log listener needs its own distributed
   // version check: this counter cannot detect changes made on another node.
   private final AtomicLong cacheInvalidationEpoch = new AtomicLong();
+
+  // Held while dropping keys and while the outermost SQL commit runs, and also while a read checks
+  // or fills the cache. It is never held across a database read. Changed keys are removed before
+  // the JDBC commit returns, and the epoch is advanced again before the lock is released, so a
+  // reader cannot observe the old row or put that pre-commit row back.
+  private final Object committedCacheLock = new Object();
+  private final ThreadLocal<Set<EntityCacheKey>> pendingInvalidations =
+      ThreadLocal.withInitial(LinkedHashSet::new);
+  private final ThreadLocal<Boolean> commitHookInstalled =
+      ThreadLocal.withInitial(() -> Boolean.FALSE);
 
   // Non-null only for a LOCAL_PER_NODE cache, which needs cross-node invalidation. SHARED and NONE
   // caches have no per-node copy to invalidate, so no listener is registered.
@@ -271,25 +286,45 @@ public class RelationalEntityStore
 
   @Override
   public boolean exists(NameIdentifier ident, Entity.EntityType entityType) throws IOException {
-    boolean existsInCache = cache.contains(ident, entityType);
-    return existsInCache || backend.exists(ident, entityType);
+    if (!useCommittedCache()) {
+      return backend.exists(ident, entityType);
+    }
+    synchronized (committedCacheLock) {
+      if (cache.contains(ident, entityType)) {
+        return true;
+      }
+    }
+    return backend.exists(ident, entityType);
   }
 
   @Override
   public <E extends Entity & HasIdentifier> void put(E e, boolean overwritten)
       throws IOException, EntityAlreadyExistsException {
-    long epochBeforeWrite = cacheInvalidationEpoch.get();
-    try {
-      backend.insert(e, overwritten);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(re, e.type(), e.nameIdentifier());
+    // A plain insert can be cached after it commits. Overwrite and an already-open transaction
+    // reload instead: the stored row may not match this copy, and a rollback must not leave it.
+    boolean ownCommit = ownsTheCommit();
+    long epochBeforeWrite;
+    synchronized (committedCacheLock) {
+      epochBeforeWrite = cacheInvalidationEpoch.get();
     }
-    if (overwritten) {
-      // An overwrite is resolved by the database, which may keep the identity and version of the
-      // row it already had. Caching the copy handed in here would publish values the stored row
-      // does not carry, so the next read is served from the backend instead.
-      invalidateCache(e.nameIdentifier(), e.type());
-    } else {
+    inItsOwnTransaction(
+        () -> {
+          try {
+            backend.insert(e, overwritten);
+          } catch (RuntimeException re) {
+            if (SessionUtils.isInTransaction()) {
+              invalidateCache(e.nameIdentifier(), e.type());
+            }
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(re, e.type(), e.nameIdentifier());
+          }
+          if (overwritten || (SessionUtils.isInTransaction() && !ownCommit)) {
+            invalidateCache(e.nameIdentifier(), e.type());
+          } else if (!ownCommit) {
+            cacheIfEpochUnchanged(e, epochBeforeWrite);
+          }
+          return null;
+        });
+    if (ownCommit && !overwritten) {
       cacheIfEpochUnchanged(e, epochBeforeWrite);
     }
   }
@@ -298,74 +333,87 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> E update(
       NameIdentifier ident, Class<E> type, Entity.EntityType entityType, Function<E, E> updater)
       throws IOException, NoSuchEntityException, EntityAlreadyExistsException {
-    E updatedEntity;
-    try {
-      updatedEntity = backend.update(ident, entityType, updater);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
-    }
-    invalidateCache(ident, entityType);
-    return updatedEntity;
+    return inItsOwnTransaction(
+        () -> {
+          boolean finished = false;
+          try {
+            E updated = backend.update(ident, entityType, updater);
+            finished = true;
+            return updated;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
+          } finally {
+            invalidateChanged(finished, ident, entityType);
+          }
+        });
   }
 
   @Override
   public <E extends Entity & HasIdentifier> E get(
       NameIdentifier ident, Entity.EntityType entityType, Class<E> e)
       throws NoSuchEntityException, IOException {
-    return cache.withCacheLock(
-        EntityCacheKey.of(ident, entityType),
-        () -> {
-          Optional<E> entityFromCache = cache.getIfPresent(ident, entityType);
-          if (entityFromCache.isPresent()) {
-            return entityFromCache.get();
-          }
-
-          long epochBeforeRead = cacheInvalidationEpoch.get();
-          E entity = backend.get(ident, entityType);
-          // The SPI does not require reentrant locks. Publish under the lock already held here.
-          publishIfEpochUnchanged(entity, epochBeforeRead);
-          return entity;
-        });
+    if (!useCommittedCache()) {
+      return backend.get(ident, entityType);
+    }
+    long epochBeforeRead;
+    Optional<E> cached;
+    synchronized (committedCacheLock) {
+      epochBeforeRead = cacheInvalidationEpoch.get();
+      cached = cache.getIfPresent(ident, entityType);
+    }
+    if (cached.isPresent()) {
+      return cached.get();
+    }
+    E loaded = backend.get(ident, entityType);
+    cacheIfEpochUnchanged(loaded, epochBeforeRead);
+    return loaded;
   }
 
   @Override
   public <E extends Entity & HasIdentifier> List<E> batchGet(
       List<NameIdentifier> idents, Entity.EntityType entityType, Class<E> clazz) {
-    List<E> allEntities = new ArrayList<>();
-    List<NameIdentifier> noCacheIdents =
-        idents.stream()
-            .filter(
-                ident -> {
-                  Optional<E> entity = cache.getIfPresent(ident, entityType);
-                  entity.ifPresent(allEntities::add);
-                  return entity.isEmpty();
-                })
-            .toList();
-    // Batch reads avoid holding multiple key locks across database I/O. Both point and batch
-    // reads use an epoch guard: ancestor invalidation can race a point read too, because ancestor
-    // and child keys need not share a segment lock.
-    long epochBeforeRead = cacheInvalidationEpoch.get();
-    List<E> fetchEntities = backend.batchGet(noCacheIdents, entityType);
-    for (E entity : fetchEntities) {
-      cacheIfEpochUnchanged(entity, epochBeforeRead);
-      allEntities.add(entity);
+    if (!useCommittedCache()) {
+      return backend.batchGet(idents, entityType);
     }
-    return allEntities;
+    long epochBeforeRead;
+    List<E> hits = new ArrayList<>();
+    List<NameIdentifier> misses = new ArrayList<>();
+    synchronized (committedCacheLock) {
+      epochBeforeRead = cacheInvalidationEpoch.get();
+      for (NameIdentifier ident : idents) {
+        Optional<E> cached = cache.getIfPresent(ident, entityType);
+        if (cached.isPresent()) {
+          hits.add(cached.get());
+        } else {
+          misses.add(ident);
+        }
+      }
+    }
+    if (!misses.isEmpty()) {
+      List<E> loaded = backend.batchGet(misses, entityType);
+      for (E entity : loaded) {
+        cacheIfEpochUnchanged(entity, epochBeforeRead);
+        hits.add(entity);
+      }
+    }
+    return hits;
   }
 
   @Override
   public boolean delete(NameIdentifier ident, Entity.EntityType entityType, boolean cascade)
       throws IOException {
-    try {
-      boolean deleted = backend.delete(ident, entityType, cascade);
-      return deleted;
-    } catch (NoSuchEntityException e) {
-      return false;
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
-    } finally {
-      invalidateCache(ident, entityType);
-    }
+    return inItsOwnTransaction(
+        () -> {
+          try {
+            return backend.delete(ident, entityType, cascade);
+          } catch (NoSuchEntityException e) {
+            return false;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
+          } finally {
+            invalidateCache(ident, entityType);
+          }
+        });
   }
 
   @Override
@@ -375,26 +423,32 @@ public class RelationalEntityStore
       Class<E> clazz,
       Consumer<E> postDeleteAction)
       throws IOException {
-    try {
-      return backend.deleteAndGet(ident, entityType, clazz, postDeleteAction);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
-    } finally {
-      invalidateCache(ident, entityType);
-    }
+    return inItsOwnTransaction(
+        () -> {
+          try {
+            return backend.deleteAndGet(ident, entityType, clazz, postDeleteAction);
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
+          } finally {
+            invalidateCache(ident, entityType);
+          }
+        });
   }
 
   @Override
   public Optional<SchemaEntity> deleteSchemaAndGet(
       NameIdentifier ident, boolean cascadeFunctions, Consumer<SchemaEntity> postDeleteAction)
       throws IOException {
-    try {
-      return backend.deleteSchemaAndGet(ident, cascadeFunctions, postDeleteAction);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(re, Entity.EntityType.SCHEMA, ident);
-    } finally {
-      invalidateCache(ident, Entity.EntityType.SCHEMA);
-    }
+    return inItsOwnTransaction(
+        () -> {
+          try {
+            return backend.deleteSchemaAndGet(ident, cascadeFunctions, postDeleteAction);
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(re, Entity.EntityType.SCHEMA, ident);
+          } finally {
+            invalidateCache(ident, Entity.EntityType.SCHEMA);
+          }
+        });
   }
 
   @Override
@@ -479,14 +533,21 @@ public class RelationalEntityStore
   public void insertDomainWithNewBackingTag(
       DomainEntity domain, TagEntity backingTag, Consumer<LockedDomainState> check)
       throws IOException {
-    try {
-      backend.insertDomainWithNewBackingTag(domain, backingTag, check);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(
-          re, Entity.EntityType.DOMAIN, domain.nameIdentifier());
-    }
-    // Tags are cached; the new tag must not be shadowed by an entry cached for its name.
-    invalidateCache(backingTag.nameIdentifier(), Entity.EntityType.TAG);
+    inItsOwnTransaction(
+        () -> {
+          boolean finished = false;
+          try {
+            backend.insertDomainWithNewBackingTag(domain, backingTag, check);
+            finished = true;
+            return null;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(
+                re, Entity.EntityType.DOMAIN, domain.nameIdentifier());
+          } finally {
+            // Tags are cached; the new tag must not be shadowed by an entry cached for its name.
+            invalidateChanged(finished, backingTag.nameIdentifier(), Entity.EntityType.TAG);
+          }
+        });
   }
 
   @Override
@@ -616,25 +677,29 @@ public class RelationalEntityStore
       Entity.EntityType dstType,
       boolean override)
       throws IOException {
-    try {
-      backend.insertRelation(relType, srcIdentifier, srcType, dstIdentifier, dstType, override);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(
-          re,
-          String.format(
-              "The %s relation of %s %s",
-              relType.name().toLowerCase(Locale.ROOT),
-              srcType.name().toLowerCase(Locale.ROOT),
-              srcIdentifier));
-    }
-    // Relation query results themselves are not cached, but both endpoints may be cached entities
-    // (OWNER_REL, TAG_METADATA_OBJECT_REL and METADATA_OBJECT_ROLE_REL are keyed by
-    // catalog/schema/table/... on the source side), so drop their entries conservatively: a
-    // relation write can change data materialized into the endpoint entity. Note this is not free —
-    // EntityCache#invalidate cascades over the identifier hierarchy, so invalidating a catalog also
-    // drops every cached schema and table beneath it.
-    invalidateCache(srcIdentifier, srcType);
-    invalidateCache(dstIdentifier, dstType);
+    inItsOwnTransaction(
+        () -> {
+          boolean finished = false;
+          try {
+            backend.insertRelation(
+                relType, srcIdentifier, srcType, dstIdentifier, dstType, override);
+            finished = true;
+            return null;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(
+                re,
+                String.format(
+                    "The %s relation of %s %s",
+                    relType.name().toLowerCase(Locale.ROOT),
+                    srcType.name().toLowerCase(Locale.ROOT),
+                    srcIdentifier));
+          } finally {
+            // Relation results are not cached, but both endpoints may be. Invalidating cascades
+            // over the name hierarchy, so a catalog also drops the schemas and tables under it.
+            invalidateChanged(finished, srcIdentifier, srcType);
+            invalidateChanged(finished, dstIdentifier, dstType);
+          }
+        });
   }
 
   @Override
@@ -649,25 +714,30 @@ public class RelationalEntityStore
     if (srcIdentifiers == null || srcIdentifiers.isEmpty()) {
       return;
     }
-    try {
-      backend.batchInsertRelations(
-          relType, srcIdentifiers, srcType, dstIdentifier, dstType, override);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(
-          re,
-          String.format(
-              "The %s relations of %d %s entities starting with %s",
-              relType.name().toLowerCase(Locale.ROOT),
-              srcIdentifiers.size(),
-              srcType.name().toLowerCase(Locale.ROOT),
-              srcIdentifiers.get(0)));
-    }
-    // Invalidate both endpoints for the same reason as insertRelation, including the hierarchy
-    // cascade noted there.
-    for (NameIdentifier ident : srcIdentifiers) {
-      invalidateCache(ident, srcType);
-    }
-    invalidateCache(dstIdentifier, dstType);
+    inItsOwnTransaction(
+        () -> {
+          boolean finished = false;
+          try {
+            backend.batchInsertRelations(
+                relType, srcIdentifiers, srcType, dstIdentifier, dstType, override);
+            finished = true;
+            return null;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(
+                re,
+                String.format(
+                    "The %s relations of %d %s entities starting with %s",
+                    relType.name().toLowerCase(Locale.ROOT),
+                    srcIdentifiers.size(),
+                    srcType.name().toLowerCase(Locale.ROOT),
+                    srcIdentifiers.get(0)));
+          } finally {
+            for (NameIdentifier ident : srcIdentifiers) {
+              invalidateChanged(finished, ident, srcType);
+            }
+            invalidateChanged(finished, dstIdentifier, dstType);
+          }
+        });
   }
 
   @Override
@@ -689,20 +759,30 @@ public class RelationalEntityStore
       return updateEntityRelations(update);
     }
 
-    List<E> result;
-    try {
-      result =
-          backend.updateEntityRelations(
-              relType, srcEntityIdent, srcEntityType, destEntitiesToAdd, destEntitiesToRemove);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(re, srcEntityType, srcEntityIdent);
-    }
-    Entity.EntityType targetEntityType = relationUpdateTargetType(relType);
-    invalidateCache(srcEntityIdent, srcEntityType);
-    invalidateRelationTargetCache(targetEntityType, update.targetsToAdd());
-    invalidateRelationTargetCache(targetEntityType, update.targetsToRemove());
-
-    return result;
+    return inItsOwnTransaction(
+        () -> {
+          boolean finished = false;
+          try {
+            List<E> result =
+                backend.updateEntityRelations(
+                    relType,
+                    srcEntityIdent,
+                    srcEntityType,
+                    destEntitiesToAdd,
+                    destEntitiesToRemove);
+            finished = true;
+            return result;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(re, srcEntityType, srcEntityIdent);
+          } finally {
+            if (finished || SessionUtils.isInTransaction()) {
+              Entity.EntityType targetEntityType = relationUpdateTargetType(relType);
+              invalidateCache(srcEntityIdent, srcEntityType);
+              invalidateRelationTargetCache(targetEntityType, update.targetsToAdd());
+              invalidateRelationTargetCache(targetEntityType, update.targetsToRemove());
+            }
+          }
+        });
   }
 
   @Override
@@ -726,22 +806,25 @@ public class RelationalEntityStore
 
     RelationEdgeTarget[] targetsToAdd = update.targetsToAdd();
     RelationEdgeTarget[] targetsToRemove = update.targetsToRemove();
-    List<E> result;
-    try {
-      result = backend.updateEntityRelations(update);
-    } catch (RuntimeException re) {
-      throw ExceptionUtils.lockWaitTimeoutAsConflict(
-          re, update.sourceEntityType(), update.sourceIdentifier());
-    }
-
-    // Invalidate after the backend write, not before: invalidating first opens a window where a
-    // concurrent read could repopulate the cache with stale pre-commit data.
-    Entity.EntityType targetEntityType = relationUpdateTargetType(update.relationType());
-    invalidateCache(update.sourceIdentifier(), update.sourceEntityType());
-    invalidateRelationTargetCache(targetEntityType, targetsToAdd);
-    invalidateRelationTargetCache(targetEntityType, targetsToRemove);
-
-    return result;
+    return inItsOwnTransaction(
+        () -> {
+          boolean finished = false;
+          try {
+            List<E> result = backend.updateEntityRelations(update);
+            finished = true;
+            return result;
+          } catch (RuntimeException re) {
+            throw ExceptionUtils.lockWaitTimeoutAsConflict(
+                re, update.sourceEntityType(), update.sourceIdentifier());
+          } finally {
+            if (finished || SessionUtils.isInTransaction()) {
+              Entity.EntityType targetEntityType = relationUpdateTargetType(update.relationType());
+              invalidateCache(update.sourceIdentifier(), update.sourceEntityType());
+              invalidateRelationTargetCache(targetEntityType, targetsToAdd);
+              invalidateRelationTargetCache(targetEntityType, targetsToRemove);
+            }
+          }
+        });
   }
 
   @Override
@@ -838,41 +921,148 @@ public class RelationalEntityStore
   private <E extends Entity & HasIdentifier> void cacheIfEpochUnchanged(E entity, long epoch) {
     if (cache instanceof BaseEntityCache && !BaseEntityCache.isCacheable(entity.type())) {
       // Uncached entities still invoke the cache's related-invalidation hook. There is no stale
-      // value to publish, and taking this entity's key lock can nest locks inside that hook.
+      // value to publish.
       cache.put(entity);
       return;
     }
-    cache.withCacheLock(
-        EntityCacheKey.of(entity.nameIdentifier(), entity.type()),
-        () -> publishIfEpochUnchanged(entity, epoch));
-  }
-
-  // The caller holds the entry's cache lock; do not acquire it again here.
-  private <E extends Entity & HasIdentifier> void publishIfEpochUnchanged(E entity, long epoch) {
-    if (cache instanceof BaseEntityCache && !BaseEntityCache.isCacheable(entity.type())) {
-      cache.put(entity);
-      return;
-    }
-    if (cacheInvalidationEpoch.get() == epoch) {
-      cache.put(entity);
-      // The key lock excludes same-key invalidation, but an ancestor can advance the epoch
-      // while put runs on another segment. Remove a raced publication before releasing it.
-      if (cacheInvalidationEpoch.get() != epoch) {
-        cache.invalidate(entity.nameIdentifier(), entity.type());
+    synchronized (committedCacheLock) {
+      // Invalidation takes this same lock, so the epoch cannot move between the check and put.
+      if (cacheInvalidationEpoch.get() == epoch) {
+        cache.put(entity);
       }
     }
   }
 
+  /**
+   * Whether this thread may read or publish the process-wide entity cache.
+   *
+   * <p>An open session has not committed. Reads use that connection and are not published. Writes
+   * only remember keys. {@link #inItsOwnTransaction(Callable)} commits them by removing those keys
+   * before the JDBC commit. A rollback forgets the keys. With no session, including the change-log
+   * poller, the change is already durable and the cache is updated immediately.
+   *
+   * @return {@code false} when this thread must ignore the process cache
+   */
+  private boolean useCommittedCache() {
+    return !SessionUtils.isInTransaction();
+  }
+
+  /** This call opens the commit when the caller has no session and a database is configured. */
+  private boolean ownsTheCommit() {
+    return !SessionUtils.isInTransaction() && SqlSessionFactoryHelper.getInstance().isInitialized();
+  }
+
+  /**
+   * Runs {@code write}. If this thread has no session, opens one so the backend joins it, then
+   * commits after {@code write} returns. Remembered cache keys are removed before that commit. An
+   * already-open session is left for the caller. A mock store has no database and just runs {@code
+   * write}.
+   */
+  private <T> T inItsOwnTransaction(Callable<T> write) throws IOException {
+    if (!ownsTheCommit()) {
+      return call(write);
+    }
+    SessionUtils.beginTransaction();
+    boolean committed = false;
+    try {
+      T result = call(write);
+      SessionUtils.commitTransaction();
+      committed = true;
+      return result;
+    } finally {
+      if (!committed && SessionUtils.isInTransaction()) {
+        SessionUtils.rollbackTransaction();
+      }
+    }
+  }
+
+  private static <T> T call(Callable<T> write) throws IOException {
+    try {
+      return write.call();
+    } catch (IOException | RuntimeException failure) {
+      throw failure;
+    } catch (Exception failure) {
+      throw new IOException(failure);
+    }
+  }
+
+  /**
+   * Drops {@code ident} when the write completed, and also when it failed inside an open
+   * transaction. A failure with no open session was already rolled back by the backend, so the
+   * committed cache is still correct.
+   */
+  private void invalidateChanged(boolean finished, NameIdentifier ident, Entity.EntityType type) {
+    if (finished || SessionUtils.isInTransaction()) {
+      invalidateCache(ident, type);
+    }
+  }
+
   private void invalidateCache(NameIdentifier ident, Entity.EntityType type) {
-    // Advance before removing, so a batchGet() that samples the epoch after this point reads the
-    // backend after the change that triggered the invalidation is visible.
-    cacheInvalidationEpoch.incrementAndGet();
-    cache.invalidate(ident, type);
+    if (SessionUtils.isInTransaction()) {
+      pendingInvalidations.get().add(EntityCacheKey.of(ident, type));
+      if (!commitHookInstalled.get()) {
+        SqlSessions.wrapOutermostCommit(
+            this::commitPendingInvalidations, this::discardPendingInvalidations);
+        commitHookInstalled.set(Boolean.TRUE);
+      }
+      return;
+    }
+    synchronized (committedCacheLock) {
+      cacheInvalidationEpoch.incrementAndGet();
+      cache.invalidate(ident, type);
+    }
+  }
+
+  private void commitPendingInvalidations(Runnable jdbcCommit) {
+    synchronized (committedCacheLock) {
+      cacheInvalidationEpoch.incrementAndGet();
+      try {
+        dropPendingKeys();
+        jdbcCommit.run();
+        // A write on this thread during commit() joins the same transaction. Drop those keys too,
+        // still before the lock is released. The commit has already succeeded, so a failure here
+        // empties the cache instead of failing the caller.
+        try {
+          dropPendingKeys();
+        } catch (RuntimeException failure) {
+          cache.clear();
+          LOGGER.error("Failed to drop cache keys written during SQL commit", failure);
+        }
+      } catch (RuntimeException failure) {
+        // A partial removal or a failed commit must not leave a mix of old and new rows.
+        cache.clear();
+        throw failure;
+      } finally {
+        // Move the epoch again before releasing the lock, so a read that loaded the pre-commit
+        // row cannot publish it.
+        cacheInvalidationEpoch.incrementAndGet();
+        discardPendingInvalidations();
+      }
+    }
+  }
+
+  private void dropPendingKeys() {
+    Set<EntityCacheKey> pending = pendingInvalidations.get();
+    if (pending.isEmpty()) {
+      return;
+    }
+    List<EntityCacheKey> keys = new ArrayList<>(pending);
+    pending.clear();
+    for (EntityCacheKey key : keys) {
+      cache.invalidate(key.identifier(), key.entityType());
+    }
+  }
+
+  private void discardPendingInvalidations() {
+    pendingInvalidations.remove();
+    commitHookInstalled.remove();
   }
 
   @VisibleForTesting
   void clearCache() {
-    cacheInvalidationEpoch.incrementAndGet();
-    cache.clear();
+    synchronized (committedCacheLock) {
+      cacheInvalidationEpoch.incrementAndGet();
+      cache.clear();
+    }
   }
 }
