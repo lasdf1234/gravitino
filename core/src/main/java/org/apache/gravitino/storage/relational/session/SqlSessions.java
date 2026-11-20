@@ -35,33 +35,41 @@ import org.slf4j.LoggerFactory;
  * SqlSessions is a utility class to maintain the MyBatis's {@link SqlSession} object. It is a
  * thread local class and should be used to get the {@link SqlSession} object. It also provides the
  * methods to commit, rollback and close the {@link SqlSession} object.
+ *
+ * <p>Work registered with {@link #afterSuccessfulCommit(Runnable)} runs once, after the outermost
+ * session's JDBC commit has returned. Nested session boundaries do not run it. Rollback, a plain
+ * close, and a commit that throws drop it.
  */
 public final class SqlSessions {
   private static final Logger LOG = LoggerFactory.getLogger(SqlSessions.class);
   private static final ThreadLocal<SqlSession> sessions = new ThreadLocal<>();
   private static final ThreadLocal<AtomicInteger> sessionCount =
       ThreadLocal.withInitial(() -> new AtomicInteger(0));
-  private static final ThreadLocal<List<TransactionSynchronization>> synchronizations =
+  private static final ThreadLocal<List<Runnable>> afterCommitActions =
       ThreadLocal.withInitial(ArrayList::new);
 
   private SqlSessions() {}
 
   /**
-   * Registers a synchronization for the current thread's outermost SQL session.
+   * Runs {@code action} after the current thread's outermost SQL session commits successfully.
    *
-   * <p>Callbacks run once when {@code sessionCount} reaches zero, after the JDBC commit or
-   * rollback. Nested session open/close pairs do not fire callbacks.
+   * <p>The action runs after the session has been closed and removed, so it must not use this
+   * session. It does not run when the outermost boundary rolls back, closes without committing, or
+   * when {@link SqlSession#commit()} throws. A nested {@code commitAndCloseSqlSession} only
+   * decrements the session count and leaves the action queued. An action that throws is logged; the
+   * transaction is already committed, and later actions from the same commit still run.
    *
-   * @param synchronization the synchronization to register
+   * @param action the work to run after a successful outermost commit
+   * @throws IllegalArgumentException if {@code action} is null
    * @throws IllegalStateException if the current thread has no open SQL session
    */
-  public static void registerSynchronization(TransactionSynchronization synchronization) {
-    Preconditions.checkArgument(synchronization != null, "synchronization cannot be null");
+  public static void afterSuccessfulCommit(Runnable action) {
+    Preconditions.checkArgument(action != null, "action cannot be null");
     if (sessions.get() == null) {
       throw new IllegalStateException(
-          "No active SQL session on the current thread; cannot register synchronization");
+          "No active SQL session on the current thread; cannot defer work until commit");
     }
-    synchronizations.get().add(synchronization);
+    afterCommitActions.get().add(action);
   }
 
   @VisibleForTesting
@@ -157,14 +165,18 @@ public final class SqlSessions {
   private static void handleSessionClose(boolean commit, boolean rollback) {
     SqlSession sqlSession = sessions.get();
     if (sqlSession == null) {
+      // Nothing committed. Drop queued work so it cannot attach to a later session on this thread.
+      afterCommitActions.remove();
       return;
     }
 
     int count = sessionCount.get().decrementAndGet();
     if (count == 0) {
+      boolean committed = false;
       try {
         if (commit) {
           sqlSession.commit();
+          committed = true;
         } else if (rollback) {
           // Force the JDBC rollback. A policy lifecycle hook can write on this connection without
           // going
@@ -177,11 +189,12 @@ public final class SqlSessions {
           // Ensure the session is always closed
           sqlSession.close();
         } finally {
-          // Ensure ThreadLocal is always cleaned up
+          // Drop the session before the callbacks so they observe "no open transaction".
+          // `committed` is true only after SqlSession.commit() returns. A plain close rolls the
+          // connection back (auto-commit is off) and must not apply cache side effects.
           sessions.remove();
           sessionCount.remove();
-          // After JDBC commit/rollback so cache side effects see committed state.
-          notifySynchronizations(commit);
+          runAfterCommit(committed);
         }
       }
     } else if (count < 0) {
@@ -191,25 +204,24 @@ public final class SqlSessions {
           "Session count is negative: {}. Resetting session count and removing session.", count);
       sessions.remove();
       sessionCount.remove();
-      synchronizations.remove();
+      afterCommitActions.remove();
     }
   }
 
-  private static void notifySynchronizations(boolean committed) {
-    List<TransactionSynchronization> registered = synchronizations.get();
-    synchronizations.remove();
-    if (registered == null || registered.isEmpty()) {
+  private static void runAfterCommit(boolean committed) {
+    List<Runnable> actions = afterCommitActions.get();
+    afterCommitActions.remove();
+    if (!committed || actions.isEmpty()) {
       return;
     }
-    for (TransactionSynchronization synchronization : registered) {
+    for (Runnable action : actions) {
       try {
-        if (committed) {
-          synchronization.afterCommit();
-        } else {
-          synchronization.afterRollback();
-        }
+        action.run();
       } catch (RuntimeException e) {
-        LOG.warn("Transaction synchronization failed", e);
+        LOG.error(
+            "Post-commit callback failed after the SQL transaction committed; "
+                + "later callbacks on this commit still run",
+            e);
       }
     }
   }

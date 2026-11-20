@@ -45,6 +45,8 @@ import java.nio.file.Paths;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.dbcp2.BasicDataSource;
 import org.apache.commons.io.FileUtils;
 import org.apache.gravitino.Config;
@@ -259,5 +261,101 @@ public class TestSqlSession {
     SqlSessions.rollbackAndCloseSqlSession();
     assertNull(SqlSessions.getSessions().get());
     assertEquals(0, SqlSessions.getSessionCount());
+  }
+
+  @Test
+  public void testAfterSuccessfulCommitRunsOnlyOnOutermostCommit() {
+    AtomicInteger runs = new AtomicInteger();
+    SqlSessions.getSqlSession();
+    SqlSessions.getSqlSession();
+    SqlSessions.afterSuccessfulCommit(runs::incrementAndGet);
+    SqlSessions.commitAndCloseSqlSession();
+    assertEquals(0, runs.get());
+    assertTrue(SqlSessions.hasActiveSession());
+    SqlSessions.commitAndCloseSqlSession();
+    assertEquals(1, runs.get());
+    assertFalse(SqlSessions.hasActiveSession());
+  }
+
+  @Test
+  public void testAfterSuccessfulCommitSeesClosedSession() {
+    AtomicBoolean openDuringCallback = new AtomicBoolean(true);
+    SqlSessions.getSqlSession();
+    SqlSessions.afterSuccessfulCommit(() -> openDuringCallback.set(SqlSessions.hasActiveSession()));
+    SqlSessions.commitAndCloseSqlSession();
+    assertFalse(openDuringCallback.get());
+  }
+
+  @Test
+  public void testAfterSuccessfulCommitSkippedOnRollbackCloseAndFailedCommit() {
+    AtomicBoolean ran = new AtomicBoolean();
+    SqlSessions.getSqlSession();
+    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    SqlSessions.rollbackAndCloseSqlSession();
+    assertFalse(ran.get());
+
+    SqlSessions.getSqlSession();
+    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    SqlSessions.closeSqlSession();
+    assertFalse(ran.get());
+
+    SqlSession real = SqlSessions.getSqlSession();
+    SqlSession spy = Mockito.spy(real);
+    Mockito.doThrow(new IllegalStateException("commit failed")).when(spy).commit();
+    SqlSessions.getSessions().set(spy);
+    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    assertThrows(IllegalStateException.class, SqlSessions::commitAndCloseSqlSession);
+    assertFalse(ran.get());
+    assertFalse(SqlSessions.hasActiveSession());
+
+    // A discarded action must not attach to the next session on this thread.
+    SqlSessions.getSqlSession();
+    SqlSessions.commitAndCloseSqlSession();
+    assertFalse(ran.get());
+  }
+
+  @Test
+  public void testAfterSuccessfulCommitContinuesAfterCallbackFailure() {
+    AtomicBoolean second = new AtomicBoolean();
+    SqlSessions.getSqlSession();
+    SqlSessions.afterSuccessfulCommit(
+        () -> {
+          throw new IllegalStateException("callback failed");
+        });
+    SqlSessions.afterSuccessfulCommit(() -> second.set(true));
+    SqlSessions.commitAndCloseSqlSession();
+    assertTrue(second.get());
+    assertFalse(SqlSessions.hasActiveSession());
+  }
+
+  @Test
+  public void testAfterSuccessfulCommitRequiresAnOpenSession() {
+    assertFalse(SqlSessions.hasActiveSession());
+    assertThrows(IllegalStateException.class, () -> SqlSessions.afterSuccessfulCommit(() -> {}));
+    SqlSessions.getSqlSession();
+    try {
+      assertThrows(IllegalArgumentException.class, () -> SqlSessions.afterSuccessfulCommit(null));
+    } finally {
+      SqlSessions.rollbackAndCloseSqlSession();
+    }
+  }
+
+  @Test
+  public void testAfterSuccessfulCommitIsThreadLocal() throws Exception {
+    AtomicBoolean ran = new AtomicBoolean();
+    SqlSessions.getSqlSession();
+    SqlSessions.afterSuccessfulCommit(() -> ran.set(true));
+    Thread other =
+        new Thread(
+            () -> {
+              SqlSessions.getSqlSession();
+              SqlSessions.commitAndCloseSqlSession();
+            });
+    other.start();
+    other.join(10_000);
+    assertFalse(other.isAlive());
+    assertFalse(ran.get());
+    SqlSessions.commitAndCloseSqlSession();
+    assertTrue(ran.get());
   }
 }

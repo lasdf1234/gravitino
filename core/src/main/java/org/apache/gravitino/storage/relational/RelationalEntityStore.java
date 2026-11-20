@@ -73,7 +73,6 @@ import org.apache.gravitino.metrics.source.EntityChangeLogMetricsSource;
 import org.apache.gravitino.semantic.SemanticModelMetric;
 import org.apache.gravitino.storage.relational.service.EntityIdService;
 import org.apache.gravitino.storage.relational.session.SqlSessions;
-import org.apache.gravitino.storage.relational.session.TransactionSynchronization;
 import org.apache.gravitino.storage.relational.utils.ExceptionUtils;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.tag.TagValue;
@@ -274,6 +273,9 @@ public class RelationalEntityStore
 
   @Override
   public boolean exists(NameIdentifier ident, Entity.EntityType entityType) throws IOException {
+    if (!useCommittedCache()) {
+      return backend.exists(ident, entityType);
+    }
     boolean existsInCache = cache.contains(ident, entityType);
     return existsInCache || backend.exists(ident, entityType);
   }
@@ -287,16 +289,10 @@ public class RelationalEntityStore
     } catch (RuntimeException re) {
       throw ExceptionUtils.lockWaitTimeoutAsConflict(re, e.type(), e.nameIdentifier());
     }
-    if (overwritten) {
-      // An overwrite is resolved by the database, which may keep the identity and version of the
-      // row it already had. Caching the copy handed in here would publish values the stored row
-      // does not carry, so the next read is served from the backend instead.
+    if (overwritten || !useCommittedCache()) {
+      // Overwrite: the stored row may not match this copy. Open session: the insert is not
+      // committed, so publishing it would leave a ghost after rollback. Both reload after commit.
       invalidateCache(e.nameIdentifier(), e.type());
-    } else if (SessionUtils.isInTransaction()) {
-      // Nested under an outer doMultipleWithCommit, insert returns while that SQL session is still
-      // open. Publishing into the process-wide cache would expose an uncommitted row and leave a
-      // ghost after rollback. Skip publish; only run related-key invalidation (safe to clear).
-      cache.invalidateOnKeyChange(e);
     } else {
       cacheIfEpochUnchanged(e, epochBeforeWrite);
     }
@@ -320,6 +316,9 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> E get(
       NameIdentifier ident, Entity.EntityType entityType, Class<E> e)
       throws NoSuchEntityException, IOException {
+    if (!useCommittedCache()) {
+      return backend.get(ident, entityType);
+    }
     return cache.withCacheLock(
         EntityCacheKey.of(ident, entityType),
         () -> {
@@ -339,6 +338,9 @@ public class RelationalEntityStore
   @Override
   public <E extends Entity & HasIdentifier> List<E> batchGet(
       List<NameIdentifier> idents, Entity.EntityType entityType, Class<E> clazz) {
+    if (!useCommittedCache()) {
+      return backend.batchGet(idents, entityType);
+    }
     List<E> allEntities = new ArrayList<>();
     List<NameIdentifier> noCacheIdents =
         idents.stream()
@@ -871,17 +873,37 @@ public class RelationalEntityStore
     }
   }
 
+  /**
+   * Whether this thread may read or publish the process-wide entity cache.
+   *
+   * <p>The cache mirrors committed rows only. A backend call commits before it returns when this
+   * thread owns the SQL session, so the cache is safe to use immediately afterwards. An
+   * already-open session means the backend joined that session and has not committed:
+   *
+   * <ul>
+   *   <li>Reads go to the open connection, which sees this thread's own writes, and are not
+   *       published. Publishing them would leave a ghost in the cache after rollback.
+   *   <li>Mutations do not punch a hole yet. A hole opened before commit can be refilled by another
+   *       thread with the still-committed old row, and that refill survives the commit.
+   *   <li>The hole opens only after the outermost commit succeeds. The epoch bump and the removal
+   *       happen together there. Bumping the epoch earlier would let a concurrent miss publish the
+   *       pre-commit row under the new epoch.
+   *   <li>Rollback, a plain close, and a failed commit drop the deferred removals, so the cache
+   *       stays on the unchanged committed rows.
+   * </ul>
+   *
+   * <p>A thread with no open session, including the change-log poller, invalidates immediately.
+   * Change-log delivery runs only after its own read session has already been closed.
+   *
+   * @return {@code false} when this thread must ignore the process cache
+   */
+  private boolean useCommittedCache() {
+    return !SessionUtils.isInTransaction();
+  }
+
   private void invalidateCache(NameIdentifier ident, Entity.EntityType type) {
-    if (SessionUtils.isInTransaction()) {
-      // Keep the previous cache entry until the outermost JDBC commit. Peers must not refill a
-      // pre-commit snapshot into an early hole; rollback leaves the cache untouched.
-      SqlSessions.registerSynchronization(
-          new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-              doInvalidateCache(ident, type);
-            }
-          });
+    if (!useCommittedCache()) {
+      SqlSessions.afterSuccessfulCommit(() -> doInvalidateCache(ident, type));
       return;
     }
     doInvalidateCache(ident, type);
