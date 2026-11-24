@@ -38,8 +38,8 @@ public final class SqlSessions {
   private static final ThreadLocal<SqlSession> sessions = new ThreadLocal<>();
   private static final ThreadLocal<AtomicInteger> sessionCount =
       ThreadLocal.withInitial(() -> new AtomicInteger(0));
-  private static final ThreadLocal<Runnable> beforeOuterCommit = new ThreadLocal<>();
-  private static final ThreadLocal<Runnable> afterSessionClosed = new ThreadLocal<>();
+  private static final ThreadLocal<Runnable> beforeCommitAction = new ThreadLocal<>();
+  private static final ThreadLocal<Runnable> afterCloseAction = new ThreadLocal<>();
 
   private SqlSessions() {}
 
@@ -124,8 +124,8 @@ public final class SqlSessions {
    * @param afterClose the action to run after the session is closed
    */
   public static void runOnOuterClose(Runnable beforeCommit, Runnable afterClose) {
-    beforeOuterCommit.set(beforeCommit);
-    afterSessionClosed.set(afterClose);
+    beforeCommitAction.set(beforeCommit);
+    afterCloseAction.set(afterClose);
   }
 
   /**
@@ -175,8 +175,8 @@ public final class SqlSessions {
     int count = sessionCount.get().decrementAndGet();
     if (count == 0) {
       try {
-        Runnable beforeCommit = beforeOuterCommit.get();
-        beforeOuterCommit.remove();
+        Runnable beforeCommit = beforeCommitAction.get();
+        beforeCommitAction.remove();
         if (beforeCommit != null) {
           beforeCommit.run();
         }
@@ -200,7 +200,7 @@ public final class SqlSessions {
           }
         }
       } finally {
-        runAfterSessionClosed();
+        runAfterCloseAction();
       }
     } else if (count < 0) {
       // This should not happen if the session management is correct.
@@ -210,20 +210,20 @@ public final class SqlSessions {
       sessions.remove();
       sessionCount.remove();
       try {
-        Runnable beforeCommit = beforeOuterCommit.get();
-        beforeOuterCommit.remove();
+        Runnable beforeCommit = beforeCommitAction.get();
+        beforeCommitAction.remove();
         if (beforeCommit != null) {
           beforeCommit.run();
         }
       } finally {
-        runAfterSessionClosed();
+        runAfterCloseAction();
       }
     }
   }
 
-  private static void runAfterSessionClosed() {
-    Runnable afterClose = afterSessionClosed.get();
-    afterSessionClosed.remove();
+  private static void runAfterCloseAction() {
+    Runnable afterClose = afterCloseAction.get();
+    afterCloseAction.remove();
     if (afterClose != null) {
       afterClose.run();
     }
