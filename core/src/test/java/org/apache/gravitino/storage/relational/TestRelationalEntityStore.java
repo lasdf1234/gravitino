@@ -274,7 +274,16 @@ public class TestRelationalEntityStore {
     Mockito.when(readTable.type()).thenReturn(Entity.EntityType.TABLE);
     Mockito.when(readTable.nameIdentifier()).thenReturn(read);
 
-    CaffeineEntityCache cache = new CaffeineEntityCache(new Config(false) {});
+    AtomicInteger cacheLocks = new AtomicInteger();
+    CaffeineEntityCache cache =
+        new CaffeineEntityCache(new Config(false) {}) {
+          @Override
+          public <E, T extends Exception> E withCacheLock(
+              EntityCacheKey key, EntityCache.ThrowingSupplier<E, T> action) throws T {
+            cacheLocks.incrementAndGet();
+            return super.withCacheLock(key, action);
+          }
+        };
     FieldUtils.writeField(store, "cache", cache, true);
     cache.put(warmedTable);
     Mockito.when(backend.get(read, Entity.EntityType.TABLE)).thenReturn(readTable);
@@ -295,6 +304,7 @@ public class TestRelationalEntityStore {
           store.batchGet(List.of(read), Entity.EntityType.TABLE, TableEntity.class));
       Assertions.assertFalse(cache.contains(read, Entity.EntityType.TABLE));
       Assertions.assertTrue(cache.contains(warmed, Entity.EntityType.TABLE));
+      Assertions.assertEquals(0, cacheLocks.get());
     } finally {
       SqlSessions.commitAndCloseSqlSession();
     }

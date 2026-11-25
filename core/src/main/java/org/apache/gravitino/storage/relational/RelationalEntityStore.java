@@ -292,6 +292,10 @@ public class RelationalEntityStore
 
   @Override
   public boolean exists(NameIdentifier ident, Entity.EntityType entityType) throws IOException {
+    // An open transaction ignores every cache hit, so there is no per-key lock to take.
+    if (SessionUtils.isInTransaction()) {
+      return backend.exists(ident, entityType);
+    }
     // Same-key lock as get/publish so a mid-publication put cannot land between the blocked check
     // and contains.
     boolean cached =
@@ -388,15 +392,17 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> E get(
       NameIdentifier ident, Entity.EntityType entityType, Class<E> e)
       throws NoSuchEntityException, IOException {
-    Optional<E> cached =
-        cache.withCacheLock(
-            EntityCacheKey.of(ident, entityType),
-            () ->
-                isCacheObservationBlocked(ident, entityType)
-                    ? Optional.empty()
-                    : cache.getIfPresent(ident, entityType));
-    if (cached.isPresent()) {
-      return cached.get();
+    if (!SessionUtils.isInTransaction()) {
+      Optional<E> cached =
+          cache.withCacheLock(
+              EntityCacheKey.of(ident, entityType),
+              () ->
+                  isCacheObservationBlocked(ident, entityType)
+                      ? Optional.empty()
+                      : cache.getIfPresent(ident, entityType));
+      if (cached.isPresent()) {
+        return cached.get();
+      }
     }
 
     // DB I/O stays outside the cache lock so this thread never holds both.
@@ -410,6 +416,9 @@ public class RelationalEntityStore
   @Override
   public long getTableId(NameIdentifier ident) throws IOException {
     Entity.EntityType entityType = Entity.EntityType.TABLE;
+    if (SessionUtils.isInTransaction()) {
+      return backend.getTableId(ident);
+    }
     Optional<Long> cachedId =
         cache.withCacheLock(
             EntityCacheKey.of(ident, entityType),
@@ -432,6 +441,16 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> List<E> batchGet(
       List<NameIdentifier> idents, Entity.EntityType entityType, Class<E> clazz) {
     List<E> allEntities = new ArrayList<>();
+    if (SessionUtils.isInTransaction()) {
+      long epochBeforeRead = cacheInvalidationEpoch.get();
+      long cacheEpochBeforeRead = cache.invalidationEpoch();
+      List<E> fetchEntities = backend.batchGet(idents, entityType);
+      for (E entity : fetchEntities) {
+        cacheIfEpochUnchanged(entity, epochBeforeRead, cacheEpochBeforeRead);
+        allEntities.add(entity);
+      }
+      return allEntities;
+    }
     List<NameIdentifier> noCacheIdents =
         idents.stream()
             .filter(
