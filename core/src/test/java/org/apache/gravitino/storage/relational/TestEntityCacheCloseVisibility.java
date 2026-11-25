@@ -135,6 +135,8 @@ public class TestEntityCacheCloseVisibility extends TestJDBCBackend {
           }
         };
     RelationalEntityStore store = newStore(backend, cache);
+    CountDownLatch inserted = new CountDownLatch(1);
+    CountDownLatch startCommit = new CountDownLatch(1);
     CountDownLatch holding = new CountDownLatch(1);
     CountDownLatch releaseLock = new CountDownLatch(1);
     AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -160,31 +162,40 @@ public class TestEntityCacheCloseVisibility extends TestJDBCBackend {
               SessionUtils.beginTransaction();
               boolean committed = false;
               try {
+                // Insert before the other thread takes a segment lock. put() invalidates under
+                // that lock, so holding it first can stop the writer from ever reaching clear().
                 store.put(metalake, false);
+                inserted.countDown();
+                Assertions.assertTrue(startCommit.await(15, TimeUnit.SECONDS));
                 SessionUtils.commitTransaction();
                 committed = true;
               } catch (Throwable thrown) {
                 failure.compareAndSet(null, thrown);
               } finally {
+                inserted.countDown();
                 if (!committed) {
                   SessionUtils.rollbackTransaction();
                 }
               }
             });
-    locker.start();
+    writer.start();
     try {
+      Assertions.assertTrue(inserted.await(15, TimeUnit.SECONDS));
+      Assertions.assertNull(failure.get());
+      locker.start();
       Assertions.assertTrue(holding.await(15, TimeUnit.SECONDS));
-      writer.start();
-      Assertions.assertTrue(enteredClear.await(15, TimeUnit.SECONDS));
+      startCommit.countDown();
+      Assertions.assertTrue(
+          enteredClear.await(15, TimeUnit.SECONDS), () -> String.valueOf(failure.get()));
     } finally {
+      startCommit.countDown();
       releaseLock.countDown();
       locker.join(15_000);
-      if (writer.isAlive() || holding.getCount() == 0) {
-        writer.join(15_000);
-      }
+      writer.join(15_000);
     }
     Assertions.assertNull(failure.get());
     Assertions.assertFalse(writer.isAlive());
+    Assertions.assertFalse(locker.isAlive());
     Assertions.assertTrue(backend.exists(ident, Entity.EntityType.METALAKE));
   }
 
