@@ -127,9 +127,9 @@ public class RelationalEntityStore
   // while a value is being published and may still be rolled back.
   private final ConcurrentHashMap<String, AtomicInteger> cacheBlocks = new ConcurrentHashMap<>();
 
-  // Greater than zero only while an outer session is committing or rolling back. Readers and
-  // publishers on every thread skip the cache until that close finishes and the cache is cleared.
-  private final AtomicInteger outerCommitBarrier = new AtomicInteger();
+  // How many threads are committing or rolling back an outermost session. Readers and publishers
+  // skip the cache until that close finishes and the cache is cleared.
+  private final AtomicInteger closingSessions = new AtomicInteger();
   private final ThreadLocal<Boolean> nestedWriteHeld = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
   // Non-null only for a LOCAL_PER_NODE cache, which needs cross-node invalidation. SHARED and NONE
@@ -292,7 +292,7 @@ public class RelationalEntityStore
 
   @Override
   public boolean exists(NameIdentifier ident, Entity.EntityType entityType) throws IOException {
-    suspendCacheForOuterTransaction();
+    skipCache();
     // Same-key lock as get/publish so a mid-publication put cannot land between the blocked check
     // and contains.
     boolean cached =
@@ -308,7 +308,7 @@ public class RelationalEntityStore
       throws IOException, EntityAlreadyExistsException {
     NameIdentifier ident = e.nameIdentifier();
     Entity.EntityType type = e.type();
-    suspendCacheForOuterTransaction();
+    skipCache();
     try {
       if (overwritten) {
         // Drop the cache and block refill before the overwrite commits. Do not publish {@code e}:
@@ -351,7 +351,7 @@ public class RelationalEntityStore
     // inside backend.updateEntity before a backend-owned commit, so the new name is pending
     // before the renamed row is visible to other connections.
     NameIdentifier[] renamedTo = new NameIdentifier[1];
-    suspendCacheForOuterTransaction();
+    skipCache();
     beginPendingWrite(ident, entityType);
     try {
       try {
@@ -388,7 +388,7 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> E get(
       NameIdentifier ident, Entity.EntityType entityType, Class<E> e)
       throws NoSuchEntityException, IOException {
-    suspendCacheForOuterTransaction();
+    skipCache();
     Optional<E> cached =
         cache.withCacheLock(
             EntityCacheKey.of(ident, entityType),
@@ -409,7 +409,7 @@ public class RelationalEntityStore
 
   @Override
   public long getTableId(NameIdentifier ident) throws IOException {
-    suspendCacheForOuterTransaction();
+    skipCache();
     Entity.EntityType entityType = Entity.EntityType.TABLE;
     Optional<Long> cachedId =
         cache.withCacheLock(
@@ -432,7 +432,7 @@ public class RelationalEntityStore
   @Override
   public <E extends Entity & HasIdentifier> List<E> batchGet(
       List<NameIdentifier> idents, Entity.EntityType entityType, Class<E> clazz) {
-    suspendCacheForOuterTransaction();
+    skipCache();
     List<E> allEntities = new ArrayList<>();
     List<NameIdentifier> noCacheIdents =
         idents.stream()
@@ -465,7 +465,7 @@ public class RelationalEntityStore
   @Override
   public boolean delete(NameIdentifier ident, Entity.EntityType entityType, boolean cascade)
       throws IOException {
-    suspendCacheForOuterTransaction();
+    skipCache();
     beginPendingWrite(ident, entityType);
     try {
       return backend.delete(ident, entityType, cascade);
@@ -485,7 +485,7 @@ public class RelationalEntityStore
       Class<E> clazz,
       Consumer<E> postDeleteAction)
       throws IOException {
-    suspendCacheForOuterTransaction();
+    skipCache();
     beginPendingWrite(ident, entityType);
     try {
       return backend.deleteAndGet(ident, entityType, clazz, postDeleteAction);
@@ -500,7 +500,7 @@ public class RelationalEntityStore
   public Optional<SchemaEntity> deleteSchemaAndGet(
       NameIdentifier ident, boolean cascadeFunctions, Consumer<SchemaEntity> postDeleteAction)
       throws IOException {
-    suspendCacheForOuterTransaction();
+    skipCache();
     beginPendingWrite(ident, Entity.EntityType.SCHEMA);
     try {
       return backend.deleteSchemaAndGet(ident, cascadeFunctions, postDeleteAction);
@@ -950,7 +950,7 @@ public class RelationalEntityStore
   }
 
   private <E extends Entity & HasIdentifier> void cacheIfEpochUnchanged(E entity, long epoch) {
-    if (outerCommitBarrier.get() > 0 || SessionUtils.isInTransaction()) {
+    if (closingSessions.get() > 0 || SessionUtils.isInTransaction()) {
       return;
     }
     if (cache instanceof BaseEntityCache && !BaseEntityCache.isCacheable(entity.type())) {
@@ -1097,7 +1097,7 @@ public class RelationalEntityStore
    * publication that may still be rolled back.
    */
   private boolean isCacheObservationBlocked(NameIdentifier ident, Entity.EntityType entityType) {
-    if (outerCommitBarrier.get() > 0 || SessionUtils.isInTransaction()) {
+    if (closingSessions.get() > 0 || SessionUtils.isInTransaction()) {
       return true;
     }
     AtomicInteger publishing = cacheBlocks.get("p\0" + entityType.name() + "\0" + ident);
@@ -1108,23 +1108,23 @@ public class RelationalEntityStore
    * A store call inside an open SQL session must not publish what that session can see. The
    * outermost close blocks every thread across commit or rollback, then clears the cache.
    */
-  private void suspendCacheForOuterTransaction() {
+  private void skipCache() {
     if (!SessionUtils.isInTransaction() || nestedWriteHeld.get()) {
       return;
     }
     nestedWriteHeld.set(Boolean.TRUE);
-    SqlSessions.runOnOuterClose(this::raiseOuterCommitBarrier, this::finishOuterCommitBarrier);
+    SqlSessions.onClose(this::pauseCache, this::releaseCache);
   }
 
-  private void raiseOuterCommitBarrier() {
-    outerCommitBarrier.incrementAndGet();
+  private void pauseCache() {
+    closingSessions.incrementAndGet();
   }
 
-  private void finishOuterCommitBarrier() {
+  private void releaseCache() {
     try {
       clearCache();
     } finally {
-      outerCommitBarrier.decrementAndGet();
+      closingSessions.decrementAndGet();
       nestedWriteHeld.remove();
     }
   }
