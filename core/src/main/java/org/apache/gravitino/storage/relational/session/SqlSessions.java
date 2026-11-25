@@ -174,106 +174,130 @@ public final class SqlSessions {
   }
 
   /**
-   * Runs every registered before-commit action, then commits or rolls back, then closes the
-   * session. A before-commit failure rolls the session back and closes it, and that action's
-   * after-close is skipped. A failure while closing the session is propagated. Cleanup that fails
-   * after the session has already been committed or rolled back and closed is logged and does not
-   * fail the caller.
+   * Closes the outermost SQL session.
+   *
+   * <p>Order: run each {@code beforeCommit}, commit or roll back, close the session, then run the
+   * {@code afterClose} of every {@code beforeCommit} that returned. A {@code beforeCommit} that
+   * throws skips its own {@code afterClose} and every later pair, and the session is rolled back.
+   * If commit, rollback, or close throws, that exception is thrown. If the session finished and a
+   * later {@code afterClose} throws, the exception is logged and the caller still succeeds.
    */
   private static void closeOuterSession(SqlSession sqlSession, boolean commit, boolean rollback) {
-    List<Runnable> befores = beforeCommitActions.get();
-    List<Runnable> afters = afterCloseActions.get();
+    List<Runnable> beforeCommits = beforeCommitActions.get();
+    List<Runnable> afterCloses = afterCloseActions.get();
     beforeCommitActions.remove();
     afterCloseActions.remove();
-    List<Runnable> completedAfters = new ArrayList<>();
-    RuntimeException failure = null;
-    try {
-      for (int i = 0; i < befores.size(); i++) {
-        Runnable beforeCommit = befores.get(i);
-        Runnable afterClose = afters.get(i);
-        if (beforeCommit == null) {
-          if (afterClose != null) {
-            completedAfters.add(afterClose);
-          }
-          continue;
-        }
-        try {
-          beforeCommit.run();
-          if (afterClose != null) {
-            completedAfters.add(afterClose);
-          }
-        } catch (RuntimeException exception) {
-          failure = exception;
-          break;
-        }
-      }
-      try {
-        if (failure != null) {
-          failure = rollbackOnFailure(sqlSession, failure);
-        } else if (commit) {
-          try {
-            sqlSession.commit();
-          } catch (RuntimeException exception) {
-            failure = rollbackOnFailure(sqlSession, exception);
-          }
-        } else if (rollback) {
-          // Force the JDBC rollback. A policy lifecycle hook can write on this connection without
-          // going through a mapped statement, and MyBatis skips rollback when the session looks
-          // clean. Closing that session then turns auto-commit back on, which would commit the
-          // hook write.
-          try {
-            sqlSession.rollback(true);
-          } catch (RuntimeException exception) {
-            failure = exception;
-          }
-        }
-      } finally {
-        try {
-          sqlSession.close();
-        } catch (RuntimeException exception) {
-          failure = mergeFailure(failure, exception);
-        } finally {
-          sessions.remove();
-          sessionCount.remove();
-        }
-      }
-    } finally {
-      RuntimeException sessionFailure = failure;
-      for (Runnable afterClose : completedAfters) {
-        try {
-          afterClose.run();
-        } catch (RuntimeException exception) {
-          if (sessionFailure != null) {
-            failure = mergeFailure(failure, exception);
-          } else {
-            LOG.warn(
-                "Cleanup after the SQL session closed failed. The transaction was already"
-                    + " finished.",
-                exception);
-          }
-        }
-      }
-    }
+
+    List<Runnable> afterClosesToRun = new ArrayList<>();
+    RuntimeException failure = runBeforeCommits(beforeCommits, afterCloses, afterClosesToRun);
+    failure = commitOrRollback(sqlSession, commit, rollback, failure);
+    failure = closeSession(sqlSession, failure);
+    runAfterCloses(afterClosesToRun, failure);
     if (failure != null) {
       throw failure;
     }
   }
 
-  private static RuntimeException rollbackOnFailure(
-      SqlSession sqlSession, RuntimeException primary) {
-    try {
-      sqlSession.rollback(true);
-    } catch (RuntimeException exception) {
-      primary.addSuppressed(exception);
+  /** Runs before-commit callbacks in order. A failure stops the rest. */
+  private static RuntimeException runBeforeCommits(
+      List<Runnable> beforeCommits, List<Runnable> afterCloses, List<Runnable> afterClosesToRun) {
+    for (int i = 0; i < beforeCommits.size(); i++) {
+      Runnable beforeCommit = beforeCommits.get(i);
+      Runnable afterClose = afterCloses.get(i);
+      if (beforeCommit == null) {
+        if (afterClose != null) {
+          afterClosesToRun.add(afterClose);
+        }
+        continue;
+      }
+      try {
+        beforeCommit.run();
+      } catch (RuntimeException exception) {
+        return exception;
+      }
+      if (afterClose != null) {
+        afterClosesToRun.add(afterClose);
+      }
     }
-    return primary;
+    return null;
   }
 
-  private static RuntimeException mergeFailure(RuntimeException primary, RuntimeException extra) {
-    if (primary == null) {
-      return extra;
+  /**
+   * Commits, rolls back, or rolls back because a before-commit callback failed. A failed commit is
+   * also rolled back so the connection does not keep the partial write.
+   */
+  private static RuntimeException commitOrRollback(
+      SqlSession sqlSession, boolean commit, boolean rollback, RuntimeException failure) {
+    if (failure != null || rollback) {
+      return rollbackSession(sqlSession, failure);
     }
-    primary.addSuppressed(extra);
-    return primary;
+    if (!commit) {
+      return null;
+    }
+    try {
+      sqlSession.commit();
+      return null;
+    } catch (RuntimeException exception) {
+      return rollbackSession(sqlSession, exception);
+    }
+  }
+
+  /**
+   * Rolls the session back and keeps {@code failure} as the exception the caller sees. A rollback
+   * that throws is attached to {@code failure}, or becomes the caller exception when {@code
+   * failure} is null.
+   *
+   * <p>The rollback is forced. A policy hook can write on this connection without a mapped
+   * statement, and MyBatis skips rollback when the session looks clean. Closing that session turns
+   * auto-commit back on, which would commit the hook write.
+   */
+  private static RuntimeException rollbackSession(SqlSession sqlSession, RuntimeException failure) {
+    try {
+      sqlSession.rollback(true);
+      return failure;
+    } catch (RuntimeException exception) {
+      if (failure == null) {
+        return exception;
+      }
+      failure.addSuppressed(exception);
+      return failure;
+    }
+  }
+
+  /** Closes the session and removes it from this thread. */
+  private static RuntimeException closeSession(SqlSession sqlSession, RuntimeException failure) {
+    try {
+      sqlSession.close();
+      return failure;
+    } catch (RuntimeException exception) {
+      if (failure == null) {
+        return exception;
+      }
+      failure.addSuppressed(exception);
+      return failure;
+    } finally {
+      sessions.remove();
+      sessionCount.remove();
+    }
+  }
+
+  /**
+   * Runs cleanup after the session is gone. When the session itself failed, a cleanup failure is
+   * attached to that exception. When the session succeeded, a cleanup failure is only logged.
+   */
+  private static void runAfterCloses(List<Runnable> afterCloses, RuntimeException sessionFailure) {
+    for (Runnable afterClose : afterCloses) {
+      try {
+        afterClose.run();
+      } catch (RuntimeException exception) {
+        if (sessionFailure != null) {
+          sessionFailure.addSuppressed(exception);
+        } else {
+          LOG.warn(
+              "Cleanup after the SQL session closed failed. The transaction was already finished.",
+              exception);
+        }
+      }
+    }
   }
 }
