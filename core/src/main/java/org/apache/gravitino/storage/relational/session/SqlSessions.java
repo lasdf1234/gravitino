@@ -129,17 +129,6 @@ public final class SqlSessions {
   }
 
   /**
-   * Binds a session so {@link #hasActiveSession()} is true without opening a database connection.
-   *
-   * @param session the session treated as the outer transaction
-   */
-  @VisibleForTesting
-  public static void bindOuterSessionForTest(SqlSession session) {
-    sessions.set(session);
-    sessionCount.set(new AtomicInteger(1));
-  }
-
-  /**
    * Closes the session bound for tests and runs the outer-close action.
    *
    * @param commit whether the close commits; otherwise it rolls back
