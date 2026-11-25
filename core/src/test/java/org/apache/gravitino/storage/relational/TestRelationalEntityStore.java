@@ -101,6 +101,17 @@ public class TestRelationalEntityStore {
     return count != null && count.get() > 0;
   }
 
+  @SuppressWarnings("unchecked")
+  private static void openSession(SqlSession session) throws IllegalAccessException {
+    ThreadLocal<SqlSession> sessions =
+        (ThreadLocal<SqlSession>) FieldUtils.readStaticField(SqlSessions.class, "sessions", true);
+    sessions.set(session);
+    ThreadLocal<AtomicInteger> sessionCount =
+        (ThreadLocal<AtomicInteger>)
+            FieldUtils.readStaticField(SqlSessions.class, "sessionCount", true);
+    sessionCount.set(new AtomicInteger(1));
+  }
+
   @Test
   void testUncachedInsertStillInvokesRelatedInvalidationAfterEpochChanges() throws Exception {
     BaseEntityCache cache = Mockito.mock(BaseEntityCache.class);
@@ -211,7 +222,7 @@ public class TestRelationalEntityStore {
     Assertions.assertTrue(cache.contains(ident, Entity.EntityType.TABLE));
 
     SqlSession session = Mockito.mock(SqlSession.class);
-    SqlSessions.bindOuterSessionForTest(session);
+    openSession(session);
     try {
       store.put(table, false);
       Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
@@ -237,7 +248,7 @@ public class TestRelationalEntityStore {
     Mockito.when(backend.get(ident, Entity.EntityType.TABLE)).thenReturn(table);
 
     SqlSession session = Mockito.mock(SqlSession.class);
-    SqlSessions.bindOuterSessionForTest(session);
+    openSession(session);
     try {
       Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
       Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
