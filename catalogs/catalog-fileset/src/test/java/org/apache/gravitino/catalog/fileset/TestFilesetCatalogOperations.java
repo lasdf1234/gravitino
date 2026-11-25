@@ -389,38 +389,8 @@ public class TestFilesetCatalogOperations {
                   Mockito.anyString(), Mockito.anyString(), Mockito.eq("s24_" + newName));
         });
 
-    locationArguments()
-        .forEach(
-            arguments -> {
-              String name = (String) arguments.get()[0];
-              long schemaId = idGenerator.nextId();
-              doReturn(new SchemaIds(1L, 1L, schemaId))
-                  .when(spySchemaMetaService)
-                  .getSchemaIdByMetalakeNameAndCatalogNameAndSchemaName(
-                      Mockito.anyString(), Mockito.anyString(), Mockito.eq("s1_" + name));
-            });
-
-    locationWithPlaceholdersArguments()
-        .forEach(
-            arguments -> {
-              String name = (String) arguments.get()[0];
-              long schemaId = idGenerator.nextId();
-              doReturn(new SchemaIds(1L, 1L, schemaId))
-                  .when(spySchemaMetaService)
-                  .getSchemaIdByMetalakeNameAndCatalogNameAndSchemaName(
-                      Mockito.anyString(), Mockito.anyString(), Mockito.eq("s1_" + name));
-            });
-
-    multipleLocationsArguments()
-        .forEach(
-            arguments -> {
-              String name = (String) arguments.get()[0];
-              long schemaId = idGenerator.nextId();
-              doReturn(new SchemaIds(1L, 1L, schemaId))
-                  .when(spySchemaMetaService)
-                  .getSchemaIdByMetalakeNameAndCatalogNameAndSchemaName(
-                      Mockito.anyString(), Mockito.anyString(), Mockito.eq("s1_" + name));
-            });
+    // Do not stub schema IDs for s1_* location tests. Those cases create real schemas; a fake ID
+    // breaks FilesetMetaService after the entity cache is cleared on an outer session close.
 
     MockedStatic<MetalakeMetaService> metalakeMetaServiceMockedStatic =
         Mockito.mockStatic(MetalakeMetaService.class);
