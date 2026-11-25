@@ -69,6 +69,28 @@ public class TestCaffeineEntityCacheInvalidation {
   }
 
   @Test
+  void testClearWhileHoldingSegmentLockDropsEntryAndAdvancesEpoch() {
+    TableEntity table =
+        TestUtil.getTestTableEntity(3L, "table1", Namespace.of("metalake", "catalog1", "schema1"));
+    cache.put(table);
+    long epoch = cache.invalidationEpoch();
+    NameIdentifier ident = table.nameIdentifier();
+
+    Assertions.assertDoesNotThrow(
+        () ->
+            cache.withCacheLock(
+                EntityCacheKey.of(ident, Entity.EntityType.TABLE),
+                () -> {
+                  cache.clear();
+                  Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+                  Assertions.assertTrue(cache.invalidationEpoch() > epoch);
+                }));
+
+    Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+    Assertions.assertTrue(cache.invalidationEpoch() > epoch);
+  }
+
+  @Test
   void testInvalidateCatalogCascadesToChildren() {
     CatalogEntity catalog =
         TestUtil.getTestCatalogEntity(1L, "catalog1", Namespace.of("metalake"), "hive", "cmt");

@@ -26,9 +26,12 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import org.apache.commons.lang3.reflect.FieldUtils;
@@ -256,6 +259,234 @@ public class TestRelationalEntityStore {
       SqlSessions.closeOuterSessionForTest(false);
     }
     Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+  }
+
+  @Test
+  void testReadOnlyTransactionKeepsUnrelatedCacheEntries() throws Exception {
+    NameIdentifier warmed = NameIdentifier.of("metalake", "catalog", "schema", "warmed");
+    NameIdentifier read = NameIdentifier.of("metalake", "catalog", "schema", "read");
+    TableEntity warmedTable = Mockito.mock(TableEntity.class);
+    Mockito.when(warmedTable.id()).thenReturn(1L);
+    Mockito.when(warmedTable.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(warmedTable.nameIdentifier()).thenReturn(warmed);
+    TableEntity readTable = Mockito.mock(TableEntity.class);
+    Mockito.when(readTable.id()).thenReturn(2L);
+    Mockito.when(readTable.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(readTable.nameIdentifier()).thenReturn(read);
+
+    CaffeineEntityCache cache = new CaffeineEntityCache(new Config(false) {});
+    FieldUtils.writeField(store, "cache", cache, true);
+    cache.put(warmedTable);
+    Mockito.when(backend.get(read, Entity.EntityType.TABLE)).thenReturn(readTable);
+    Mockito.when(backend.exists(read, Entity.EntityType.TABLE)).thenReturn(true);
+    Mockito.when(backend.getTableId(read)).thenReturn(2L);
+    Mockito.when(backend.batchGet(List.of(read), Entity.EntityType.TABLE))
+        .thenReturn(List.of(readTable));
+
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    try {
+      Assertions.assertEquals(
+          readTable, store.get(read, Entity.EntityType.TABLE, TableEntity.class));
+      Assertions.assertTrue(store.exists(read, Entity.EntityType.TABLE));
+      Assertions.assertEquals(2L, store.getTableId(read));
+      Assertions.assertEquals(
+          List.of(readTable),
+          store.batchGet(List.of(read), Entity.EntityType.TABLE, TableEntity.class));
+      Assertions.assertFalse(cache.contains(read, Entity.EntityType.TABLE));
+      Assertions.assertTrue(cache.contains(warmed, Entity.EntityType.TABLE));
+    } finally {
+      SqlSessions.closeOuterSessionForTest(true);
+    }
+    Assertions.assertTrue(cache.contains(warmed, Entity.EntityType.TABLE));
+    Assertions.assertFalse(cache.contains(read, Entity.EntityType.TABLE));
+  }
+
+  @Test
+  void testSharedCacheClearOnAnotherStoreDoesNotRepublishStaleRow() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog", "schema", "table");
+    TableEntity table = Mockito.mock(TableEntity.class);
+    Mockito.when(table.id()).thenReturn(7L);
+    Mockito.when(table.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(table.nameIdentifier()).thenReturn(ident);
+
+    CaffeineEntityCache cache = new CaffeineEntityCache(new Config(false) {});
+    RelationalEntityStore peer = new RelationalEntityStore();
+    RelationalBackend peerBackend = Mockito.mock(RelationalBackend.class);
+    FieldUtils.writeField(store, "cache", cache, true);
+    FieldUtils.writeField(peer, "backend", peerBackend, true);
+    FieldUtils.writeField(peer, "cache", cache, true);
+
+    CountDownLatch readEntered = new CountDownLatch(1);
+    CountDownLatch releaseRead = new CountDownLatch(1);
+    Mockito.when(peerBackend.get(ident, Entity.EntityType.TABLE))
+        .thenAnswer(
+            invocation -> {
+              readEntered.countDown();
+              Assertions.assertTrue(releaseRead.await(10, TimeUnit.SECONDS));
+              return table;
+            });
+
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread reader =
+        new Thread(
+            () -> {
+              try {
+                peer.get(ident, Entity.EntityType.TABLE, TableEntity.class);
+              } catch (Throwable thrown) {
+                failure.set(thrown);
+              }
+            });
+    reader.start();
+    try {
+      Assertions.assertTrue(readEntered.await(10, TimeUnit.SECONDS));
+      store.clearCache();
+    } finally {
+      releaseRead.countDown();
+      reader.join(10_000);
+    }
+    Assertions.assertNull(failure.get());
+    Assertions.assertFalse(reader.isAlive());
+    Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+    Mockito.when(backend.exists(ident, Entity.EntityType.TABLE)).thenReturn(false);
+    Assertions.assertFalse(store.exists(ident, Entity.EntityType.TABLE));
+  }
+
+  @Test
+  void testTwoStoresInOneSessionBothReleaseOnClose() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog", "schema", "table");
+    TableEntity table = Mockito.mock(TableEntity.class);
+    Mockito.when(table.id()).thenReturn(7L);
+    Mockito.when(table.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(table.nameIdentifier()).thenReturn(ident);
+
+    int[] clears = new int[2];
+    CaffeineEntityCache firstCache =
+        new CaffeineEntityCache(new Config(false) {}) {
+          @Override
+          public void clear() {
+            clears[0]++;
+            super.clear();
+          }
+        };
+    CaffeineEntityCache secondCache =
+        new CaffeineEntityCache(new Config(false) {}) {
+          @Override
+          public void clear() {
+            clears[1]++;
+            super.clear();
+          }
+        };
+    RelationalEntityStore peer = new RelationalEntityStore();
+    RelationalBackend peerBackend = Mockito.mock(RelationalBackend.class);
+    FieldUtils.writeField(store, "cache", firstCache, true);
+    FieldUtils.writeField(peer, "backend", peerBackend, true);
+    FieldUtils.writeField(peer, "cache", secondCache, true);
+
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    try {
+      store.put(table, false);
+      peer.put(table, false);
+    } finally {
+      SqlSessions.closeOuterSessionForTest(true);
+    }
+    Assertions.assertEquals(1, clears[0]);
+    Assertions.assertEquals(1, clears[1]);
+
+    openSession(session);
+    try {
+      store.put(table, false);
+    } finally {
+      SqlSessions.closeOuterSessionForTest(true);
+    }
+    Assertions.assertEquals(2, clears[0]);
+    Assertions.assertEquals(1, clears[1]);
+  }
+
+  @Test
+  void testBeforeCommitFailureClosesSessionAndKeepsEarlierCleanup() throws Exception {
+    SqlSession session = Mockito.mock(SqlSession.class);
+    AtomicInteger earlierCleanup = new AtomicInteger();
+    openSession(session);
+    SqlSessions.onClose(() -> {}, earlierCleanup::incrementAndGet);
+    SqlSessions.onClose(
+        () -> {
+          throw new IllegalStateException("before commit");
+        },
+        () -> Assertions.fail("cleanup must not run when beforeCommit failed"));
+
+    IllegalStateException thrown =
+        Assertions.assertThrows(
+            IllegalStateException.class, () -> SqlSessions.closeOuterSessionForTest(true));
+    Assertions.assertEquals("before commit", thrown.getMessage());
+    Mockito.verify(session).rollback(true);
+    Mockito.verify(session).close();
+    Mockito.verify(session, Mockito.never()).commit();
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
+    Assertions.assertEquals(1, earlierCleanup.get());
+
+    SqlSessions.rollbackAndCloseSqlSession();
+    Mockito.verify(session, Mockito.times(1)).close();
+  }
+
+  @Test
+  void testOnCloseWithoutSessionFailsAndDoesNotRunLater() throws Exception {
+    AtomicBoolean ran = new AtomicBoolean();
+    Assertions.assertThrows(
+        IllegalStateException.class,
+        () ->
+            SqlSessions.onClose(
+                () -> ran.set(true),
+                () -> {
+                  ran.set(true);
+                }));
+
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    try {
+      Assertions.assertFalse(ran.get());
+    } finally {
+      SqlSessions.closeOuterSessionForTest(true);
+    }
+    Assertions.assertFalse(ran.get());
+  }
+
+  @Test
+  void testCleanupFailureAfterSuccessfulCommitDoesNotFailTheCaller() throws Exception {
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    SqlSessions.onClose(
+        () -> {},
+        () -> {
+          throw new IllegalStateException("clear failed");
+        });
+
+    Assertions.assertDoesNotThrow(() -> SqlSessions.closeOuterSessionForTest(true));
+    Mockito.verify(session).commit();
+    Mockito.verify(session).close();
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
+  }
+
+  @Test
+  void testCleanupFailureAfterFailedCommitStaysAttachedToTheCommitFailure() throws Exception {
+    SqlSession session = Mockito.mock(SqlSession.class);
+    Mockito.doThrow(new IllegalStateException("commit failed")).when(session).commit();
+    openSession(session);
+    SqlSessions.onClose(
+        () -> {},
+        () -> {
+          throw new IllegalStateException("clear failed");
+        });
+
+    IllegalStateException thrown =
+        Assertions.assertThrows(
+            IllegalStateException.class, () -> SqlSessions.closeOuterSessionForTest(true));
+    Assertions.assertEquals("commit failed", thrown.getMessage());
+    Assertions.assertEquals(1, thrown.getSuppressed().length);
+    Assertions.assertEquals("clear failed", thrown.getSuppressed()[0].getMessage());
+    Mockito.verify(session).close();
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
   }
 
   @Test

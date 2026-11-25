@@ -37,6 +37,18 @@ public interface EntityCache extends SupportsEntityStoreCache {
   Coherence coherence();
 
   /**
+   * Invalidation epoch advanced by invalidate and {@link #clear} on this cache instance. A
+   * publisher that sampled the value before a database read must skip the fill when it has changed,
+   * so a clear performed by another store on the same cache cannot be undone by a stale row. Caches
+   * that never retain entries may leave this at {@code 0}.
+   *
+   * @return the current invalidation epoch of this cache
+   */
+  default long invalidationEpoch() {
+    return 0L;
+  }
+
+  /**
    * Clears all entries from the cache, including data and index, resetting it to an empty state.
    */
   void clear();

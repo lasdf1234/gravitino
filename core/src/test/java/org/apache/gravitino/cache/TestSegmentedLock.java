@@ -370,16 +370,51 @@ public class TestSegmentedLock {
     // First clearing operation should succeed
     assertDoesNotThrow(() -> lock.withGlobalLock(() -> {}));
 
-    // Second concurrent clearing operation should fail
+    // Re-entering a global operation on the same thread still fails (would deadlock if it waited).
     assertThrows(
         IllegalStateException.class,
         () -> {
           lock.withGlobalLock(
               () -> {
-                // Try to start another clearing operation
                 lock.withGlobalLock(() -> {});
               });
         });
+  }
+
+  @Test
+  @Timeout(5)
+  void testOverlappingGlobalClearsBothRun() throws InterruptedException {
+    SegmentedLock lock = new SegmentedLock(4);
+    CountDownLatch firstEntered = new CountDownLatch(1);
+    CountDownLatch releaseFirst = new CountDownLatch(1);
+    AtomicInteger ran = new AtomicInteger();
+
+    Thread first =
+        new Thread(
+            () ->
+                lock.withGlobalLock(
+                    () -> {
+                      ran.incrementAndGet();
+                      firstEntered.countDown();
+                      try {
+                        releaseFirst.await();
+                      } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                      }
+                    }));
+    first.start();
+    assertTrue(firstEntered.await(2, TimeUnit.SECONDS));
+
+    Thread second = new Thread(() -> lock.withGlobalLock(ran::incrementAndGet));
+    second.start();
+    // Second must wait while the first global operation is still inside its action.
+    Thread.sleep(200);
+    assertEquals(1, ran.get());
+    releaseFirst.countDown();
+    first.join(2000);
+    second.join(2000);
+    assertEquals(2, ran.get());
+    assertFalse(lock.isClearing());
   }
 
   @Test

@@ -44,7 +44,7 @@ public class SegmentedLock {
    */
   private final ReentrantReadWriteLock globalGate = new ReentrantReadWriteLock(true);
 
-  /** True while a global operation is in progress, used to reject concurrent global operations. */
+  /** True while a global operation holds the write lock. */
   private final AtomicBoolean clearing = new AtomicBoolean(false);
 
   /**
@@ -230,33 +230,33 @@ public class SegmentedLock {
    * flight when this method is called: segment operations hold the {@code globalGate} read lock
    * across their whole critical section, and the write lock acquired here waits for all of them.
    *
+   * <p>Another thread's global operation waits on this write lock instead of failing. The write
+   * lock is reentrant, so a nested call on the thread that already holds it fails immediately
+   * rather than running inside the outer clear.
+   *
    * <p>Must not be called from inside a {@code withLock} action on the same instance: the read lock
    * cannot upgrade to the write lock. Such a call fails immediately instead of deadlocking.
    *
    * @param action The clearing action to execute
-   * @throws IllegalStateException if the current thread holds this lock's read lock or another
-   *     global operation is in progress
+   * @throws IllegalStateException if the current thread holds this lock's read lock or re-enters a
+   *     global operation
    */
   public void withGlobalLock(Runnable action) {
     if (globalGate.getReadHoldCount() > 0) {
       throw new IllegalStateException(
           "Cannot start a global operation while holding a segment lock");
     }
-
-    // Mark the global operation in progress, fail if another one is already running
-    if (!clearing.compareAndSet(false, true)) {
+    if (globalGate.isWriteLockedByCurrentThread()) {
       throw new IllegalStateException("Global operation already in progress");
     }
 
+    globalGate.writeLock().lock();
+    clearing.set(true);
     try {
-      globalGate.writeLock().lock();
-      try {
-        action.run();
-      } finally {
-        globalGate.writeLock().unlock();
-      }
+      action.run();
     } finally {
       clearing.set(false);
+      globalGate.writeLock().unlock();
     }
   }
 }

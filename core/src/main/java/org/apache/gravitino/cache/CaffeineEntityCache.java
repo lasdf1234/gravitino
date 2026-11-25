@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.Configs;
 import org.apache.gravitino.Entity;
@@ -105,6 +106,12 @@ public class CaffeineEntityCache extends BaseEntityCache {
 
   /** Segmented locking for better concurrency */
   private final SegmentedLock segmentedLock;
+
+  /**
+   * Advanced under the same lock that removes entries, so a publisher waiting on that lock observes
+   * the new value before it puts.
+   */
+  private final AtomicLong invalidationEpoch = new AtomicLong();
 
   /** Cache data structure. */
   private final Cache<EntityCacheKey, Entity> cacheData;
@@ -204,9 +211,16 @@ public class CaffeineEntityCache extends BaseEntityCache {
     return segmentedLock.withLock(
         key,
         () -> {
+          invalidationEpoch.incrementAndGet();
           invalidateHierarchy(key);
           return true;
         });
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public long invalidationEpoch() {
+    return invalidationEpoch.get();
   }
 
   /** {@inheritDoc} */
@@ -229,16 +243,31 @@ public class CaffeineEntityCache extends BaseEntityCache {
     return cacheIndex.size();
   }
 
-  /** {@inheritDoc} */
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The epoch advances and the entries are dropped before waiting for the global lock. A caller
+   * that already holds a segment lock cannot take that lock, and the wipe must still be visible
+   * before {@code clear()} returns. When the lock can be taken, the locked wipe removes anything
+   * published while the first wipe was in progress.
+   */
   @Override
   public void clear() {
-    segmentedLock.withGlobalLock(
-        () -> {
-          cacheData.invalidateAll();
-          synchronized (indexLock) {
-            cacheIndex = new ConcurrentRadixTree<>(new DefaultCharArrayNodeFactory());
-          }
-        });
+    dropAll();
+    try {
+      segmentedLock.withGlobalLock(this::dropAll);
+    } catch (IllegalStateException ignored) {
+      // This thread already holds a segment lock, so the read lock cannot become the write lock.
+      // The wipe above has already dropped the entries and advanced the epoch.
+    }
+  }
+
+  private void dropAll() {
+    invalidationEpoch.incrementAndGet();
+    cacheData.invalidateAll();
+    synchronized (indexLock) {
+      cacheIndex = new ConcurrentRadixTree<>(new DefaultCharArrayNodeFactory());
+    }
   }
 
   /** {@inheritDoc} */

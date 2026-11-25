@@ -118,8 +118,8 @@ public class RelationalEntityStore
   private final EntityChangeLogMetricsSource changeLogMetrics = new EntityChangeLogMetricsSource();
 
   // Advanced before every invalidation observed by this store, whether local or replayed from the
-  // change log. A shared cache without a local change-log listener needs its own distributed
-  // version check: this counter cannot detect changes made on another node.
+  // change log. Another store sharing this cache does not advance this counter; those publishes
+  // also compare EntityCache#invalidationEpoch(), which lives on the cache instance itself.
   private final AtomicLong cacheInvalidationEpoch = new AtomicLong();
 
   // One refcount map for every reason a cache hit must be ignored:
@@ -292,7 +292,6 @@ public class RelationalEntityStore
 
   @Override
   public boolean exists(NameIdentifier ident, Entity.EntityType entityType) throws IOException {
-    skipCache();
     // Same-key lock as get/publish so a mid-publication put cannot land between the blocked check
     // and contains.
     boolean cached =
@@ -325,6 +324,7 @@ public class RelationalEntityStore
         // insert still fences publication.
         beginPendingWrite(ident, type);
         long epochBeforeInsert = cacheInvalidationEpoch.get();
+        long cacheEpochBeforeInsert = cache.invalidationEpoch();
         try {
           backend.insert(e, false);
         } finally {
@@ -332,8 +332,8 @@ public class RelationalEntityStore
           // epoch fence below stays meaningful. Exact-key pending is enough to drop the stale row.
           releasePendingWrite(ident, type);
         }
-        cacheIfEpochUnchanged(e, epochBeforeInsert);
-        if (cacheInvalidationEpoch.get() != epochBeforeInsert) {
+        cacheIfEpochUnchanged(e, epochBeforeInsert, cacheEpochBeforeInsert);
+        if (epochChanged(epochBeforeInsert, cacheEpochBeforeInsert)) {
           // Publication was fenced; make sure the key stays empty for SHARED peer fills too.
           invalidateOrClear(ident, type);
         }
@@ -388,7 +388,6 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> E get(
       NameIdentifier ident, Entity.EntityType entityType, Class<E> e)
       throws NoSuchEntityException, IOException {
-    skipCache();
     Optional<E> cached =
         cache.withCacheLock(
             EntityCacheKey.of(ident, entityType),
@@ -402,14 +401,14 @@ public class RelationalEntityStore
 
     // DB I/O stays outside the cache lock so this thread never holds both.
     long epochBeforeRead = cacheInvalidationEpoch.get();
+    long cacheEpochBeforeRead = cache.invalidationEpoch();
     E entity = backend.get(ident, entityType);
-    cacheIfEpochUnchanged(entity, epochBeforeRead);
+    cacheIfEpochUnchanged(entity, epochBeforeRead, cacheEpochBeforeRead);
     return entity;
   }
 
   @Override
   public long getTableId(NameIdentifier ident) throws IOException {
-    skipCache();
     Entity.EntityType entityType = Entity.EntityType.TABLE;
     Optional<Long> cachedId =
         cache.withCacheLock(
@@ -432,7 +431,6 @@ public class RelationalEntityStore
   @Override
   public <E extends Entity & HasIdentifier> List<E> batchGet(
       List<NameIdentifier> idents, Entity.EntityType entityType, Class<E> clazz) {
-    skipCache();
     List<E> allEntities = new ArrayList<>();
     List<NameIdentifier> noCacheIdents =
         idents.stream()
@@ -454,9 +452,10 @@ public class RelationalEntityStore
     // reads use an epoch guard: ancestor invalidation can race a point read too, because ancestor
     // and child keys need not share a segment lock.
     long epochBeforeRead = cacheInvalidationEpoch.get();
+    long cacheEpochBeforeRead = cache.invalidationEpoch();
     List<E> fetchEntities = backend.batchGet(noCacheIdents, entityType);
     for (E entity : fetchEntities) {
-      cacheIfEpochUnchanged(entity, epochBeforeRead);
+      cacheIfEpochUnchanged(entity, epochBeforeRead, cacheEpochBeforeRead);
       allEntities.add(entity);
     }
     return allEntities;
@@ -949,7 +948,12 @@ public class RelationalEntityStore
     }
   }
 
-  private <E extends Entity & HasIdentifier> void cacheIfEpochUnchanged(E entity, long epoch) {
+  private boolean epochChanged(long storeEpoch, long cacheEpoch) {
+    return cacheInvalidationEpoch.get() != storeEpoch || cache.invalidationEpoch() != cacheEpoch;
+  }
+
+  private <E extends Entity & HasIdentifier> void cacheIfEpochUnchanged(
+      E entity, long storeEpoch, long cacheEpoch) {
     if (closingSessions.get() > 0 || SessionUtils.isInTransaction()) {
       return;
     }
@@ -961,7 +965,7 @@ public class RelationalEntityStore
     }
     NameIdentifier ident = entity.nameIdentifier();
     Entity.EntityType type = entity.type();
-    if (isPendingWrite(ident, type) || cacheInvalidationEpoch.get() != epoch) {
+    if (isPendingWrite(ident, type) || epochChanged(storeEpoch, cacheEpoch)) {
       return;
     }
     // Hide the entry until publish finishes. Rollback invalidate runs outside the segment lock:
@@ -973,13 +977,13 @@ public class RelationalEntityStore
       cache.withCacheLock(
           EntityCacheKey.of(ident, type),
           () -> {
-            if (isPendingWrite(ident, type) || cacheInvalidationEpoch.get() != epoch) {
+            if (isPendingWrite(ident, type) || epochChanged(storeEpoch, cacheEpoch)) {
               return;
             }
             cache.put(entity);
             published[0] = true;
           });
-      if (published[0] && (isPendingWrite(ident, type) || cacheInvalidationEpoch.get() != epoch)) {
+      if (published[0] && (isPendingWrite(ident, type) || epochChanged(storeEpoch, cacheEpoch))) {
         invalidateOrClear(ident, type);
       }
     } finally {
@@ -1105,8 +1109,9 @@ public class RelationalEntityStore
   }
 
   /**
-   * A store call inside an open SQL session must not publish what that session can see. The
-   * outermost close blocks every thread across commit or rollback, then clears the cache.
+   * Registers a full cache clear for a write inside an open SQL session. Reads do not call this.
+   * While {@link SessionUtils#isInTransaction()} is true they already ignore hits and skip fills,
+   * and clearing on close would drop entries that transaction did not change.
    */
   private void skipCache() {
     if (!SessionUtils.isInTransaction() || nestedWriteHeld.get()) {
