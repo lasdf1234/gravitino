@@ -38,6 +38,8 @@ public final class SqlSessions {
   private static final ThreadLocal<SqlSession> sessions = new ThreadLocal<>();
   private static final ThreadLocal<AtomicInteger> sessionCount =
       ThreadLocal.withInitial(() -> new AtomicInteger(0));
+  private static final ThreadLocal<Runnable> beforeCommitAction = new ThreadLocal<>();
+  private static final ThreadLocal<Runnable> afterCloseAction = new ThreadLocal<>();
 
   private SqlSessions() {}
 
@@ -115,6 +117,28 @@ public final class SqlSessions {
   }
 
   /**
+   * Runs {@code beforeCommit} before this thread's outermost session commits or rolls back, and
+   * {@code afterClose} after that session is closed. A later call replaces both actions.
+   *
+   * @param beforeCommit the action to run before commit or rollback
+   * @param afterClose the action to run after the session is closed
+   */
+  public static void onClose(Runnable beforeCommit, Runnable afterClose) {
+    beforeCommitAction.set(beforeCommit);
+    afterCloseAction.set(afterClose);
+  }
+
+  /**
+   * Closes the session bound for tests and runs the outer-close action.
+   *
+   * @param commit whether the close commits; otherwise it rolls back
+   */
+  @VisibleForTesting
+  public static void closeOuterSessionForTest(boolean commit) {
+    handleSessionClose(commit, !commit);
+  }
+
+  /**
    * Returns the connection of the current thread's open session without changing the session count.
    *
    * <p>Callers must not commit, roll back, or close the connection. The session owner commits it.
@@ -140,23 +164,35 @@ public final class SqlSessions {
     int count = sessionCount.get().decrementAndGet();
     if (count == 0) {
       try {
-        if (commit) {
-          sqlSession.commit();
-        } else if (rollback) {
-          // Force the JDBC rollback. A policy lifecycle hook can write on this connection without
-          // going
-          // through a mapped statement, and MyBatis skips rollback when the session looks clean.
-          // Closing that session then turns auto-commit back on, which would commit the hook write.
-          sqlSession.rollback(true);
+        Runnable beforeCommit = beforeCommitAction.get();
+        beforeCommitAction.remove();
+        if (beforeCommit != null) {
+          beforeCommit.run();
+        }
+        try {
+          if (commit) {
+            sqlSession.commit();
+          } else if (rollback) {
+            // Force the JDBC rollback. A policy lifecycle hook can write on this connection without
+            // going through a mapped statement, and MyBatis skips rollback when the session looks
+            // clean. Closing that session then turns auto-commit back on, which would commit the
+            // hook write.
+            sqlSession.rollback(true);
+          }
+        } finally {
+          try {
+            // Ensure the session is always closed
+            sqlSession.close();
+          } finally {
+            sessions.remove();
+            sessionCount.remove();
+          }
         }
       } finally {
-        try {
-          // Ensure the session is always closed
-          sqlSession.close();
-        } finally {
-          // Ensure ThreadLocal is always cleaned up
-          sessions.remove();
-          sessionCount.remove();
+        Runnable afterClose = afterCloseAction.get();
+        afterCloseAction.remove();
+        if (afterClose != null) {
+          afterClose.run();
         }
       }
     } else if (count < 0) {
@@ -166,6 +202,19 @@ public final class SqlSessions {
           "Session count is negative: {}. Resetting session count and removing session.", count);
       sessions.remove();
       sessionCount.remove();
+      try {
+        Runnable beforeCommit = beforeCommitAction.get();
+        beforeCommitAction.remove();
+        if (beforeCommit != null) {
+          beforeCommit.run();
+        }
+      } finally {
+        Runnable afterClose = afterCloseAction.get();
+        afterCloseAction.remove();
+        if (afterClose != null) {
+          afterClose.run();
+        }
+      }
     }
   }
 }

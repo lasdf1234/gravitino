@@ -61,7 +61,9 @@ import org.apache.gravitino.meta.NamespacedEntityId;
 import org.apache.gravitino.meta.TableEntity;
 import org.apache.gravitino.meta.TagEntity;
 import org.apache.gravitino.meta.TopicEntity;
+import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.gravitino.utils.NamespaceUtil;
+import org.apache.ibatis.session.SqlSession;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -97,6 +99,17 @@ public class TestRelationalEntityStore {
       throws IllegalAccessException {
     AtomicInteger count = cacheBlocks().get("w\0" + type.name() + "\0" + ident);
     return count != null && count.get() > 0;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void openSession(SqlSession session) throws IllegalAccessException {
+    ThreadLocal<SqlSession> sessions =
+        (ThreadLocal<SqlSession>) FieldUtils.readStaticField(SqlSessions.class, "sessions", true);
+    sessions.set(session);
+    ThreadLocal<AtomicInteger> sessionCount =
+        (ThreadLocal<AtomicInteger>)
+            FieldUtils.readStaticField(SqlSessions.class, "sessionCount", true);
+    sessionCount.set(new AtomicInteger(1));
   }
 
   @Test
@@ -192,6 +205,57 @@ public class TestRelationalEntityStore {
     } finally {
       cache.clear();
     }
+  }
+
+  @Test
+  void testOuterTransactionDoesNotPublishUntilSessionCloses() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog", "schema", "table");
+    TableEntity table = Mockito.mock(TableEntity.class);
+    Mockito.when(table.id()).thenReturn(7L);
+    Mockito.when(table.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(table.nameIdentifier()).thenReturn(ident);
+    CaffeineEntityCache cache = new CaffeineEntityCache(new Config(false) {});
+    FieldUtils.writeField(store, "cache", cache, true);
+    Mockito.when(backend.get(ident, Entity.EntityType.TABLE)).thenReturn(table);
+
+    store.put(table, false);
+    Assertions.assertTrue(cache.contains(ident, Entity.EntityType.TABLE));
+
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    try {
+      store.put(table, false);
+      Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+      Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
+      Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+    } finally {
+      SqlSessions.closeOuterSessionForTest(true);
+    }
+    Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+    Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
+    Assertions.assertTrue(cache.contains(ident, Entity.EntityType.TABLE));
+  }
+
+  @Test
+  void testOuterTransactionReadDoesNotPublishUncommittedEntity() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog", "schema", "table");
+    TableEntity table = Mockito.mock(TableEntity.class);
+    Mockito.when(table.id()).thenReturn(7L);
+    Mockito.when(table.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(table.nameIdentifier()).thenReturn(ident);
+    CaffeineEntityCache cache = new CaffeineEntityCache(new Config(false) {});
+    FieldUtils.writeField(store, "cache", cache, true);
+    Mockito.when(backend.get(ident, Entity.EntityType.TABLE)).thenReturn(table);
+
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    try {
+      Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
+      Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
+    } finally {
+      SqlSessions.closeOuterSessionForTest(false);
+    }
+    Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
   }
 
   @Test
