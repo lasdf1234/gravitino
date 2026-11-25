@@ -123,7 +123,7 @@ public final class SqlSessions {
    * @param beforeCommit the action to run before commit or rollback
    * @param afterClose the action to run after the session is closed
    */
-  public static void runOnOuterClose(Runnable beforeCommit, Runnable afterClose) {
+  public static void onClose(Runnable beforeCommit, Runnable afterClose) {
     beforeCommitAction.set(beforeCommit);
     afterCloseAction.set(afterClose);
   }
@@ -200,7 +200,11 @@ public final class SqlSessions {
           }
         }
       } finally {
-        runAfterCloseAction();
+        Runnable afterClose = afterCloseAction.get();
+        afterCloseAction.remove();
+        if (afterClose != null) {
+          afterClose.run();
+        }
       }
     } else if (count < 0) {
       // This should not happen if the session management is correct.
@@ -216,16 +220,12 @@ public final class SqlSessions {
           beforeCommit.run();
         }
       } finally {
-        runAfterCloseAction();
+        Runnable afterClose = afterCloseAction.get();
+        afterCloseAction.remove();
+        if (afterClose != null) {
+          afterClose.run();
+        }
       }
-    }
-  }
-
-  private static void runAfterCloseAction() {
-    Runnable afterClose = afterCloseAction.get();
-    afterCloseAction.remove();
-    if (afterClose != null) {
-      afterClose.run();
     }
   }
 }
