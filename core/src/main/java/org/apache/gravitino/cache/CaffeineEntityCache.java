@@ -246,23 +246,21 @@ public class CaffeineEntityCache extends BaseEntityCache {
   /**
    * {@inheritDoc}
    *
-   * <p>The epoch advances and the entries are dropped before waiting for the global lock. A caller
-   * that already holds a segment lock cannot take that lock, and the wipe must still be visible
-   * before {@code clear()} returns. When the lock can be taken, the locked wipe removes anything
-   * published while the first wipe was in progress.
+   * <p>Prefers a single wipe under the global lock so concurrent puts wait. If this thread already
+   * holds a segment lock, the write lock cannot be taken; the unlocked wipe still drops the entries
+   * and advances the epoch so {@code clear()} stays visible without failing the caller.
    */
   @Override
   public void clear() {
-    dropAll();
     try {
-      segmentedLock.withGlobalLock(this::dropAll);
+      segmentedLock.withGlobalLock(this::wipeAll);
     } catch (IllegalStateException ignored) {
-      // This thread already holds a segment lock, so the read lock cannot become the write lock.
-      // The wipe above has already dropped the entries and advanced the epoch.
+      // Same thread already holds a segment lock; cannot take the write lock.
+      wipeAll();
     }
   }
 
-  private void dropAll() {
+  private void wipeAll() {
     invalidationEpoch.incrementAndGet();
     cacheData.invalidateAll();
     synchronized (indexLock) {

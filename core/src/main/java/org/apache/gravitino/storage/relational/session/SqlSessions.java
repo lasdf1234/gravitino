@@ -40,7 +40,9 @@ public final class SqlSessions {
   private static final ThreadLocal<SqlSession> sessions = new ThreadLocal<>();
   private static final ThreadLocal<AtomicInteger> sessionCount =
       ThreadLocal.withInitial(() -> new AtomicInteger(0));
-  private static final ThreadLocal<List<CloseAction>> closeActions =
+  private static final ThreadLocal<List<Runnable>> beforeCommitActions =
+      ThreadLocal.withInitial(ArrayList::new);
+  private static final ThreadLocal<List<Runnable>> afterCloseActions =
       ThreadLocal.withInitial(ArrayList::new);
 
   private SqlSessions() {}
@@ -132,17 +134,8 @@ public final class SqlSessions {
     if (!hasActiveSession()) {
       throw new IllegalStateException("No active SQL session on the current thread");
     }
-    closeActions.get().add(new CloseAction(beforeCommit, afterClose));
-  }
-
-  /**
-   * Closes the session bound for tests and runs the outer-close action.
-   *
-   * @param commit whether the close commits; otherwise it rolls back
-   */
-  @VisibleForTesting
-  public static void closeOuterSessionForTest(boolean commit) {
-    handleSessionClose(commit, !commit);
+    beforeCommitActions.get().add(beforeCommit);
+    afterCloseActions.get().add(afterClose);
   }
 
   /**
@@ -170,36 +163,45 @@ public final class SqlSessions {
 
     int count = sessionCount.get().decrementAndGet();
     if (count == 0) {
-      finishOuterSession(sqlSession, commit, rollback);
+      closeOuterSession(sqlSession, commit, rollback);
     } else if (count < 0) {
       // This should not happen if the session management is correct.
       // Reset the count and remove the session to avoid further issues.
       LOG.warn(
           "Session count is negative: {}. Resetting session count and removing session.", count);
-      finishOuterSession(sqlSession, false, true);
+      closeOuterSession(sqlSession, false, true);
     }
   }
 
   /**
    * Runs every registered before-commit action, then commits or rolls back, then closes the
    * session. A before-commit failure rolls the session back and closes it, and that action's
-   * after-close is skipped. A failure while finishing the session is propagated. Cleanup that fails
+   * after-close is skipped. A failure while closing the session is propagated. Cleanup that fails
    * after the session has already been committed or rolled back and closed is logged and does not
    * fail the caller.
    */
-  private static void finishOuterSession(SqlSession sqlSession, boolean commit, boolean rollback) {
-    List<CloseAction> actions = closeActions.get();
-    closeActions.remove();
+  private static void closeOuterSession(SqlSession sqlSession, boolean commit, boolean rollback) {
+    List<Runnable> befores = beforeCommitActions.get();
+    List<Runnable> afters = afterCloseActions.get();
+    beforeCommitActions.remove();
+    afterCloseActions.remove();
+    List<Runnable> completedAfters = new ArrayList<>();
     RuntimeException failure = null;
     try {
-      for (CloseAction action : actions) {
-        if (action.beforeCommit == null) {
-          action.beforeCommitCompleted = true;
+      for (int i = 0; i < befores.size(); i++) {
+        Runnable beforeCommit = befores.get(i);
+        Runnable afterClose = afters.get(i);
+        if (beforeCommit == null) {
+          if (afterClose != null) {
+            completedAfters.add(afterClose);
+          }
           continue;
         }
         try {
-          action.beforeCommit.run();
-          action.beforeCommitCompleted = true;
+          beforeCommit.run();
+          if (afterClose != null) {
+            completedAfters.add(afterClose);
+          }
         } catch (RuntimeException exception) {
           failure = exception;
           break;
@@ -207,12 +209,12 @@ public final class SqlSessions {
       }
       try {
         if (failure != null) {
-          failure = rollbackPreserving(sqlSession, failure);
+          failure = rollbackOnFailure(sqlSession, failure);
         } else if (commit) {
           try {
             sqlSession.commit();
           } catch (RuntimeException exception) {
-            failure = rollbackPreserving(sqlSession, exception);
+            failure = rollbackOnFailure(sqlSession, exception);
           }
         } else if (rollback) {
           // Force the JDBC rollback. A policy lifecycle hook can write on this connection without
@@ -229,7 +231,7 @@ public final class SqlSessions {
         try {
           sqlSession.close();
         } catch (RuntimeException exception) {
-          failure = suppress(failure, exception);
+          failure = mergeFailure(failure, exception);
         } finally {
           sessions.remove();
           sessionCount.remove();
@@ -237,15 +239,12 @@ public final class SqlSessions {
       }
     } finally {
       RuntimeException sessionFailure = failure;
-      for (CloseAction action : actions) {
-        if (!action.beforeCommitCompleted || action.afterClose == null) {
-          continue;
-        }
+      for (Runnable afterClose : completedAfters) {
         try {
-          action.afterClose.run();
+          afterClose.run();
         } catch (RuntimeException exception) {
           if (sessionFailure != null) {
-            failure = suppress(failure, exception);
+            failure = mergeFailure(failure, exception);
           } else {
             LOG.warn(
                 "Cleanup after the SQL session closed failed. The transaction was already"
@@ -260,7 +259,7 @@ public final class SqlSessions {
     }
   }
 
-  private static RuntimeException rollbackPreserving(
+  private static RuntimeException rollbackOnFailure(
       SqlSession sqlSession, RuntimeException primary) {
     try {
       sqlSession.rollback(true);
@@ -270,22 +269,11 @@ public final class SqlSessions {
     return primary;
   }
 
-  private static RuntimeException suppress(RuntimeException primary, RuntimeException extra) {
+  private static RuntimeException mergeFailure(RuntimeException primary, RuntimeException extra) {
     if (primary == null) {
       return extra;
     }
     primary.addSuppressed(extra);
     return primary;
-  }
-
-  private static final class CloseAction {
-    private final Runnable beforeCommit;
-    private final Runnable afterClose;
-    private boolean beforeCommitCompleted;
-
-    private CloseAction(Runnable beforeCommit, Runnable afterClose) {
-      this.beforeCommit = beforeCommit;
-      this.afterClose = afterClose;
-    }
   }
 }

@@ -232,7 +232,7 @@ public class TestRelationalEntityStore {
       Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
       Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
     } finally {
-      SqlSessions.closeOuterSessionForTest(true);
+      SqlSessions.commitAndCloseSqlSession();
     }
     Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
     Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
@@ -256,7 +256,7 @@ public class TestRelationalEntityStore {
       Assertions.assertEquals(table, store.get(ident, Entity.EntityType.TABLE, TableEntity.class));
       Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
     } finally {
-      SqlSessions.closeOuterSessionForTest(false);
+      SqlSessions.rollbackAndCloseSqlSession();
     }
     Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
   }
@@ -296,7 +296,7 @@ public class TestRelationalEntityStore {
       Assertions.assertFalse(cache.contains(read, Entity.EntityType.TABLE));
       Assertions.assertTrue(cache.contains(warmed, Entity.EntityType.TABLE));
     } finally {
-      SqlSessions.closeOuterSessionForTest(true);
+      SqlSessions.commitAndCloseSqlSession();
     }
     Assertions.assertTrue(cache.contains(warmed, Entity.EntityType.TABLE));
     Assertions.assertFalse(cache.contains(read, Entity.EntityType.TABLE));
@@ -389,7 +389,7 @@ public class TestRelationalEntityStore {
       store.put(table, false);
       peer.put(table, false);
     } finally {
-      SqlSessions.closeOuterSessionForTest(true);
+      SqlSessions.commitAndCloseSqlSession();
     }
     Assertions.assertEquals(1, clears[0]);
     Assertions.assertEquals(1, clears[1]);
@@ -398,7 +398,7 @@ public class TestRelationalEntityStore {
     try {
       store.put(table, false);
     } finally {
-      SqlSessions.closeOuterSessionForTest(true);
+      SqlSessions.commitAndCloseSqlSession();
     }
     Assertions.assertEquals(2, clears[0]);
     Assertions.assertEquals(1, clears[1]);
@@ -418,7 +418,7 @@ public class TestRelationalEntityStore {
 
     IllegalStateException thrown =
         Assertions.assertThrows(
-            IllegalStateException.class, () -> SqlSessions.closeOuterSessionForTest(true));
+            IllegalStateException.class, () -> SqlSessions.commitAndCloseSqlSession());
     Assertions.assertEquals("before commit", thrown.getMessage());
     Mockito.verify(session).rollback(true);
     Mockito.verify(session).close();
@@ -447,7 +447,7 @@ public class TestRelationalEntityStore {
     try {
       Assertions.assertFalse(ran.get());
     } finally {
-      SqlSessions.closeOuterSessionForTest(true);
+      SqlSessions.commitAndCloseSqlSession();
     }
     Assertions.assertFalse(ran.get());
   }
@@ -462,7 +462,7 @@ public class TestRelationalEntityStore {
           throw new IllegalStateException("clear failed");
         });
 
-    Assertions.assertDoesNotThrow(() -> SqlSessions.closeOuterSessionForTest(true));
+    Assertions.assertDoesNotThrow(() -> SqlSessions.commitAndCloseSqlSession());
     Mockito.verify(session).commit();
     Mockito.verify(session).close();
     Assertions.assertFalse(SqlSessions.hasActiveSession());
@@ -481,7 +481,7 @@ public class TestRelationalEntityStore {
 
     IllegalStateException thrown =
         Assertions.assertThrows(
-            IllegalStateException.class, () -> SqlSessions.closeOuterSessionForTest(true));
+            IllegalStateException.class, () -> SqlSessions.commitAndCloseSqlSession());
     Assertions.assertEquals("commit failed", thrown.getMessage());
     Assertions.assertEquals(1, thrown.getSuppressed().length);
     Assertions.assertEquals("clear failed", thrown.getSuppressed()[0].getMessage());
