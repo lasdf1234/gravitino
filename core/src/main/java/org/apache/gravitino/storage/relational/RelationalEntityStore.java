@@ -33,6 +33,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -1137,18 +1138,27 @@ public class RelationalEntityStore
       return;
     }
     nestedWriteHeld.set(Boolean.TRUE);
-    SqlSessions.onClose(this::pauseCache, this::releaseCache);
+    // pauseRan belongs to this registration. Its after-close can run when an earlier beforeCommit
+    // failed and pause never ran, and that path must not decrement closingSessions.
+    AtomicBoolean pauseRan = new AtomicBoolean();
+    SqlSessions.onClose(() -> pauseCache(pauseRan), () -> releaseCache(pauseRan));
   }
 
-  private void pauseCache() {
+  private void pauseCache(AtomicBoolean pauseRan) {
     closingSessions.incrementAndGet();
+    pauseRan.set(true);
   }
 
-  private void releaseCache() {
+  private void releaseCache(AtomicBoolean pauseRan) {
+    boolean paused = pauseRan.get();
     try {
-      clearCache();
+      if (paused) {
+        clearCache();
+      }
     } finally {
-      closingSessions.decrementAndGet();
+      if (paused) {
+        closingSessions.decrementAndGet();
+      }
       nestedWriteHeld.remove();
     }
   }

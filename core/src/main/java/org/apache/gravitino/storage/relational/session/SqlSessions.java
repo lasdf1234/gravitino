@@ -122,12 +122,16 @@ public final class SqlSessions {
 
   /**
    * Runs {@code beforeCommit} before this thread's outermost session commits or rolls back, and
-   * {@code afterClose} after that session is closed. Each call adds one pair. Every pair registered
-   * for the session runs, in registration order, on the outermost close.
+   * {@code afterClose} after that session is closed. Each call adds one pair. Pairs run in
+   * registration order on the outermost close.
+   *
+   * <p>A {@code beforeCommit} that throws skips its own {@code afterClose} and every later {@code
+   * beforeCommit}. {@code afterClose} actions registered after that failure still run, so a
+   * participant can drop registration state. Those actions must tolerate their {@code beforeCommit}
+   * not having run.
    *
    * @param beforeCommit the action to run before commit or rollback
-   * @param afterClose the action to run after the session is closed when {@code beforeCommit}
-   *     returned
+   * @param afterClose the action to run after the session is closed
    * @throws IllegalStateException if the current thread has no open session
    */
   public static void onClose(Runnable beforeCommit, Runnable afterClose) {
@@ -176,11 +180,12 @@ public final class SqlSessions {
   /**
    * Closes the outermost SQL session.
    *
-   * <p>Order: run each {@code beforeCommit}, commit or roll back, close the session, then run the
-   * {@code afterClose} of every {@code beforeCommit} that returned. A {@code beforeCommit} that
-   * throws skips its own {@code afterClose} and every later pair, and the session is rolled back.
-   * If commit, rollback, or close throws, that exception is thrown. If the session finished and a
-   * later {@code afterClose} throws, the exception is logged and the caller still succeeds.
+   * <p>Order: run each {@code beforeCommit}, commit or roll back, close the session, then run
+   * {@code afterClose} actions. A {@code beforeCommit} that throws skips its own {@code afterClose}
+   * and later {@code beforeCommit} actions, and the session is rolled back. {@code afterClose} for
+   * pairs registered after the failure still runs. If commit, rollback, or close throws, that
+   * exception is thrown. If the session finished and a later {@code afterClose} throws, the
+   * exception is logged and the caller still succeeds.
    */
   private static void closeOuterSession(SqlSession sqlSession, boolean commit, boolean rollback) {
     List<Runnable> beforeCommits = beforeCommitActions.get();
@@ -198,7 +203,10 @@ public final class SqlSessions {
     }
   }
 
-  /** Runs before-commit callbacks in order. A failure stops the rest. */
+  /**
+   * Runs before-commit callbacks in order. A failure skips later before-commit callbacks and the
+   * failing pair's after-close, and schedules the after-close of every later pair.
+   */
   private static RuntimeException runBeforeCommits(
       List<Runnable> beforeCommits, List<Runnable> afterCloses, List<Runnable> afterClosesToRun) {
     for (int i = 0; i < beforeCommits.size(); i++) {
@@ -213,6 +221,7 @@ public final class SqlSessions {
       try {
         beforeCommit.run();
       } catch (RuntimeException exception) {
+        scheduleSkippedAfterCloses(afterCloses, afterClosesToRun, i + 1);
         return exception;
       }
       if (afterClose != null) {
@@ -220,6 +229,17 @@ public final class SqlSessions {
       }
     }
     return null;
+  }
+
+  /** Schedules after-close actions for pairs whose before-commit callback did not run. */
+  private static void scheduleSkippedAfterCloses(
+      List<Runnable> afterCloses, List<Runnable> afterClosesToRun, int fromIndex) {
+    for (int i = fromIndex; i < afterCloses.size(); i++) {
+      Runnable afterClose = afterCloses.get(i);
+      if (afterClose != null) {
+        afterClosesToRun.add(afterClose);
+      }
+    }
   }
 
   /**

@@ -246,18 +246,13 @@ public class CaffeineEntityCache extends BaseEntityCache {
   /**
    * {@inheritDoc}
    *
-   * <p>Prefers a single wipe under the global lock so concurrent puts wait. If this thread already
-   * holds a segment lock, the write lock cannot be taken; the unlocked wipe still drops the entries
-   * and advances the epoch so {@code clear()} stays visible without failing the caller.
+   * <p>The wipe runs under the global lock so concurrent puts wait and the data and index stay
+   * consistent. A caller that already holds a segment lock cannot take that lock and receives
+   * {@link IllegalStateException} instead of wiping without it.
    */
   @Override
   public void clear() {
-    try {
-      segmentedLock.withGlobalLock(this::wipeAll);
-    } catch (IllegalStateException ignored) {
-      // Same thread already holds a segment lock; cannot take the write lock.
-      wipeAll();
-    }
+    segmentedLock.withGlobalLock(this::wipeAll);
   }
 
   private void wipeAll() {

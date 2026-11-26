@@ -115,6 +115,11 @@ public class TestRelationalEntityStore {
     sessionCount.set(new AtomicInteger(1));
   }
 
+  private int closingSessions() throws IllegalAccessException {
+    AtomicInteger count = (AtomicInteger) FieldUtils.readField(store, "closingSessions", true);
+    return count.get();
+  }
+
   @Test
   void testUncachedInsertStillInvokesRelatedInvalidationAfterEpochChanges() throws Exception {
     BaseEntityCache cache = Mockito.mock(BaseEntityCache.class);
@@ -438,6 +443,54 @@ public class TestRelationalEntityStore {
 
     SqlSessions.rollbackAndCloseSqlSession();
     Mockito.verify(session, Mockito.times(1)).close();
+  }
+
+  @Test
+  void testEarlierBeforeCommitFailureLetsLaterStoreRegisterAgain() throws Exception {
+    NameIdentifier ident = NameIdentifier.of("metalake", "catalog", "schema", "table");
+    TableEntity table = Mockito.mock(TableEntity.class);
+    Mockito.when(table.id()).thenReturn(7L);
+    Mockito.when(table.type()).thenReturn(Entity.EntityType.TABLE);
+    Mockito.when(table.nameIdentifier()).thenReturn(ident);
+
+    int[] clears = new int[1];
+    CaffeineEntityCache cache =
+        new CaffeineEntityCache(new Config(false) {}) {
+          @Override
+          public void clear() {
+            clears[0]++;
+            super.clear();
+          }
+        };
+    FieldUtils.writeField(store, "cache", cache, true);
+
+    SqlSession session = Mockito.mock(SqlSession.class);
+    openSession(session);
+    SqlSessions.onClose(
+        () -> {
+          throw new IllegalStateException("before commit");
+        },
+        () -> Assertions.fail("cleanup must not run when beforeCommit failed"));
+    store.put(table, false);
+
+    IllegalStateException thrown =
+        Assertions.assertThrows(
+            IllegalStateException.class, () -> SqlSessions.commitAndCloseSqlSession());
+    Assertions.assertEquals("before commit", thrown.getMessage());
+    Mockito.verify(session).rollback(true);
+    Mockito.verify(session, Mockito.never()).commit();
+    Assertions.assertFalse(SqlSessions.hasActiveSession());
+    Assertions.assertEquals(0, clears[0]);
+    Assertions.assertEquals(0, closingSessions());
+
+    openSession(session);
+    try {
+      store.put(table, false);
+    } finally {
+      SqlSessions.commitAndCloseSqlSession();
+    }
+    Assertions.assertEquals(1, clears[0]);
+    Assertions.assertEquals(0, closingSessions());
   }
 
   @Test

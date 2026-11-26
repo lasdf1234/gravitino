@@ -69,23 +69,24 @@ public class TestCaffeineEntityCacheInvalidation {
   }
 
   @Test
-  void testClearWhileHoldingSegmentLockDropsEntryAndAdvancesEpoch() {
+  void testClearWhileHoldingSegmentLockFailsAndLeavesEntries() {
     TableEntity table =
         TestUtil.getTestTableEntity(3L, "table1", Namespace.of("metalake", "catalog1", "schema1"));
     cache.put(table);
     long epoch = cache.invalidationEpoch();
     NameIdentifier ident = table.nameIdentifier();
 
-    Assertions.assertDoesNotThrow(
-        () ->
-            cache.withCacheLock(
-                EntityCacheKey.of(ident, Entity.EntityType.TABLE),
-                () -> {
-                  cache.clear();
-                  Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
-                  Assertions.assertTrue(cache.invalidationEpoch() > epoch);
-                }));
+    cache.withCacheLock(
+        EntityCacheKey.of(ident, Entity.EntityType.TABLE),
+        () -> {
+          IllegalStateException thrown =
+              Assertions.assertThrows(IllegalStateException.class, cache::clear);
+          Assertions.assertTrue(thrown.getMessage().contains("segment lock"));
+          Assertions.assertTrue(cache.contains(ident, Entity.EntityType.TABLE));
+          Assertions.assertEquals(epoch, cache.invalidationEpoch());
+        });
 
+    cache.clear();
     Assertions.assertFalse(cache.contains(ident, Entity.EntityType.TABLE));
     Assertions.assertTrue(cache.invalidationEpoch() > epoch);
   }
