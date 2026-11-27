@@ -52,7 +52,6 @@ import org.apache.commons.io.FileUtils;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.storage.relational.mapper.CatalogMetaMapper;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
-import org.apache.gravitino.utils.ConsumedFailure;
 import org.apache.ibatis.session.SqlSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -224,7 +223,7 @@ public class TestSqlSession {
   @Test
   public void testCloseListenerOutOfMemoryIsRecordedAndCommitSucceeds() {
     AtomicReference<Throwable> recorded = new AtomicReference<>();
-    ConsumedFailure.setRecorder(recorded::set);
+    SqlSessions.setCloseFailureRecorder(recorded::set);
     Runnable listener =
         () -> {
           throw new OutOfMemoryError("metaspace");
@@ -238,7 +237,7 @@ public class TestSqlSession {
       assertEquals("metaspace", recorded.get().getMessage());
     } finally {
       SqlSessions.removeClosedListener(listener);
-      ConsumedFailure.setRecorder(null);
+      SqlSessions.setCloseFailureRecorder(null);
     }
   }
 

@@ -55,7 +55,6 @@ import org.apache.gravitino.policy.PolicyContents;
 import org.apache.gravitino.storage.RandomIdGenerator;
 import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
-import org.apache.gravitino.utils.ConsumedFailure;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
 import org.junit.jupiter.api.AfterEach;
@@ -388,7 +387,7 @@ public class TestRelationalEntityStoreUncommittedCache {
   void testDeferredReleaseOutOfMemoryStillCommits() throws Exception {
     NameIdentifier ident = NameIdentifierUtil.ofPolicy(METALAKE, "oom_after_commit");
     AtomicReference<Throwable> recorded = new AtomicReference<>();
-    ConsumedFailure.setRecorder(recorded::set);
+    SqlSessions.setCloseFailureRecorder(recorded::set);
     EntityCache throwing = Mockito.spy(cache);
     Mockito.doThrow(new OutOfMemoryError("metaspace"))
         .when(throwing)
@@ -400,7 +399,7 @@ public class TestRelationalEntityStoreUncommittedCache {
       SessionUtils.commitTransaction();
     } finally {
       FieldUtils.writeField(store, "cache", cache, true);
-      ConsumedFailure.setRecorder(null);
+      SqlSessions.setCloseFailureRecorder(null);
       rollbackIfOpen();
     }
 
