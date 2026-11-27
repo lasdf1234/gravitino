@@ -20,7 +20,12 @@ package org.apache.gravitino.catalog.lakehouse.iceberg.utils;
 
 import java.nio.file.Path;
 import java.util.Map;
+import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergColumn;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergTable;
+import org.apache.gravitino.meta.AuditInfo;
+import org.apache.gravitino.rel.SupportsPartitionSpecs;
+import org.apache.gravitino.rel.expressions.transforms.Transform;
+import org.apache.gravitino.rel.expressions.transforms.Transforms;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.TableMetadata;
@@ -52,5 +57,79 @@ class TestIcebergTablePropertiesUtil {
     Assertions.assertEquals(1, evolved.defaultSpecId());
     Assertions.assertEquals(
         "1", IcebergTable.fromIcebergTable(evolved, "events").properties().get("default-spec-id"));
+  }
+
+  @Test
+  void testBuilderHydratesDefaultPartitionSpec() {
+    Transform[] partitioning = new Transform[] {Transforms.identity("id")};
+    IcebergTable built =
+        IcebergTable.builder()
+            .withName("events")
+            .withColumns(new IcebergColumn[0])
+            .withPartitioning(partitioning)
+            .withAuditInfo(AuditInfo.EMPTY)
+            .build();
+    SupportsPartitionSpecs specs = built.supportsPartitionSpecs();
+    Assertions.assertEquals(0, specs.defaultPartitionSpecId());
+    Assertions.assertEquals(1, specs.partitionSpecs().size());
+    Assertions.assertArrayEquals(built.partitioning(), specs.partitionSpecs().get(0));
+    Assertions.assertNotSame(built.partitioning(), specs.partitionSpecs().get(0));
+    Assertions.assertNotSame(partitioning, built.partitioning());
+    Assertions.assertNotSame(partitioning, specs.partitionSpecs().get(0));
+    partitioning[0] = Transforms.identity("mutated");
+    Assertions.assertArrayEquals(new Transform[] {Transforms.identity("id")}, built.partitioning());
+    Assertions.assertArrayEquals(
+        new Transform[] {Transforms.identity("id")}, specs.partitionSpecs().get(0));
+  }
+
+  @Test
+  void testBuilderNormalizesNullPartitioning() {
+    IcebergTable built =
+        IcebergTable.builder()
+            .withName("events")
+            .withColumns(new IcebergColumn[0])
+            .withAuditInfo(AuditInfo.EMPTY)
+            .build();
+    Assertions.assertArrayEquals(Transforms.EMPTY_TRANSFORM, built.partitioning());
+    SupportsPartitionSpecs specs = built.supportsPartitionSpecs();
+    Assertions.assertEquals(0, specs.defaultPartitionSpecId());
+    Assertions.assertArrayEquals(
+        Transforms.EMPTY_TRANSFORM, specs.partitionSpecs().get(specs.defaultPartitionSpecId()));
+  }
+
+  @Test
+  void testFromIcebergTableExposesAllPartitionSpecs() {
+    Schema schema = new Schema(Types.NestedField.required(1, "id", Types.LongType.get()));
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            schema, PartitionSpec.unpartitioned(), temporaryDirectory.toUri().toString(), Map.of());
+    IcebergTable unpartitioned = IcebergTable.fromIcebergTable(metadata, "events");
+    SupportsPartitionSpecs unpartitionedSpecs = unpartitioned.supportsPartitionSpecs();
+    Assertions.assertEquals(0, unpartitionedSpecs.defaultPartitionSpecId());
+    Assertions.assertEquals(1, unpartitionedSpecs.partitionSpecs().size());
+    Assertions.assertArrayEquals(
+        Transforms.EMPTY_TRANSFORM, unpartitionedSpecs.partitionSpecs().get(0));
+    Assertions.assertArrayEquals(
+        unpartitioned.partitioning(),
+        unpartitionedSpecs.partitionSpecs().get(unpartitionedSpecs.defaultPartitionSpecId()));
+
+    TableMetadata evolved =
+        TableMetadata.buildFrom(metadata)
+            .setDefaultPartitionSpec(PartitionSpec.builderFor(schema).identity("id").build())
+            .build();
+    IcebergTable partitioned = IcebergTable.fromIcebergTable(evolved, "events");
+    SupportsPartitionSpecs specs = partitioned.supportsPartitionSpecs();
+    Assertions.assertEquals(1, specs.defaultPartitionSpecId());
+    Assertions.assertEquals(2, specs.partitionSpecs().size());
+    Assertions.assertTrue(specs.partitionSpecs().containsKey(specs.defaultPartitionSpecId()));
+    Assertions.assertArrayEquals(Transforms.EMPTY_TRANSFORM, specs.partitionSpecs().get(0));
+    Transform[] identity = specs.partitionSpecs().get(1);
+    Assertions.assertEquals(1, identity.length);
+    Assertions.assertEquals(Transforms.identity("id"), identity[0]);
+    Assertions.assertArrayEquals(partitioned.partitioning(), identity);
+    Assertions.assertArrayEquals(
+        partitioned.partitioning(), specs.partitionSpecs().get(specs.defaultPartitionSpecId()));
+    Assertions.assertNotSame(
+        partitioned.partitioning(), specs.partitionSpecs().get(specs.defaultPartitionSpecId()));
   }
 }
