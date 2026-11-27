@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -80,7 +81,9 @@ import org.apache.gravitino.semantic.SemanticModelMetric;
 import org.apache.gravitino.semantic.SemanticModelRevision;
 import org.apache.gravitino.semantic.SemanticModelRevisionSelector;
 import org.apache.gravitino.storage.relational.service.EntityIdService;
+import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.gravitino.storage.relational.utils.ExceptionUtils;
+import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.tag.TagValue;
 import org.apache.gravitino.utils.Executable;
 import org.slf4j.Logger;
@@ -128,6 +131,13 @@ public class RelationalEntityStore
   // while a value is being published and may still be rolled back.
   private final ConcurrentHashMap<String, AtomicInteger> cacheBlocks = new ConcurrentHashMap<>();
 
+  // Writes whose cache block waits for the owner's outermost SQL session to close. Other threads
+  // read this queue and drop an entry when that thread is gone.
+  private final ConcurrentLinkedQueue<DeferredPendingWrite> deferredWrites =
+      new ConcurrentLinkedQueue<>();
+
+  private final Runnable sessionClosedListener = this::endDeferredWrites;
+
   // Non-null only for a LOCAL_PER_NODE cache, which needs cross-node invalidation. SHARED and NONE
   // caches have no per-node copy to invalidate, so no listener is registered.
   @Nullable private EntityCacheChangeLogListener entityCacheChangeLogListener;
@@ -152,6 +162,7 @@ public class RelationalEntityStore
     RelationalEntityStore store = new RelationalEntityStore();
     store.backend = backend;
     store.cache = new NoOpsCache(config);
+    SqlSessions.addOutermostSessionClosedListener(store.sessionClosedListener);
     EntityIdService.initialize(new RelationalEntityStoreIdResolver());
     return store;
   }
@@ -197,6 +208,7 @@ public class RelationalEntityStore
 
     this.entityChangeLogPoller.start();
     this.entityChangeLogCleaner.start();
+    SqlSessions.addOutermostSessionClosedListener(sessionClosedListener);
   }
 
   /**
@@ -334,28 +346,33 @@ public class RelationalEntityStore
       throws IOException, EntityAlreadyExistsException {
     NameIdentifier ident = e.nameIdentifier();
     Entity.EntityType type = e.type();
+    // Captured before this call opens its own session. An already-open session is the caller's
+    // transaction: the backend will not commit, so the block stays until that session closes.
+    boolean deferRelease = SessionUtils.isInTransaction();
     try {
       if (overwritten) {
         // Drop the cache and block refill before the overwrite commits. Do not publish {@code e}:
         // the database may keep the identity and version of the row it already had.
-        beginPendingWrite(ident, type);
+        beginOrDeferWrite(ident, type, deferRelease);
         try {
           backend.insert(e, true);
         } finally {
-          endPendingWrite(ident, type);
+          endOrDeferWrite(ident, type, deferRelease);
         }
       } else {
         // Clear any same-key stale row (for example a peer-dropped identity still cached here)
         // before insert, but keep the pre-insert epoch so a concurrent ancestor delete during
         // insert still fences publication.
-        beginPendingWrite(ident, type);
+        beginOrDeferWrite(ident, type, deferRelease);
         long epochBeforeInsert = cacheInvalidationEpoch.get();
         try {
           backend.insert(e, false);
         } finally {
           // Release without endPendingWrite's post-commit invalidate/epoch bumps so the insert
           // epoch fence below stays meaningful. Exact-key pending is enough to drop the stale row.
-          releasePendingWrite(ident, type);
+          // A nested insert keeps the block; the outermost session releases it with
+          // endPendingWrite.
+          releaseOrDeferWrite(ident, type, deferRelease);
         }
         cacheIfEpochUnchanged(e, epochBeforeInsert);
         if (cacheInvalidationEpoch.get() != epochBeforeInsert) {
@@ -372,11 +389,12 @@ public class RelationalEntityStore
   public <E extends Entity & HasIdentifier> E update(
       NameIdentifier ident, Class<E> type, Entity.EntityType entityType, Function<E, E> updater)
       throws IOException, NoSuchEntityException, EntityAlreadyExistsException {
-    // Populated inside the wrapped updater when it renames; ended in finally. The updater runs
-    // inside backend.updateEntity before a backend-owned commit, so the new name is pending
-    // before the renamed row is visible to other connections.
+    // Populated inside the wrapped updater when it renames. The updater runs inside the backend
+    // before a backend-owned commit, so the new name is pending before the renamed row is visible
+    // to other connections. An outer session keeps both names pending until that session closes.
+    boolean deferRelease = SessionUtils.isInTransaction();
     NameIdentifier[] renamedTo = new NameIdentifier[1];
-    beginPendingWrite(ident, entityType);
+    beginOrDeferWrite(ident, entityType, deferRelease);
     try {
       try {
         return backend.update(
@@ -388,7 +406,7 @@ public class RelationalEntityStore
               if (!ident.equals(newIdent)) {
                 // Record renamedTo only after begin succeeds so finally does not end a pending
                 // write that never started.
-                beginPendingWrite(newIdent, entityType);
+                beginOrDeferWrite(newIdent, entityType, deferRelease);
                 renamedTo[0] = newIdent;
               }
               return updated;
@@ -397,13 +415,15 @@ public class RelationalEntityStore
         throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
       }
     } finally {
-      // Release rename target even if ending the old name fails (or the reverse).
-      try {
-        if (renamedTo[0] != null) {
-          endPendingWrite(renamedTo[0], entityType);
+      if (!deferRelease) {
+        // Release rename target even if ending the old name fails (or the reverse).
+        try {
+          if (renamedTo[0] != null) {
+            endPendingWrite(renamedTo[0], entityType);
+          }
+        } finally {
+          endPendingWrite(ident, entityType);
         }
-      } finally {
-        endPendingWrite(ident, entityType);
       }
     }
   }
@@ -486,7 +506,8 @@ public class RelationalEntityStore
   @Override
   public boolean delete(NameIdentifier ident, Entity.EntityType entityType, boolean cascade)
       throws IOException {
-    beginPendingWrite(ident, entityType);
+    boolean deferRelease = SessionUtils.isInTransaction();
+    beginOrDeferWrite(ident, entityType, deferRelease);
     try {
       return backend.delete(ident, entityType, cascade);
     } catch (NoSuchEntityException e) {
@@ -494,7 +515,7 @@ public class RelationalEntityStore
     } catch (RuntimeException re) {
       throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
     } finally {
-      endPendingWrite(ident, entityType);
+      endOrDeferWrite(ident, entityType, deferRelease);
     }
   }
 
@@ -505,13 +526,14 @@ public class RelationalEntityStore
       Class<E> clazz,
       Consumer<E> postDeleteAction)
       throws IOException {
-    beginPendingWrite(ident, entityType);
+    boolean deferRelease = SessionUtils.isInTransaction();
+    beginOrDeferWrite(ident, entityType, deferRelease);
     try {
       return backend.deleteAndGet(ident, entityType, clazz, postDeleteAction);
     } catch (RuntimeException re) {
       throw ExceptionUtils.lockWaitTimeoutAsConflict(re, entityType, ident);
     } finally {
-      endPendingWrite(ident, entityType);
+      endOrDeferWrite(ident, entityType, deferRelease);
     }
   }
 
@@ -519,13 +541,14 @@ public class RelationalEntityStore
   public Optional<SchemaEntity> deleteSchemaAndGet(
       NameIdentifier ident, boolean cascadeFunctions, Consumer<SchemaEntity> postDeleteAction)
       throws IOException {
-    beginPendingWrite(ident, Entity.EntityType.SCHEMA);
+    boolean deferRelease = SessionUtils.isInTransaction();
+    beginOrDeferWrite(ident, Entity.EntityType.SCHEMA, deferRelease);
     try {
       return backend.deleteSchemaAndGet(ident, cascadeFunctions, postDeleteAction);
     } catch (RuntimeException re) {
       throw ExceptionUtils.lockWaitTimeoutAsConflict(re, Entity.EntityType.SCHEMA, ident);
     } finally {
-      endPendingWrite(ident, Entity.EntityType.SCHEMA);
+      endOrDeferWrite(ident, Entity.EntityType.SCHEMA, deferRelease);
     }
   }
 
@@ -546,6 +569,11 @@ public class RelationalEntityStore
 
   @Override
   public void close() throws IOException {
+    SqlSessions.removeOutermostSessionClosedListener(sessionClosedListener);
+    DeferredPendingWrite pending;
+    while ((pending = deferredWrites.poll()) != null) {
+      releasePendingWrite(pending.ident, pending.entityType);
+    }
     // Keep shutting the remaining components down even if one of them fails, and tolerate a
     // half-finished initialize() that left some of them null.
     IOException failure = null;
@@ -974,6 +1002,15 @@ public class RelationalEntityStore
       cache.put(entity);
       return;
     }
+    // put, get, and batchGet all publish here, after the backend call has released its own
+    // session reference. A still-open session is the caller's outer transaction: this connection
+    // can read a row that other connections must not see until commit, and must not see at all if
+    // the transaction rolls back. Skip the write. The caller still receives the entity, and the
+    // next read after the transaction closes fills the cache. A standalone put runs this only
+    // after its own commit, so it still warms the cache.
+    if (SessionUtils.isInTransaction()) {
+      return;
+    }
     NameIdentifier ident = entity.nameIdentifier();
     Entity.EntityType type = entity.type();
     if (isPendingWrite(ident, type) || cacheInvalidationEpoch.get() != epoch) {
@@ -1020,6 +1057,83 @@ public class RelationalEntityStore
         e.addSuppressed(clearFailure);
       }
       throw e;
+    }
+  }
+
+  /**
+   * Marks {@code ident} pending. When {@code deferRelease} is true, the block stays until the
+   * outermost SQL session on this thread closes, including when this call throws afterwards.
+   */
+  private void beginOrDeferWrite(
+      NameIdentifier ident, Entity.EntityType entityType, boolean deferRelease) {
+    beginPendingWrite(ident, entityType);
+    if (!deferRelease) {
+      return;
+    }
+    deferredWrites.add(new DeferredPendingWrite(Thread.currentThread(), ident, entityType));
+  }
+
+  /**
+   * Ends the pending write now, or leaves it for the outermost session when {@code deferRelease}.
+   */
+  private void endOrDeferWrite(
+      NameIdentifier ident, Entity.EntityType entityType, boolean deferRelease) {
+    if (!deferRelease) {
+      endPendingWrite(ident, entityType);
+    }
+  }
+
+  /**
+   * Releases the pending write without another invalidation, or leaves it for the outermost session
+   * when {@code deferRelease}. The deferred path uses {@link #endPendingWrite} so the block is
+   * still held across the outer commit.
+   */
+  private void releaseOrDeferWrite(
+      NameIdentifier ident, Entity.EntityType entityType, boolean deferRelease) {
+    if (!deferRelease) {
+      releasePendingWrite(ident, entityType);
+    }
+  }
+
+  /** Ends this thread's deferred writes after its outermost SQL session has closed. */
+  private void endDeferredWrites() {
+    Thread current = Thread.currentThread();
+    List<DeferredPendingWrite> mine = new ArrayList<>();
+    for (DeferredPendingWrite pending : deferredWrites) {
+      if (pending.owner == current) {
+        mine.add(pending);
+      }
+    }
+    for (DeferredPendingWrite pending : mine) {
+      if (!deferredWrites.remove(pending)) {
+        continue;
+      }
+      try {
+        endPendingWrite(pending.ident, pending.entityType);
+      } catch (RuntimeException | Error e) {
+        LOGGER.warn(
+            "Failed to release a cache block deferred until the SQL session closed for {} {}",
+            pending.entityType,
+            pending.ident,
+            e);
+      }
+    }
+  }
+
+  /**
+   * Drops a deferred write whose owner thread is gone. Releasing the refcount does not invalidate,
+   * so this is safe while the caller holds a cache key lock. {@link #beginPendingWrite} already
+   * dropped the entry.
+   */
+  private void releaseDeadPending() {
+    Thread current = Thread.currentThread();
+    for (DeferredPendingWrite pending : deferredWrites) {
+      if (pending.owner == current || pending.owner.isAlive()) {
+        continue;
+      }
+      if (deferredWrites.remove(pending)) {
+        releasePendingWrite(pending.ident, pending.entityType);
+      }
     }
   }
 
@@ -1094,6 +1208,7 @@ public class RelationalEntityStore
   }
 
   private boolean isPendingWrite(NameIdentifier ident, Entity.EntityType entityType) {
+    releaseDeadPending();
     AtomicInteger exact = cacheBlocks.get("w\0" + entityType.name() + "\0" + ident);
     if (exact != null && exact.get() > 0) {
       return true;
@@ -1122,5 +1237,18 @@ public class RelationalEntityStore
     // release them; clearing the map would let readers refill while a write is still committing.
     cacheInvalidationEpoch.incrementAndGet();
     cache.clear();
+  }
+
+  /** A pending write that stays blocked until the owner's outermost SQL session closes. */
+  private static final class DeferredPendingWrite {
+    private final Thread owner;
+    private final NameIdentifier ident;
+    private final Entity.EntityType entityType;
+
+    private DeferredPendingWrite(Thread owner, NameIdentifier ident, Entity.EntityType entityType) {
+      this.owner = owner;
+      this.ident = ident;
+      this.entityType = entityType;
+    }
   }
 }
