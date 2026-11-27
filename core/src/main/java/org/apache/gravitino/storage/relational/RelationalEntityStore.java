@@ -85,6 +85,7 @@ import org.apache.gravitino.storage.relational.session.SqlSessions;
 import org.apache.gravitino.storage.relational.utils.ExceptionUtils;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.apache.gravitino.tag.TagValue;
+import org.apache.gravitino.utils.ConsumedFailure;
 import org.apache.gravitino.utils.Executable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -1121,6 +1122,7 @@ public class RelationalEntityStore
       try {
         endPendingWrite(pending.ident, pending.entityType);
       } catch (RuntimeException | Error e) {
+        ConsumedFailure.record(e);
         LOGGER.warn(
             "Failed to release a cache block deferred until the SQL session closed for {} {}",
             pending.entityType,

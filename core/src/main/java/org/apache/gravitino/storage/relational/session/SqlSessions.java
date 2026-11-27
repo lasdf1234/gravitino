@@ -24,6 +24,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.gravitino.utils.ConsumedFailure;
 import org.apache.ibatis.session.SqlSession;
 import org.apache.ibatis.session.TransactionIsolationLevel;
 import org.slf4j.Logger;
@@ -212,6 +213,7 @@ public final class SqlSessions {
       try {
         listener.run();
       } catch (RuntimeException | Error e) {
+        ConsumedFailure.record(e);
         LOG.warn("Failed to finish work deferred until the outermost SQL session closed", e);
       }
     }
